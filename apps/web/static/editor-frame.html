@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  The document the HWP editor runs in (src/editor-frame/main.ts). As the
+  viewer's (viewer-frame.html), the app puts it in an iframe with
+  `sandbox="allow-scripts"`, so it has no origin of its own: it cannot read
+  the app's cookies, storage or page. The policy below is the viewer's: it
+  keeps the frame off the network (scripts, style sheets and fonts come from
+  the app's own bundle, and `fetch` reaches nothing), and `wasm-unsafe-eval`
+  lets rhwp, the engine, run as WebAssembly; it does not allow JavaScript's
+  eval. The editor's workers would be files of the bundle, which the policy
+  does not start (`worker-src blob:`): the one worker here is the viewer's
+  check of the bytes.
+
+  The body is filled with the editor's own page by the frame's program. The
+  address carries `?chrome=embed`, the editor's profile for a host that owns
+  opening and saving.
+-->
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src blob: data:; font-src 'self' blob: data:; media-src blob: data:; connect-src 'none'; worker-src blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>fvoci editor</title>
+    <script type="module" src="/src/editor-frame/main.ts"></script>
+  </head>
+  <body></body>
+</html>

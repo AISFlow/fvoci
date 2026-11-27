@@ -1,0 +1,535 @@
+[
+  {
+    "name": "create board Cards",
+    "request": "POST /api/v1/w/<id:1>/boards as cards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "p1",
+          "name": "P1",
+          "options": [],
+          "type": "text"
+        },
+        {
+          "id": "p2",
+          "name": "P2",
+          "options": [],
+          "type": "text"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Cards",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "add viewer",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "viewer",
+      "userId": "<id:4>"
+    }
+  },
+  {
+    "name": "create",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as cards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🃏",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "create: quiet",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards?disableNotify=true as cards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "",
+      "id": "<id:6>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 2,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card two",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "create: viewer",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as cards-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to create card",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "create: malformed body",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as cards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing an object at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: unknown board",
+    "request": "POST /api/v1/w/<id:1>/boards/unknown-board/cards as cards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:3>/cards as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "boardId": "<id:3>",
+        "body": null,
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "hasBody": false,
+        "icon": "🃏",
+        "id": "<id:5>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
+        "modifiedBy": "<id:2>",
+        "number": 1,
+        "parentId": "",
+        "properties": {
+          "p1": "v1"
+        },
+        "tasksDone": 0,
+        "tasksTotal": 0,
+        "title": "Card one",
+        "updatedAt": "<ts>"
+      },
+      {
+        "boardId": "<id:3>",
+        "body": null,
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "hasBody": false,
+        "icon": "",
+        "id": "<id:6>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
+        "modifiedBy": "<id:2>",
+        "number": 2,
+        "parentId": "",
+        "properties": {},
+        "tasksDone": 0,
+        "tasksTotal": 0,
+        "title": "Card two",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "list: viewer",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:3>/cards as cards-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "boardId": "<id:3>",
+        "body": null,
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "hasBody": false,
+        "icon": "🃏",
+        "id": "<id:5>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
+        "modifiedBy": "<id:2>",
+        "number": 1,
+        "parentId": "",
+        "properties": {
+          "p1": "v1"
+        },
+        "tasksDone": 0,
+        "tasksTotal": 0,
+        "title": "Card one",
+        "updatedAt": "<ts>"
+      },
+      {
+        "boardId": "<id:3>",
+        "body": null,
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "hasBody": false,
+        "icon": "",
+        "id": "<id:6>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
+        "modifiedBy": "<id:2>",
+        "number": 2,
+        "parentId": "",
+        "properties": {},
+        "tasksDone": 0,
+        "tasksTotal": 0,
+        "title": "Card two",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "list: bad page",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      400,
+      {
+        "detail": "invalid `page` parameter: not a whole number",
+        "errors": [
+          {
+            "detail": "invalid `page` parameter: not a whole number",
+            "parameter": "page",
+            "reason": "invalid"
+          }
+        ],
+        "instance": "urn:uuid:<request-id>",
+        "requestId": "<request-id>",
+        "status": 400,
+        "title": "Bad request",
+        "type": "/problems/bad-request"
+      },
+      "alone"
+    ]
+  },
+  {
+    "name": "list: unknown board",
+    "request": "GET /api/v1/w/<id:1>/boards/unknown-board/cards as cards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "get",
+    "request": "GET /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🃏",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "get: viewer",
+    "request": "GET /api/v1/w/<id:1>/cards/<id:5> as cards-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🃏",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "get: unknown card",
+    "request": "GET /api/v1/w/<id:1>/cards/unknown-card as cards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "card not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "patch",
+    "request": "PATCH /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🂡",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1",
+        "p2": "v2"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one, renamed",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "patch: viewer",
+    "request": "PATCH /api/v1/w/<id:1>/cards/<id:5> as cards-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to patch card",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "patch: unknown card",
+    "request": "PATCH /api/v1/w/<id:1>/cards/unknown-card as cards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "card not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "patch: malformed body",
+    "request": "PATCH /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing an object at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "get after patch",
+    "request": "GET /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🂡",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1",
+        "p2": "v2"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one, renamed",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "insert content",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as cards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {},
+        "id": "<id:7>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:5>",
+        "title": "one",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {},
+        "id": "<id:8>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:5>",
+        "title": "two",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {},
+        "id": "<id:9>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:5>",
+        "title": "three",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "set content order",
+    "request": "PATCH /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "🂡",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {
+        "p1": "v1",
+        "p2": "v2"
+      },
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card one, renamed",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "move: the route is gone",
+    "request": "POST /api/v1/content-blocks/<id:7>/moveto/after/<id:9> as cards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  }
+]

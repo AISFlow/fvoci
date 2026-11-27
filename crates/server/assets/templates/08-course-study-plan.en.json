@@ -1,0 +1,662 @@
+{
+  "key": "course-study-plan",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "c8000000-0000-4000-8000-000000000001",
+    "kind": "course",
+    "title": "Two-Week Study Plan",
+    "description": "A built-in course template structured over two weeks, from core concepts and worked examples to practice problems and final review.",
+    "icon": "🎓",
+    "showDescription": true,
+    "cardProperties": []
+  },
+  "schedule": {
+    "startDate": "2026-12-01",
+    "targetDate": "2026-12-14",
+    "studyDays": 31
+  },
+  "views": [],
+  "cards": [],
+  "chapters": [
+    {
+      "id": "c8000001-0000-4000-8000-000000000001",
+      "type": "chapter",
+      "parentId": "",
+      "title": "Chapter 1. Setup and Core Concepts",
+      "fields": {
+        "order": "V"
+      }
+    },
+    {
+      "id": "c8000001-0000-4000-8000-000000000002",
+      "type": "chapter",
+      "parentId": "",
+      "title": "Chapter 2. Practice and Review",
+      "fields": {
+        "order": "W"
+      }
+    }
+  ],
+  "units": [
+    {
+      "id": "c8000002-0000-4000-8000-000000000001",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "Define Goals and Scope",
+      "fields": {
+        "order": "V",
+        "amount": 30,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-01"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Kickoff Checklist"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Setting the scope and daily study time up front makes it easy to rebalance if a week gets busy."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Write down three concrete outcomes for this course"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Review the full syllabus or textbook table of contents"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Check that the shared study days fit your weekly routine"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000002",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "Summarize Core Concepts",
+      "fields": {
+        "order": "W",
+        "amount": 20,
+        "amountUnit": "pages",
+        "scheduledDate": "2026-12-03"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Concept Comparison Table"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Capture easily confused definitions and principles in one table so review sessions stay quick."
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Concept"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Key Summary"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Common Pitfalls"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Core Principle"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "State the definition and conditions in one sentence"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Flag edge cases that are easy to miss"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Applied Pattern"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "List the step-by-step order used in problems"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Note how to tell it apart from similar patterns"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000003",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "Walk Through Worked Examples",
+      "fields": {
+        "order": "X",
+        "amount": 45,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-07"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Solution Walkthrough Notes"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Try each step before checking the solution, and mark every point where you hesitated."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Separate the given constraints from the target quantity first."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Write out intermediate reasoning without skipping steps."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Compare with one alternative approach in a single line."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000004",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000002",
+      "title": "Solve Practice Problems",
+      "fields": {
+        "order": "V",
+        "amount": 15,
+        "amountUnit": "problems",
+        "scheduledDate": "2026-12-10"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Practice Session Routine"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "When a concept feels fuzzy, revisit "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "c8000002-0000-4000-8000-000000000002"
+                }
+              },
+              {
+                "type": "text",
+                "text": " and track any missed items in the checklist below."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Complete 5 warm-up problems with a timer"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Solve 10 applied problems and grade your answers"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000005",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000002",
+      "title": "Review Mistakes and Final Check",
+      "fields": {
+        "order": "W",
+        "amount": 30,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-14"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Mistake Log Table"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Item"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Root Cause"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Retry Criterion"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Sample item"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Missed one constraint during calculation"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Explain the full solution without peeking at notes"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Retry missed problems one day later"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Summarize the hardest concept in three sentences in your own words"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

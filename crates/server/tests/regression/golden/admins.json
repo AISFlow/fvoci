@@ -1,0 +1,559 @@
+[
+  {
+    "name": "me: the first user",
+    "request": "GET /api/v1/users/me as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "root@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:1>",
+      "isAdmin": true,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "root"
+    }
+  },
+  {
+    "name": "me: a later user",
+    "request": "GET /api/v1/users/me as admins-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "admins-alice@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:2>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "admins-alice"
+    }
+  },
+  {
+    "name": "the first user, seen by another",
+    "request": "GET /api/v1/w/<id:3>/users/<id:1> as admins-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "firstName": "",
+      "id": "<id:1>",
+      "isAdmin": true,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "root"
+    }
+  },
+  {
+    "name": "workspace: administrator",
+    "request": "GET /api/v1/w/<id:3> as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "guestInvitations": true,
+      "id": "<id:3>",
+      "modifiedBy": "",
+      "settings": {},
+      "title": "The Firm",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "workspace: anybody else",
+    "request": "GET /api/v1/w/<id:3> as admins-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "guestInvitations": true,
+      "id": "<id:3>",
+      "modifiedBy": "",
+      "settings": {},
+      "title": "The Firm",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "workspaces: administrator",
+    "request": "GET /api/v1/users/me/workspaces as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "id": "<id:3>",
+        "kind": "shared",
+        "name": "The Firm",
+        "orgId": "<id:4>",
+        "passwordRequired": false,
+        "role": "admin",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:5>",
+        "kind": "shared",
+        "name": "",
+        "orgId": "<id:4>",
+        "passwordRequired": false,
+        "role": "member",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:6>",
+        "kind": "personal",
+        "name": "",
+        "orgId": "<id:7>",
+        "passwordRequired": false,
+        "role": "admin",
+        "ssoRequired": false
+      }
+    ]
+  },
+  {
+    "name": "workspaces: anybody else",
+    "request": "GET /api/v1/users/me/workspaces as admins-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "id": "<id:3>",
+        "kind": "shared",
+        "name": "The Firm",
+        "orgId": "<id:4>",
+        "passwordRequired": false,
+        "role": "member",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:5>",
+        "kind": "shared",
+        "name": "",
+        "orgId": "<id:4>",
+        "passwordRequired": false,
+        "role": "member",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:8>",
+        "kind": "personal",
+        "name": "",
+        "orgId": "<id:9>",
+        "passwordRequired": false,
+        "role": "admin",
+        "ssoRequired": false
+      }
+    ]
+  },
+  {
+    "name": "invite: not an administrator",
+    "request": "POST /api/v1/w/<id:3>/invitations as admins-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "only the administrators of the workspace invite its members",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "invite: no session",
+    "request": "POST /api/v1/w/<id:3>/invitations as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "invite: unknown workspace",
+    "request": "POST /api/v1/w/<id:10>/invitations as root",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "workspace not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old path: renew the token",
+    "request": "POST /api/v1/w/<id:3>/signup-token as root",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "invite",
+    "request": "POST /api/v1/w/<id:3>/invitations as root",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "createdBy": "<id:1>",
+      "expiresAt": "<ts>",
+      "id": "<id:11>",
+      "role": "member",
+      "token": "<secret>",
+      "uses": 0,
+      "workspaceId": "<id:3>"
+    }
+  },
+  {
+    "name": "invite: administrators",
+    "request": "POST /api/v1/w/<id:3>/invitations as root",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "an invitation makes a member or a guest",
+      "errors": [
+        {
+          "detail": "an invitation makes a member or a guest",
+          "pointer": "/role",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "invite: members to a board",
+    "request": "POST /api/v1/w/<id:3>/invitations as root",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "an invitation for members names no board",
+      "errors": [
+        {
+          "detail": "an invitation for members names no board",
+          "pointer": "/containerId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "register without an invitation",
+    "request": "POST /api/v1/register as anonymous",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "this server has its organization; an invitation lets you in",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invitation_required",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Invitation required",
+      "type": "/problems/invitation-required"
+    }
+  },
+  {
+    "name": "make: not an administrator",
+    "request": "PUT /api/v1/users/<id:12>/admin as admins-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "only an administrator of the instance may do this",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "admin_required",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Administrator required",
+      "type": "/problems/admin-required"
+    }
+  },
+  {
+    "name": "make: oneself, not an administrator",
+    "request": "PUT /api/v1/users/<id:2>/admin as admins-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "only an administrator of the instance may do this",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "admin_required",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Administrator required",
+      "type": "/problems/admin-required"
+    }
+  },
+  {
+    "name": "make: no session",
+    "request": "PUT /api/v1/users/<id:12>/admin as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "make: no body member",
+    "request": "PUT /api/v1/users/<id:12>/admin as root",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "isAdmin must be true or false",
+      "errors": [
+        {
+          "detail": "isAdmin must be true or false",
+          "pointer": "/isAdmin",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "make: not a boolean",
+    "request": "PUT /api/v1/users/<id:12>/admin as root",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "invalid type: string \"yes\", expected a boolean",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "make: unknown user",
+    "request": "PUT /api/v1/users/<id:10>/admin as root",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "user not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "make: no identifier",
+    "request": "PUT /api/v1/users/nobody/admin as root",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "user not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "step down: the only administrator",
+    "request": "PUT /api/v1/users/<id:1>/admin as root",
+    "status": 409,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the instance must keep an administrator",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "last_admin",
+      "requestId": "<request-id>",
+      "status": 409,
+      "title": "Last administrator",
+      "type": "/problems/last-admin"
+    }
+  },
+  {
+    "name": "make",
+    "request": "PUT /api/v1/users/<id:12>/admin as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "firstName": "",
+      "id": "<id:12>",
+      "isAdmin": true,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "admins-bob"
+    }
+  },
+  {
+    "name": "make: again",
+    "request": "PUT /api/v1/users/<id:12>/admin as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "firstName": "",
+      "id": "<id:12>",
+      "isAdmin": true,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "admins-bob"
+    }
+  },
+  {
+    "name": "workspace: the new administrator",
+    "request": "GET /api/v1/w/<id:3> as admins-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "guestInvitations": true,
+      "id": "<id:3>",
+      "modifiedBy": "",
+      "settings": {},
+      "title": "The Firm",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "step down",
+    "request": "PUT /api/v1/users/<id:1>/admin as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "firstName": "",
+      "id": "<id:1>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "root"
+    }
+  },
+  {
+    "name": "make: after stepping down",
+    "request": "PUT /api/v1/users/<id:1>/admin as root",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "only an administrator of the instance may do this",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "admin_required",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Administrator required",
+      "type": "/problems/admin-required"
+    }
+  },
+  {
+    "name": "workspace: after stepping down",
+    "request": "GET /api/v1/w/<id:3> as root",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "guestInvitations": true,
+      "id": "<id:3>",
+      "modifiedBy": "",
+      "settings": {},
+      "title": "The Firm",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "unmake: the new only administrator",
+    "request": "PUT /api/v1/users/<id:12>/admin as admins-bob",
+    "status": 409,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the instance must keep an administrator",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "last_admin",
+      "requestId": "<request-id>",
+      "status": 409,
+      "title": "Last administrator",
+      "type": "/problems/last-admin"
+    }
+  },
+  {
+    "name": "invite: an administrator of the instance alone",
+    "request": "POST /api/v1/w/<id:3>/invitations as admins-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "only the administrators of the workspace invite its members",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  }
+]

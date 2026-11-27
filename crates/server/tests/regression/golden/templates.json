@@ -1,0 +1,289 @@
+[
+  {
+    "name": "template titles",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      "Getting started with fvoci",
+      "Welcome to your personal space",
+      "Project schedule",
+      "Issue tracker",
+      "Meeting notes",
+      "Content calendar",
+      "Customer contacts",
+      "Study notes",
+      "Two-Week Study Plan"
+    ]
+  },
+  {
+    "name": "template versions",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      13
+    ]
+  },
+  {
+    "name": "template members",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      "cardProperties",
+      "createdAt",
+      "createdBy",
+      "description",
+      "doneWhen",
+      "dueDatePropertyId",
+      "icon",
+      "id",
+      "isBuiltin",
+      "isTemplate",
+      "kind",
+      "minimumRole",
+      "modifiedBy",
+      "properties",
+      "showDescription",
+      "templateVersion",
+      "title",
+      "updatedAt",
+      "visibility",
+      "workspaceId"
+    ]
+  },
+  {
+    "name": "welcome template block counts",
+    "request": "(observation)",
+    "status": 0,
+    "body": {
+      "card": 12,
+      "view": 5
+    }
+  },
+  {
+    "name": "templates: anonymous",
+    "request": "GET /api/v1/w/<id:1>/templates as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "create board My template",
+    "request": "POST /api/v1/w/<id:1>/boards as tpl-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": true,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "My template",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "my template",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3> as tpl-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": true,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "My template",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "onboard",
+    "request": "POST /api/v1/w/<id:1>/onboard as tpl-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:4>"
+    }
+  },
+  {
+    "name": "welcome board",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as tpl-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "<id:5>",
+          "name": "Progress",
+          "options": [
+            {
+              "color": "gray",
+              "id": "<id:6>",
+              "label": "To read"
+            },
+            {
+              "color": "blue",
+              "id": "<id:7>",
+              "label": "Trying it"
+            },
+            {
+              "color": "green",
+              "id": "<id:8>",
+              "label": "Done it"
+            }
+          ],
+          "type": "select"
+        },
+        {
+          "id": "<id:9>",
+          "name": "Topic",
+          "options": [
+            {
+              "color": "blue",
+              "id": "<id:10>",
+              "label": "Boards"
+            },
+            {
+              "color": "purple",
+              "id": "<id:11>",
+              "label": "Writing"
+            },
+            {
+              "color": "orange",
+              "id": "<id:12>",
+              "label": "Files"
+            },
+            {
+              "color": "green",
+              "id": "<id:13>",
+              "label": "Wiki"
+            },
+            {
+              "color": "pink",
+              "id": "<id:14>",
+              "label": "Together"
+            }
+          ],
+          "type": "select"
+        },
+        {
+          "id": "<id:15>",
+          "name": "Day",
+          "options": [],
+          "type": "date"
+        },
+        {
+          "id": "<id:16>",
+          "name": "Minutes",
+          "options": [],
+          "type": "number"
+        },
+        {
+          "id": "<id:17>",
+          "name": "Read first",
+          "options": [],
+          "type": "relation"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+      "doneWhen": {
+        "optionIds": [
+          "<id:8>"
+        ],
+        "propertyId": "<id:5>"
+      },
+      "dueDatePropertyId": "<id:15>",
+      "icon": "👋",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": true,
+      "templateVersion": 13,
+      "title": "Getting started with fvoci",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "welcome board block count",
+    "request": "(observation)",
+    "status": 0,
+    "body": 17
+  },
+  {
+    "name": "categories after the welcome board",
+    "request": "GET /api/v1/w/<id:1>/categories as tpl-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:18>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:19>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:20>",
+        "name": "Boards",
+        "sortOrder": 10,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "client state after the welcome board",
+    "request": "GET /api/v1/users/me/client-state as tpl-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {}
+  }
+]

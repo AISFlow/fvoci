@@ -1,0 +1,994 @@
+{
+  "key": "meeting-notes",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "e741751d-1205-5410-b6b6-396e6375c6c1",
+    "title": "Meeting notes",
+    "description": "One card for each meeting. A new card starts from the “Notes form” card template, and the calendar shows the meetings behind and ahead.",
+    "icon": "📝",
+    "showDescription": true,
+    "dueDatePropertyId": "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+    "doneWhen": {
+      "propertyId": "d80efada-5f9b-5764-ab78-3115440c512b"
+    },
+    "cardProperties": [
+      {
+        "id": "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+        "name": "Date",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee",
+        "name": "Kind",
+        "type": "select",
+        "options": [
+          {
+            "id": "8d8c49d8-5af2-5e17-98f6-ef47e28bfc86",
+            "label": "Weekly",
+            "color": "blue"
+          },
+          {
+            "id": "60f8c38a-eb64-5e69-aa71-7123eec67916",
+            "label": "Review",
+            "color": "purple"
+          },
+          {
+            "id": "2621fbac-f4ab-5533-803b-008e30a3fb04",
+            "label": "One to one",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "7651988e-4c43-5d7d-b4a7-2e1df8185d6d",
+        "name": "Attendees",
+        "type": "multiPerson",
+        "options": []
+      },
+      {
+        "id": "0663b8ff-fd71-5c9e-9c27-36ea281e08da",
+        "name": "Note taker",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "d80efada-5f9b-5764-ab78-3115440c512b",
+        "name": "Decisions made",
+        "type": "checkbox",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "098d11b6-a63d-5594-b35d-7cb3693d4da0",
+      "type": "view",
+      "title": "All meetings",
+      "fields": {
+        "cardOrder": [
+          "c5a84aa2-78fb-5d08-bea5-0c780410fd37",
+          "68a9c7b2-f0ec-5e91-8968-c6c8749343c6",
+          "01321dcd-a1c3-55b1-b236-6df6cc6d9023",
+          "017121f8-c597-5f41-8160-bd0a6594ba9b"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "d80efada-5f9b-5764-ab78-3115440c512b": "countChecked"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "12b99a2d-67c2-55c9-88c9-c3f30ce03fe6",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee",
+          "7651988e-4c43-5d7d-b4a7-2e1df8185d6d",
+          "0663b8ff-fd71-5c9e-9c27-36ea281e08da",
+          "d80efada-5f9b-5764-ab78-3115440c512b"
+        ]
+      }
+    },
+    {
+      "id": "274979a0-285b-5ab4-b484-b5f8fcfc20f2",
+      "type": "view",
+      "title": "Calendar",
+      "fields": {
+        "cardOrder": [
+          "c5a84aa2-78fb-5d08-bea5-0c780410fd37",
+          "68a9c7b2-f0ec-5e91-8968-c6c8749343c6",
+          "01321dcd-a1c3-55b1-b236-6df6cc6d9023",
+          "017121f8-c597-5f41-8160-bd0a6594ba9b"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "12b99a2d-67c2-55c9-88c9-c3f30ce03fe6",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee"],
+        "dateProperty": "b905062a-b93a-5a21-ade3-c4a20972b7a7"
+      }
+    },
+    {
+      "id": "dca1782c-368e-5af7-9d6d-872621143ebb",
+      "type": "view",
+      "title": "By kind",
+      "fields": {
+        "cardOrder": [
+          "c5a84aa2-78fb-5d08-bea5-0c780410fd37",
+          "68a9c7b2-f0ec-5e91-8968-c6c8749343c6",
+          "01321dcd-a1c3-55b1-b236-6df6cc6d9023",
+          "017121f8-c597-5f41-8160-bd0a6594ba9b"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "12b99a2d-67c2-55c9-88c9-c3f30ce03fe6",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+            "reversed": true
+          }
+        ],
+        "viewType": "board",
+        "visibleGroups": [
+          "8d8c49d8-5af2-5e17-98f6-ef47e28bfc86",
+          "60f8c38a-eb64-5e69-aa71-7123eec67916",
+          "2621fbac-f4ab-5533-803b-008e30a3fb04"
+        ],
+        "shownProperties": [
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+          "d80efada-5f9b-5764-ab78-3115440c512b"
+        ],
+        "groupBy": "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee"
+      }
+    },
+    {
+      "id": "f8cbd786-6c95-5ba1-b337-b3530e4f991d",
+      "type": "view",
+      "title": "Meetings with decisions",
+      "fields": {
+        "cardOrder": [
+          "c5a84aa2-78fb-5d08-bea5-0c780410fd37",
+          "68a9c7b2-f0ec-5e91-8968-c6c8749343c6",
+          "01321dcd-a1c3-55b1-b236-6df6cc6d9023",
+          "017121f8-c597-5f41-8160-bd0a6594ba9b"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "d80efada-5f9b-5764-ab78-3115440c512b",
+              "condition": "isSet",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7",
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee"
+        ]
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "12b99a2d-67c2-55c9-88c9-c3f30ce03fe6",
+      "type": "card",
+      "title": "Notes form",
+      "fields": {
+        "icon": "📄",
+        "isTemplate": true,
+        "properties": {}
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Agenda"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The first topic"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Notes"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "…"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Decisions"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "…"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "To do"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Who does what, by when"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c5a84aa2-78fb-5d08-bea5-0c780410fd37",
+      "type": "card",
+      "title": "Weekly: first week of December",
+      "fields": {
+        "icon": "🗓️",
+        "isTemplate": false,
+        "properties": {
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7": {
+            "from": "2026-12-01"
+          },
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee": "8d8c49d8-5af2-5e17-98f6-ef47e28bfc86",
+          "d80efada-5f9b-5764-ab78-3115440c512b": "true"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The agenda went round beforehand. Press its name to open it."
+              }
+            ]
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "agenda.en.docx"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Notes"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The design of the new sign-up screen ends this week."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Two customers asked why the exported total differs from the screen."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Decisions"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The launch is on 7 January."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The total is fixed before the launch."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "To do"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Put the launch date on the project schedule"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Report the total on the issue tracker"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "68a9c7b2-f0ec-5e91-8968-c6c8749343c6",
+      "type": "card",
+      "title": "Design review",
+      "fields": {
+        "icon": "🔍",
+        "isTemplate": false,
+        "properties": {
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7": {
+            "from": "2026-12-09"
+          },
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee": "60f8c38a-eb64-5e69-aa71-7123eec67916",
+          "d80efada-5f9b-5764-ab78-3115440c512b": "true"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Signing up has to end on one screen. Half of the people leave on the second."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "What we compared"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Option"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Steps"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "People who finish"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Today"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "3"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "52%"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "One screen"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "to be measured"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 3
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "We will measure the new screen for two weeks."
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Decisions"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Ask for a name and a password; ask the rest once they are in."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Last weekly meeting: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "c5a84aa2-78fb-5d08-bea5-0c780410fd37"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "01321dcd-a1c3-55b1-b236-6df6cc6d9023",
+      "type": "card",
+      "title": "Weekly: second week of December",
+      "fields": {
+        "icon": "🗓️",
+        "isTemplate": false,
+        "properties": {
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7": {
+            "from": "2026-12-08"
+          },
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee": "8d8c49d8-5af2-5e17-98f6-ef47e28bfc86",
+          "d80efada-5f9b-5764-ab78-3115440c512b": "false"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Agenda"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Who is on call over the holidays"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The plan for January"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Notes"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The rota is decided next week."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "017121f8-c597-5f41-8160-bd0a6594ba9b",
+      "type": "card",
+      "title": "One to one: looking back on the quarter",
+      "fields": {
+        "icon": "💬",
+        "isTemplate": false,
+        "properties": {
+          "b905062a-b93a-5a21-ade3-c4a20972b7a7": {
+            "from": "2026-12-15"
+          },
+          "341ba636-1ed2-5b6b-8bf5-ddb7aeb46fee": "2621fbac-f4ab-5533-803b-008e30a3fb04",
+          "d80efada-5f9b-5764-ab78-3115440c512b": "false"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "What went well"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "…"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "What to change"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "…"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "agenda.en.docx",
+      "name": "Weekly meeting agenda.docx"
+    }
+  ]
+}

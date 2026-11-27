@@ -1,0 +1,86 @@
+/* 찾기/찾아바꾸기 모달리스 대화상자 */
+.find-dialog {
+  position: fixed;
+  top: 80px;
+  right: 24px;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-primary-subtle);
+  box-shadow: var(--shadow-dropdown);
+  z-index: 9999;
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+}
+
+.find-dialog-title {
+  padding: 6px 12px;
+  background: var(--color-accent-bg);
+  font-weight: bold;
+  font-size: var(--font-size-base);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.find-dialog-body {
+  padding: 10px 12px 4px;
+}
+
+.find-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.find-dialog-label {
+  width: 70px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.find-dialog-input {
+  flex: 1;
+  height: 24px;
+  border: 1px solid var(--ui-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 0 4px;
+  font-size: var(--font-size-base);
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.find-dialog-input:focus {
+  border-color: var(--color-focus-border);
+  outline: none;
+}
+
+.find-dialog-status {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.find-dialog-status-row {
+  min-height: 18px;
+  line-height: 18px;
+  text-align: right;
+}
+
+.find-dialog-status[data-state="wrapped"] {
+  color: var(--color-primary-dark);
+}
+
+.find-dialog-match-count {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.find-dialog-buttons {
+  display: flex;
+  gap: 6px;
+  padding: 4px 12px 8px;
+  justify-content: flex-end;
+}

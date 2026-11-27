@@ -1,0 +1,449 @@
+import type { CommandDef, CommandServices } from '../types';
+import { setThemeMode, setThemeSkin, syncThemeMenu, type EffectiveTheme } from '../../core/theme';
+import { userSettings, type ThemeMode, type ThemeSkin } from '../../core/user-settings';
+import { GridSettingsDialog } from '../../ui/grid-settings-dialog';
+import {
+  type GridOffsetMm,
+  type GridViewSettings,
+  getGridViewSettings,
+  setGridViewSettings,
+  toggleGridVisibility,
+} from '../../view/grid-settings';
+import { HWPUNIT_PER_MM } from '../../core/hwp-constants';
+import {
+  resolveZoomFitZoom,
+  type ZoomFitMetrics,
+} from '../../view/zoom-fit';
+import type { PageArrangement } from '../../view/page-arrangement';
+import { CENTER_ZOOM_ANCHOR } from '../../view/zoom-anchor';
+import { applyToolboxVisibility } from '../../view/toolbox-visibility';
+import { ZoomDialog } from '../../ui/zoom-dialog';
+import {
+  resolveZoomDialogFitMode,
+  resolveZoomDialogZoom,
+} from '../../view/zoom-dialog-state';
+import type { PageViewSettingsChange } from '../../view/page-view-settings-change';
+
+import { t } from '../../i18n/index.ts';
+const PX_TO_MM = 25.4 / 96;
+const PAGE_GAP = 10;
+
+/** 메뉴·상태 표시줄·대화상자가 공유하는 현재 문서 맞춤 계산 입력을 만든다. */
+function getZoomFitMetrics(
+  services: CommandServices,
+  arrangement: PageArrangement,
+): ZoomFitMetrics | null {
+  if (services.wasm.pageCount === 0) return null;
+  const container = document.getElementById('scroll-container');
+  if (!container) return null;
+  // getPageInfo 의 width/height 는 이미 px 단위 (96dpi 기준)
+  const pageInfo = services.wasm.getPageInfo(0);
+  return {
+    containerWidth: container.clientWidth,
+    containerHeight: container.clientHeight,
+    pageWidth: pageInfo.width,
+    pageHeight: pageInfo.height,
+    arrangement,
+    pageGap: PAGE_GAP,
+  };
+}
+
+/**
+ * 쪽 맞춤·폭 맞춤을 지금의 창·쪽 크기로 계산해 적용하고 그 선택을 저장한다.
+ * 맞춤은 수치가 아니라 규칙이라, 다음에 여는 문서에서는 그 쪽 크기로 다시 계산한다.
+ */
+function applyZoomFit(services: CommandServices, mode: 'fitWidth' | 'fitPage'): void {
+  const vm = services.getViewportManager();
+  if (!vm) return;
+  const metrics = getZoomFitMetrics(
+    services,
+    userSettings.getViewSettings().pageArrangement,
+  );
+  if (!metrics) return;
+  const zoom = resolveZoomFitZoom(mode, metrics);
+  if (zoom === null) return;
+  vm.setZoom(zoom, CENTER_ZOOM_ANCHOR, mode);
+}
+
+/** 배율 고정값 커맨드 생성 헬퍼 */
+function zoomLevel(pct: number, shortcutLabel?: string): CommandDef {
+  return {
+    id: `view:zoom-${pct}`,
+    label: `${pct}%`,
+    shortcutLabel,
+    execute(services) {
+      services.getViewportManager()?.setZoom(pct / 100);
+    },
+  };
+}
+
+function themeModeCommand(mode: ThemeMode, label: string): CommandDef {
+  return {
+    id: `view:theme-${mode}`,
+    label,
+    execute(services) {
+      const effective: EffectiveTheme = setThemeMode(mode);
+      syncThemeMenu(mode);
+      services.eventBus.emit('theme-changed', { mode, effective });
+      services.eventBus.emit('document-view-changed');
+    },
+  };
+}
+
+function themeSkinCommand(skin: ThemeSkin, label: string): CommandDef {
+  return {
+    id: `view:skin-${skin}`,
+    label,
+    execute(services) {
+      const effective: EffectiveTheme = setThemeSkin(skin);
+      syncThemeMenu();
+      services.eventBus.emit('theme-changed', { mode: userSettings.getThemeSettings().mode, effective });
+      services.eventBus.emit('document-view-changed');
+    },
+  };
+}
+
+export function syncTextMarkMenu(showControlCodes: boolean, showParagraphMarks: boolean): void {
+  document.querySelectorAll('[data-cmd="view:ctrl-mark"]').forEach(el => {
+    el.classList.toggle('active', showControlCodes);
+  });
+  document.querySelectorAll('[data-cmd="view:para-mark"]').forEach(el => {
+    el.classList.toggle('active', showParagraphMarks);
+  });
+}
+
+/**
+ * view:toggle-clip 내부 상태(clipEnabled). true=잘림 적용, false=오버플로 표시(짤림보기 켜짐).
+ * 저장된 짤림보기 설정(clipView)에서 초기화한다. clipEnabled = !clipView.
+ */
+let clipEnabled = !userSettings.getViewSettings().clipView;
+
+/**
+ * 짤림보기(잘림 보기) 메뉴 활성 상태와 내부 상태를 동기화한다.
+ * 버튼 active = 잘림 미적용(오버플로 보임) = !enabled.
+ * 문서 로드 시 저장된 설정 적용에도 사용한다.
+ */
+export function syncClipMenu(enabled: boolean): void {
+  clipEnabled = enabled;
+  document.querySelectorAll('[data-cmd="view:toggle-clip"]').forEach(el => {
+    el.classList.toggle('active', !enabled);
+  });
+}
+
+/**
+ * 저장된 도구 상자(기본/서식) 보이기·숨기기 설정을 도구 모음과 메뉴 체크 표시에 반영한다.
+ * 시작 시 설정 복원과 토글 직후 양쪽이 같은 경로를 쓴다.
+ */
+export function syncToolboxMenu(): void {
+  const view = userSettings.getViewSettings();
+  applyToolboxVisibility(document, { basic: view.toolbarBasic, format: view.toolbarFormat });
+}
+
+function refreshCaretAfterViewChange(services: Parameters<CommandDef['execute']>[0]): void {
+  const inputHandler = services.getInputHandler() as any;
+  inputHandler?.updateCaret?.(true);
+  requestAnimationFrame(() => inputHandler?.updateCaret?.(true));
+}
+
+interface GridOriginMetrics {
+  defaults: Record<'page' | 'paper', GridOffsetMm>;
+  bases: Record<'page' | 'paper', GridOffsetMm>;
+}
+
+function getGridOriginMetrics(services: Parameters<CommandDef['execute']>[0]): GridOriginMetrics {
+  let pageIndex = 0;
+  const ih = services.getInputHandler();
+  const cursor = ih ? (ih as any).cursor : null;
+  if (typeof cursor?.rect?.pageIndex === 'number') {
+    pageIndex = cursor.rect.pageIndex;
+  }
+
+  const pageInfo = services.wasm.getPageInfo(pageIndex);
+  const documentInfo = services.wasm.getDocumentInfo();
+  const sectionDef = services.wasm.getSectionDef(pageInfo.sectionIndex ?? 0);
+  const pageBorderFill = services.wasm.getPageBorderFill(pageInfo.sectionIndex ?? 0);
+  const rawPageDef = services.wasm.getPageDef(pageInfo.sectionIndex ?? 0);
+  const paperX = roundMm(rawPageDef.marginLeft / HWPUNIT_PER_MM);
+  const paperBaseY = roundMm((rawPageDef.marginTop + rawPageDef.marginHeader) / HWPUNIT_PER_MM);
+  const hwp3PageYOffsetY = documentInfo.hwp3Variant && pageBorderFill.basis === 'page'
+    ? roundMm(sectionDef.columnSpacing / HWPUNIT_PER_MM)
+    : 0;
+  const paperDefaultY = hwp3PageYOffsetY > 0
+    ? roundMm(
+      roundMm(rawPageDef.marginTop / HWPUNIT_PER_MM)
+      + roundMm(rawPageDef.marginHeader / HWPUNIT_PER_MM)
+      + hwp3PageYOffsetY,
+    )
+    : paperBaseY;
+  const pageDefaultY = roundMm(paperDefaultY - paperBaseY);
+
+  return {
+    defaults: {
+      page: { x: 0, y: pageDefaultY },
+      paper: {
+        x: paperX,
+        y: paperDefaultY,
+      },
+    },
+    bases: {
+      page: {
+        x: paperX,
+        y: paperBaseY,
+      },
+      paper: { x: 0, y: 0 },
+    },
+  };
+}
+
+function roundMm(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function applyGridDefaults(settings: GridViewSettings, defaults: GridOriginMetrics['defaults']): GridViewSettings {
+  if (!closeMm(settings.offsetXmm, 0) || !closeMm(settings.offsetYmm, 0)) {
+    return settings;
+  }
+  const defaultOffset = defaults[settings.origin];
+  return {
+    ...settings,
+    offsetXmm: defaultOffset.x,
+    offsetYmm: defaultOffset.y,
+  };
+}
+
+function closeMm(a: number, b: number): boolean {
+  return Number.isFinite(a) && Math.abs(a - b) < 0.01;
+}
+
+export const viewCommands: CommandDef[] = [
+  {
+    id: 'view:zoom-in',
+    label: t('command.view.zoomIn.label'),
+    icon: 'icon-zoom-menu-in',
+    shortcutLabel: 'Ctrl++',
+    execute(services) {
+      const vm = services.getViewportManager();
+      if (vm) vm.smoothZoomBy(0.1);
+    },
+  },
+  {
+    id: 'view:zoom-out',
+    label: t('command.view.zoomOut.label'),
+    icon: 'icon-zoom-menu-out',
+    shortcutLabel: 'Ctrl+-',
+    execute(services) {
+      const vm = services.getViewportManager();
+      if (vm) vm.smoothZoomBy(-0.1);
+    },
+  },
+  {
+    id: 'view:zoom-dialog',
+    label: t('command.view.zoomDialog.label'),
+    opensDialog: true,
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const vm = services.getViewportManager();
+      if (!vm) return;
+      const viewSettings = userSettings.getViewSettings();
+      const arrangement = viewSettings.pageArrangement;
+      const metrics = getZoomFitMetrics(services, arrangement);
+      if (!metrics) return;
+      const fitZooms = {
+        fitWidth: resolveZoomFitZoom('fitWidth', metrics) ?? 1,
+        fitPage: resolveZoomFitZoom('fitPage', metrics) ?? 1,
+      };
+      new ZoomDialog({
+        currentZoom: vm.getZoom(),
+        fitZooms,
+        arrangement,
+        pageMovement: viewSettings.pageMovement,
+        onConfirm(value) {
+          const currentMetrics = getZoomFitMetrics(services, value.arrangement);
+          if (!currentMetrics) return;
+          const zoom = resolveZoomDialogZoom({
+            ...value,
+            viewportWidth: currentMetrics.containerWidth,
+            viewportHeight: currentMetrics.containerHeight,
+            pageWidth: currentMetrics.pageWidth,
+            pageHeight: currentMetrics.pageHeight,
+            pageGap: currentMetrics.pageGap,
+          });
+          const zoomFitMode = resolveZoomDialogFitMode(value);
+          userSettings.setPageViewSettings(
+            value.arrangement,
+            value.pageMovement,
+            zoomFitMode,
+          );
+          const view = userSettings.getViewSettings();
+          const transaction: PageViewSettingsChange = {
+            arrangement: view.pageArrangement,
+            pageMovement: view.pageMovement,
+            zoom: {
+              value: zoom,
+              fitMode: view.zoomFitMode,
+              anchor: CENTER_ZOOM_ANCHOR,
+            },
+          };
+          services.eventBus.emit('page-view-settings-changed', transaction);
+          services.eventBus.emit('command-state-changed');
+        },
+      }).show();
+    },
+  },
+  {
+    id: 'view:zoom-fit-page',
+    label: t('command.view.zoomFitPage.label'),
+    shortcutLabel: 'Ctrl+G,P',
+    execute(services) {
+      applyZoomFit(services, 'fitPage');
+    },
+  },
+  {
+    id: 'view:zoom-fit-width',
+    label: t('command.view.zoomFitWidth.label'),
+    shortcutLabel: 'Ctrl+G,W',
+    execute(services) {
+      applyZoomFit(services, 'fitWidth');
+    },
+  },
+  zoomLevel(50),
+  zoomLevel(75),
+  zoomLevel(100, 'Ctrl+G,Q'),
+  zoomLevel(125),
+  zoomLevel(150),
+  zoomLevel(200),
+  zoomLevel(300),
+  zoomLevel(500),
+  themeModeCommand('system', t('command.view.themeModeCommand.system')),
+  themeModeCommand('light', t('command.view.themeModeCommand.light')),
+  themeModeCommand('dark', t('command.view.themeModeCommand.dark')),
+  themeSkinCommand('oldschool', t('command.view.themeSkinCommand.oldschool')),
+  themeSkinCommand('default', t('command.view.themeSkinCommand.default')),
+  themeSkinCommand('flat', t('command.view.themeSkinCommand.flat')),
+  // ─── 보기 메뉴: 표시/숨기기 ─────────────────────────
+  {
+    id: 'view:form-mode',
+    label: t('command.view.formMode.registryLabel'),
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const next = services.getContext().isFormMode ? 'normal' : 'form';
+      services.setEditMode(next);
+    },
+  },
+  {
+    id: 'view:ctrl-mark',
+    label: t('command.view.ctrlMark.label'),
+    icon: 'icon-ctrl-mark',
+    shortcutLabel: 'Ctrl+G,C',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const ctx = services.getContext();
+      const next = !ctx.showControlCodes;
+      // 조판부호 ON → 문단부호도 ON (한컴 기준: 조판부호는 문단부호를 포함)
+      services.wasm.setShowControlCodes(next);
+      services.wasm.setShowParagraphMarks(next);
+      userSettings.setShowControlCodes(next);
+      userSettings.setShowParagraphMarks(next);
+      syncTextMarkMenu(next, next);
+      refreshCaretAfterViewChange(services);
+      services.eventBus.emit('document-view-changed');
+    },
+  },
+  {
+    id: 'view:para-mark',
+    label: t('command.view.paraMark.label'),
+    icon: 'icon-para-mark',
+    shortcutLabel: 'Ctrl+G,T',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const ctx = services.getContext();
+      const next = !ctx.showParagraphMarks;
+      services.wasm.setShowParagraphMarks(next);
+      userSettings.setShowParagraphMarks(next);
+      syncTextMarkMenu(ctx.showControlCodes, next);
+      refreshCaretAfterViewChange(services);
+      services.eventBus.emit('document-view-changed');
+    },
+  },
+  {
+    id: 'view:border-transparent',
+    label: t('command.view.borderTransparent.label'),
+    shortcutLabel: 'Alt+V,T',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      // WASM 실제 상태를 읽어 토글 — 셀 진입 자동 ON 등으로 인한 초기값 불일치 방지
+      const next = !services.wasm.getShowTransparentBorders();
+      services.wasm.setShowTransparentBorders(next);
+      document.querySelectorAll('[data-cmd="view:border-transparent"]').forEach(el => {
+        el.classList.toggle('active', next);
+      });
+      services.eventBus.emit('document-view-changed');
+    },
+  },
+  {
+    id: 'view:toggle-clip',
+    label: t('command.view.toggleClip.label'),
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const next = !clipEnabled;
+      services.wasm.setClipEnabled(next);
+      userSettings.setClipView(!next); // 짤림보기 켜짐(clipView) = 잘림 미적용(!clipEnabled)
+      syncClipMenu(next);
+      services.eventBus.emit('document-view-changed');
+    },
+  } satisfies CommandDef,
+  {
+    id: 'view:toggle-grid',
+    label: t('command.view.toggleGrid.label'),
+    icon: 'icon-grid',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const next = toggleGridVisibility();
+      document.querySelectorAll('[data-cmd="view:toggle-grid"]').forEach(el => {
+        el.classList.toggle('active', next.visible);
+      });
+      services.eventBus.emit('grid-view-changed', next);
+    },
+  },
+  {
+    id: 'view:grid-settings',
+    opensDialog: true,
+    label: t('command.view.gridSettings.label'),
+    icon: 'icon-grid',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      const ih = services.getInputHandler();
+      const originMetrics = getGridOriginMetrics(services);
+      new GridSettingsDialog(
+        applyGridDefaults(getGridViewSettings(), originMetrics.defaults),
+        originMetrics.bases,
+        ih?.getGridStepMm() ?? 3,
+        (settings, moveStepMm) => {
+          const next = setGridViewSettings(settings);
+          ih?.setGridStep(moveStepMm);
+          document.querySelectorAll('[data-cmd="view:toggle-grid"]').forEach(el => {
+            el.classList.toggle('active', next.visible);
+          });
+          services.eventBus.emit('grid-view-changed', next);
+        },
+      ).show();
+    },
+  },
+  {
+    id: 'view:toolbox-basic',
+    label: t('command.view.toolboxBasic.label'),
+    shortcutLabel: 'Ctrl+F1',
+    execute() {
+      userSettings.setToolbarBasic(!userSettings.getViewSettings().toolbarBasic);
+      syncToolboxMenu();
+    },
+  } satisfies CommandDef,
+  {
+    id: 'view:toolbox-format',
+    label: t('command.view.toolboxFormat.label'),
+    execute() {
+      userSettings.setToolbarFormat(!userSettings.getViewSettings().toolbarFormat);
+      syncToolboxMenu();
+    },
+  } satisfies CommandDef,
+];

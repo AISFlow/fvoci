@@ -1,0 +1,419 @@
+/*
+  The frame's own look: a column of pages, light or dark as the app is. The
+  frame paints no background, so the app's colour behind it (the viewer's
+  `bg-muted`) shows through; that holds while the frame's `color-scheme` is
+  the app's, which the theme message keeps. The pages keep the document's
+  own colours; their edges use the system's colours, as the app's tokens are
+  not loaded here.
+*/
+:root {
+  --page-shadow: 0 1px 3px color-mix(in srgb, CanvasText 25%, transparent);
+  --slide-hidden-edge: color-mix(in srgb, CanvasText 55%, transparent);
+  color-scheme: light;
+  font-family: 'Noto Sans KR', sans-serif;
+}
+
+:root.dark {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+}
+
+.pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  width: max-content;
+  min-width: calc(100% - 32px);
+}
+
+.page {
+  position: relative;
+  background: white;
+  box-shadow: var(--page-shadow);
+  flex: none;
+}
+
+/* A slide is drawn at its own size and scaled to its box (pptx-view.ts). */
+.slide {
+  overflow: hidden;
+}
+
+.slide[hidden] {
+  display: none;
+}
+
+/*
+  A slide hidden from a show, when the hidden slides are shown: faded, its
+  edge dashed, and a word over its upper right corner (not its colour
+  alone): in sight where the slide starts, off a title set to the left. Dark on the slide in either theme: a slide
+  keeps its own colours.
+*/
+.slide-hidden {
+  outline: 2px dashed var(--slide-hidden-edge);
+  outline-offset: 3px;
+}
+
+.slide-hidden > :not(.slide-mark) {
+  opacity: 0.45;
+}
+
+.slide-mark {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: black;
+  color: white;
+  font:
+    600 13px/1.4 'Noto Sans KR',
+    sans-serif;
+}
+
+.page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+  An HWP page (hwp-page.ts): rhwp's picture, scaled with the box, and the
+  page's text over it, transparent, laid out at the page's own size and
+  scaled as the box is (`--hwp-scale`, set on the column).
+*/
+.page > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hwp-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: scale(var(--hwp-scale, 1));
+  transform-origin: 0 0;
+  line-height: 1;
+  font-family: 'Noto Sans KR', sans-serif;
+}
+
+.hwp-text > span {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  transform-origin: 0 0;
+  cursor: text;
+}
+
+.hwp-text ::selection {
+  background: color-mix(in srgb, Highlight 40%, transparent);
+}
+
+/* The breaks between runs, out of the flow and unpainted when selected, as pdf.js's are. */
+.hwp-text > br {
+  position: absolute;
+}
+
+.hwp-text > br::selection {
+  background: transparent;
+}
+
+/*
+  In place of an HWP page too large to draw (hwp-view.ts): a line that says
+  so and a button that saves the file, on the page's white in either theme,
+  near its top (a page is often taller than the frame): a share of the
+  page's height down, a space that gives way first on a short page.
+*/
+.page-notice {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 6%;
+  overflow: hidden;
+  container-type: size;
+  color: color-mix(in srgb, black 75%, white);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.page-notice::before {
+  content: '';
+  flex: 0 1 8%;
+}
+
+.page-notice p {
+  margin: 0;
+  font-weight: 500;
+}
+
+.page-notice button {
+  margin-top: 12px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, black 17%, white);
+  border-radius: 6px;
+  background: white;
+  color: black;
+  font: inherit;
+  cursor: pointer;
+}
+
+.page-notice button:hover {
+  background: color-mix(in srgb, black 4%, white);
+}
+
+.page-notice button:focus-visible {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .page-notice button {
+    min-height: 44px;
+  }
+}
+
+/*
+  A page drawn small (a small page after a large first one, zoomed out): the
+  line is left to screen readers and the button made small, so that it fits.
+*/
+@container (width < 150px) or (height < 100px) {
+  .page-notice p {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .page-notice button {
+    margin-top: 0;
+    min-height: 28px;
+    padding: 0 6px;
+    font-size: 12px;
+  }
+}
+
+/* docx-preview's wrapper: its grey and its padding give way to the frame's. */
+.docx-body .docx-wrapper {
+  background: transparent;
+  padding: 16px;
+  gap: 16px;
+}
+
+.docx-body .docx-wrapper > section.docx {
+  box-shadow: var(--page-shadow);
+  margin-bottom: 0;
+}
+
+/*
+  pdf.js's text layer: the page's text, transparent, over the canvas, so that
+  it can be selected and read aloud. From pdf.js's web/pdf_viewer.css
+  (Apache-2.0), cut to what this frame uses.
+*/
+.textLayer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.textLayer .markedContent {
+  display: contents;
+}
+
+.textLayer ::selection {
+  background: color-mix(in srgb, Highlight 40%, transparent);
+}
+
+.textLayer br::selection {
+  background: transparent;
+}
+
+/*
+  A sheet (xlsx-grid.ts): white as a page is, in either theme, as the
+  workbook's own colours are drawn on white, and its grid grey on it; its
+  row numbers and column letters follow the frame's theme, in the system's
+  colours as the pages' edges do. Sizes that follow the zoom are set on the
+  elements.
+*/
+:root {
+  --xlsx-ruler-background: color-mix(in srgb, CanvasText 5%, Canvas);
+  --xlsx-ruler-text: color-mix(in srgb, CanvasText 70%, Canvas);
+  --xlsx-ruler-line: color-mix(in srgb, CanvasText 17%, Canvas);
+  --xlsx-grid: color-mix(in srgb, black 12%, white);
+  --xlsx-divider: color-mix(in srgb, CanvasText 40%, Canvas);
+}
+
+.xlsx-layer {
+  position: sticky;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  background: white;
+  color: black;
+}
+
+.xlsx-pane,
+.xlsx-ruler,
+.xlsx-divider,
+.xlsx-row,
+.xlsx-cell,
+.xlsx-label,
+.xlsx-edges,
+.xlsx-line-h,
+.xlsx-line-v {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.xlsx-pane {
+  overflow: hidden;
+}
+
+.xlsx-line-h {
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--xlsx-grid);
+}
+
+.xlsx-line-v {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--xlsx-grid);
+}
+
+.xlsx-row {
+  left: 0;
+}
+
+.xlsx-cell {
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  font-size: 14.67px;
+  line-height: 1.25;
+}
+
+.xlsx-spills {
+  overflow: visible;
+}
+
+/* A merged range hides the grid lines within it. */
+.xlsx-merged {
+  background: white;
+}
+
+.xlsx-text {
+  position: relative;
+  z-index: 1;
+  display: block;
+  overflow: hidden;
+  white-space: pre;
+}
+
+.xlsx-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.xlsx-edges {
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.xlsx-ruler {
+  overflow: hidden;
+  background: var(--xlsx-ruler-background);
+  color: var(--xlsx-ruler-text);
+  font-size: var(--xlsx-ruler-font, 11px);
+  user-select: none;
+}
+
+.xlsx-ruler-across {
+  border-bottom: 1px solid var(--xlsx-ruler-line);
+}
+
+.xlsx-ruler-down,
+.xlsx-ruler-corner {
+  border-right: 1px solid var(--xlsx-ruler-line);
+}
+
+.xlsx-ruler-corner {
+  left: 0;
+  top: 0;
+  border-bottom: 1px solid var(--xlsx-ruler-line);
+}
+
+.xlsx-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.xlsx-ruler-across .xlsx-label {
+  top: 0;
+  bottom: 0;
+  border-right: 1px solid var(--xlsx-ruler-line);
+}
+
+.xlsx-ruler-down .xlsx-label {
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid var(--xlsx-ruler-line);
+}
+
+.xlsx-divider {
+  z-index: 3;
+  background: var(--xlsx-divider);
+}

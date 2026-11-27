@@ -1,0 +1,12 @@
+Adobe Core 14 AFM files (the advance widths of Helvetica, in rhwp's WebAssembly)
+
+From rhwp 0.9.0, data/font-metrics/adobe-core14/ (MustRead.html and the
+copyright line of its AFM files), which Adobe's Core14_AFMs.zip holds. rhwp's
+generator turned the widths into a table; no outline of a font is included.
+
+Copyright (c) 1985, 1987, 1989, 1990, 1997 Adobe Systems Incorporated.
+All Rights Reserved.
+
+Core 14 AFM Files - ReadMe
+
+This file and the 14 PostScript(R) AFM files it accompanies may be used, copied, and distributed for any purpose and without charge, with or without modification, provided that all copyright notices are retained; that the AFM files are not distributed without this file; that all modifications to this file or any of the AFM files are prominently noted in the modified file(s); and that this paragraph is not modified. Adobe Systems has no responsibility or obligation to support the use of the AFM files.

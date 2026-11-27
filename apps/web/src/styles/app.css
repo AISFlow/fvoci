@@ -1,0 +1,530 @@
+/*
+ * Design tokens and the base layer of the web app.
+ *
+ * Everything a screen needs to know about colour, type, spacing, corners and
+ * the focus indicator is a custom property defined here. Components refer to
+ * the tokens through Tailwind utilities (`bg-background`, `text-sm`, ...) and
+ * never to raw values. tests/tokens/contrast.test.ts reads this file and
+ * fails when a pair listed there drops under its WCAG ratio.
+ */
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn-svelte/tailwind.css';
+
+@source not '../../docs';
+/* Tools, tests and message files are not screens: a word in them is not a class in use. */
+@source not '../../tools';
+@source not '../../tests';
+@source not '../../e2e';
+@source not '../../messages';
+/* The viewer's frame is a page of its own, drawn by its own style sheet (frame.css). */
+@source not '../viewer-frame';
+
+@custom-variant dark (&:is(.dark *));
+
+/* The device can point without pressing: what appears on hover may wait for it. */
+@custom-variant can-hover (@media (hover: hover));
+
+/*
+ * WebKit alone (no other engine knows `hanging-punctuation`). Its scroll
+ * anchoring moves a box a pixel and back, frame after frame, when the box is
+ * scrolled after it changed size: a box whose place is kept to the pixel
+ * (the table, the body of a card) tells WebKit to leave it. The other
+ * engines go on keeping what is read in place when something above it grows.
+ */
+@custom-variant webkit (@supports (hanging-punctuation: first));
+
+/*
+ * Things a finger has to hit get room: the reader chose "comfortable", or
+ * left the choice to the device and its main pointer is a finger. The root
+ * element carries the settled choice in `data-density` (lib/display.svelte.ts
+ * and the script in index.html put it there); a page that never set it (a
+ * story) follows the pointer.
+ */
+@custom-variant roomy {
+  &:is([data-density='comfortable'] *) {
+    @slot;
+  }
+  @media (pointer: coarse) {
+    &:not([data-density] *) {
+      @slot;
+    }
+  }
+}
+
+/* -------------------------------------------------------------- layout */
+
+/*
+ * Where the layout changes. This is the only place the widths are written:
+ * classes use them as container variants (`@columns/pane:`, `@header/pane:`,
+ * `@card-roomy/card:`) and lib/layout reads the same variables for what a
+ * class cannot decide (the shape of the sidebar, the frame of a card,
+ * whether a menu is a sheet).
+ *
+ * They are widths of a box, not of the screen. `page` is the window less the
+ * room the device keeps at its left and right edges; `pane` is what is left
+ * of that for the board. In rem, so that a reader with a larger text size
+ * gets the narrower layout sooner: the same number of characters fits.
+ *
+ * To move a boundary, change the number here.
+ */
+@theme static {
+  /* page: 600px. From here a strip of the sidebar stays, a card is a panel, a menu a popover. */
+  --container-medium: 37.5rem;
+  /* page: 840px. From here the sidebar is fixed and a card is a dialog. */
+  --container-expanded: 52.5rem;
+  /* pane: 544px, two kanban columns of 16rem and what is between them. */
+  --container-columns: 34rem;
+  /* pane: 992px, the wide pane: kanban and table columns widen, "Share" has its word. */
+  --container-header: 62rem;
+  /* pane: 704px, the header of a view in one row: the button of the views, the tools as icons. */
+  --container-view-row: 44rem;
+  /* card: 576px. From here the names of the properties get a wider column. */
+  --container-card-roomy: 36rem;
+}
+
+/* ---------------------------------------------------------------- colour */
+
+:root {
+  color-scheme: light;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.52 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.5 0.2 27);
+  /* Decorative separators. Not a boundary anyone has to find, so no ratio applies. */
+  --border: oklch(0.922 0 0);
+  /* Fill of a field (`bg-input/30`), not its outline. */
+  --input: oklch(0.922 0 0);
+  /* Outline of a field: the only thing that marks where it is, so 3:1 on every surface. */
+  --input-border: oklch(0.6 0 0);
+  /* Focus indicator: 3:1 on every surface. */
+  --ring: oklch(0.55 0.2 260);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.955 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.55 0.2 260);
+  /*
+   * Fill of the label of a select option, one per colour a person can give an
+   * option. The text on it is `--foreground`: 4.5:1 on every one.
+   */
+  --option-default: oklch(0.94 0 0);
+  --option-gray: oklch(0.87 0.01 260);
+  --option-brown: oklch(0.86 0.045 55);
+  --option-orange: oklch(0.9 0.08 65);
+  --option-yellow: oklch(0.93 0.09 100);
+  --option-green: oklch(0.9 0.07 150);
+  --option-blue: oklch(0.89 0.06 245);
+  --option-purple: oklch(0.89 0.06 300);
+  --option-pink: oklch(0.9 0.06 350);
+  --option-red: oklch(0.88 0.07 25);
+  /*
+   * The colours of code (editor/code-block.css), each at least 4.5:1 on the
+   * surface of a code block (--muted). Only the colour tells one kind of
+   * text from another; the words are what carries the meaning.
+   */
+  --code-comment: oklch(0.5 0.02 250);
+  --code-keyword: oklch(0.52 0.2 25);
+  --code-string: oklch(0.42 0.13 255);
+  --code-number: oklch(0.48 0.16 255);
+  --code-title: oklch(0.5 0.2 300);
+  --code-type: oklch(0.5 0.12 55);
+  --code-builtin: oklch(0.5 0.12 55);
+  --code-property: oklch(0.48 0.16 255);
+  --code-variable: oklch(0.5 0.12 55);
+  --code-meta: oklch(0.45 0.08 250);
+  --code-regexp: oklch(0.46 0.1 200);
+  --code-tag: oklch(0.47 0.13 150);
+  --code-added: oklch(0.47 0.13 150);
+  --code-removed: oklch(0.5 0.19 25);
+  /*
+   * What a comparison of two bodies marks (editor/diff.css): the fill of what
+   * was added and of what was removed, under the text and under code (4.5:1
+   * for both), and the line beside a block added or removed whole (3:1).
+   * The marks differ by more than colour: underline, strike, a solid or a
+   * dashed line.
+   */
+  --diff-added: oklch(0.95 0.045 150);
+  --diff-removed: oklch(0.95 0.035 25);
+  --diff-added-line: oklch(0.55 0.15 150);
+  --diff-removed-line: oklch(0.55 0.18 25);
+  /* A link on what a comparison marks: the blue of links, darker so as to be read on both. */
+  --diff-link: oklch(0.5 0.2 260);
+
+  --radius: 0.5rem;
+
+  /*
+   * A page lower than this is laid out as a narrow one however wide it is: a
+   * phone on its side has the width of a tablet and the height of nothing.
+   */
+  --stage-min-height: 31.25rem;
+
+  /*
+   * Room the device takes at each edge of the screen (notch, home indicator,
+   * a camera or a hinge at one side) and the height of the on-screen
+   * keyboard where the browser does not shrink the page for it. Everything
+   * pinned to an edge is placed with these. Left and right are two values:
+   * they differ on some devices, and neither stands in for the other.
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --keyboard: 0px;
+
+  /* What dims the page behind a sheet, a drawer or a dialog, and how much it blurs it. */
+  --scrim: oklch(0 0 0 / 12%);
+  --scrim-blur: 4px;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --scrim: oklch(0 0 0 / 55%);
+
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.74 0.17 22);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --input-border: oklch(0.6 0 0);
+  --ring: oklch(0.7 0.15 255);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.7 0.15 255);
+  --option-default: oklch(0.32 0 0);
+  --option-gray: oklch(0.42 0.01 260);
+  --option-brown: oklch(0.4 0.05 55);
+  --option-orange: oklch(0.44 0.09 60);
+  --option-yellow: oklch(0.44 0.08 95);
+  --option-green: oklch(0.4 0.07 150);
+  --option-blue: oklch(0.4 0.08 250);
+  --option-purple: oklch(0.4 0.09 300);
+  --option-pink: oklch(0.42 0.09 350);
+  --option-red: oklch(0.42 0.1 25);
+  --code-comment: oklch(0.72 0.02 250);
+  --code-keyword: oklch(0.76 0.14 25);
+  --code-string: oklch(0.86 0.07 240);
+  --code-number: oklch(0.8 0.1 245);
+  --code-title: oklch(0.81 0.1 300);
+  --code-type: oklch(0.81 0.12 60);
+  --code-builtin: oklch(0.81 0.12 60);
+  --code-property: oklch(0.8 0.1 245);
+  --code-variable: oklch(0.81 0.12 60);
+  --code-meta: oklch(0.8 0.1 245);
+  --code-regexp: oklch(0.84 0.08 200);
+  --code-tag: oklch(0.85 0.14 145);
+  --code-added: oklch(0.85 0.14 145);
+  --code-removed: oklch(0.77 0.13 20);
+  --diff-added: oklch(0.3 0.05 150);
+  --diff-removed: oklch(0.3 0.05 25);
+  --diff-added-line: oklch(0.72 0.14 150);
+  --diff-removed-line: oklch(0.72 0.15 25);
+  --diff-link: oklch(0.7 0.15 255);
+}
+
+/* ------------------------------------------------------------------ type */
+
+:root {
+  /*
+   * The family that draws Han characters depends on the language, because one
+   * code point has a different shape in each of the four. The stack lists the
+   * Latin family and the four CJK families, the one of the current language
+   * before the other three; those still catch text in another language, and a
+   * family is only downloaded when a character needs it.
+   *
+   * Which comes first depends on the language too. Korean and Japanese put
+   * their own family first: letters, digits and punctuation come out of the
+   * same file as the script (one request for a first screen), and the
+   * ellipsis sits mid-height the way those languages print it. Everywhere
+   * else the Latin family is first; in Chinese because the Chinese fonts draw
+   * quotation marks full width, which pulls a word like "it's" apart.
+   *
+   * Each language sets the whole stack, not a part of it: a custom property
+   * that refers to another is resolved where it is declared, so a part
+   * overridden further down the tree would not reach it.
+   */
+  --font-sans-stack:
+    'Noto Sans', 'Noto Sans KR', 'Noto Sans JP', 'Noto Sans SC', 'Noto Sans TC', system-ui,
+    sans-serif;
+  --font-mono-stack: 'D2Coding', ui-monospace, 'Noto Sans Mono', monospace;
+
+  /* Line height of one-line controls and labels, and of running text. */
+  --line-ui: 1.45;
+  --line-body: 1.6;
+}
+
+:lang(ko) {
+  --font-sans-stack:
+    'Noto Sans KR', 'Noto Sans', 'Noto Sans JP', 'Noto Sans SC', 'Noto Sans TC', system-ui,
+    sans-serif;
+}
+
+:lang(ja) {
+  --font-sans-stack:
+    'Noto Sans JP', 'Noto Sans', 'Noto Sans KR', 'Noto Sans SC', 'Noto Sans TC', system-ui,
+    sans-serif;
+}
+
+:lang(zh) {
+  --font-sans-stack:
+    'Noto Sans', 'Noto Sans SC', 'Noto Sans TC', 'Noto Sans JP', 'Noto Sans KR', system-ui,
+    sans-serif;
+}
+
+:lang(zh-Hant),
+:lang(zh-TW),
+:lang(zh-HK) {
+  --font-sans-stack:
+    'Noto Sans', 'Noto Sans TC', 'Noto Sans SC', 'Noto Sans JP', 'Noto Sans KR', system-ui,
+    sans-serif;
+}
+
+/*
+ * Hangul, kana and Han fill the whole em box and have no ascenders to borrow
+ * white space from, so the same line height reads tighter than in Latin text.
+ */
+:lang(ko),
+:lang(ja),
+:lang(zh) {
+  --line-ui: 1.55;
+  --line-body: 1.75;
+}
+
+/*
+ * `inline` makes a utility refer to the variable itself instead of to a copy
+ * computed on the root element. Without it the per-language values above
+ * would not reach an element inside a `lang` subtree.
+ */
+@theme inline {
+  --font-sans: var(--font-sans-stack);
+  --font-mono: var(--font-mono-stack);
+
+  /*
+   * Type scale. Every step is in rem, so it follows the reader's browser
+   * setting. `sm` is the size of the interface (15px at the default root
+   * size, not the usual 14px: CJK glyphs are denser and need it). `base` is
+   * for running text and for form fields on narrow screens, where anything
+   * under 16px makes iOS zoom the page on focus.
+   */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: var(--line-ui);
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: var(--line-ui);
+  --text-base: 1rem;
+  --text-base--line-height: var(--line-body);
+  --text-lg: 1.125rem;
+  --text-lg--line-height: var(--line-body);
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.4;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 1.35;
+  --text-3xl: 1.875rem;
+  --text-3xl--line-height: 1.3;
+
+  --leading-ui: var(--line-ui);
+  --leading-body: var(--line-body);
+}
+
+/* ------------------------------------------------- spacing, corners, map */
+
+@theme {
+  /* One step of the spacing scale. `p-4` is 4 steps: 1rem. */
+  --spacing: 0.25rem;
+  /* Smallest side of anything a finger has to hit. */
+  --spacing-touch: 2.75rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-border: var(--input-border);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-option-default: var(--option-default);
+  --color-option-gray: var(--option-gray);
+  --color-option-brown: var(--option-brown);
+  --color-option-orange: var(--option-orange);
+  --color-option-yellow: var(--option-yellow);
+  --color-option-green: var(--option-green);
+  --color-option-blue: var(--option-blue);
+  --color-option-purple: var(--option-purple);
+  --color-option-pink: var(--option-pink);
+  --color-option-red: var(--option-red);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* ------------------------------------------------------------------ base */
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply font-sans;
+    /* Leave the root size alone: it is the reader's setting. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-sm text-foreground;
+    /* Korean breaks between words, not inside them. */
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    @apply font-mono;
+  }
+
+  /*
+   * The focus indicator of anything that does not draw its own. Generated
+   * components replace it with a border and a ring in the same colour.
+   */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+/*
+ * The page itself stays clear of the top, left and right edges the device
+ * keeps; the page box is measured inside this. What is pinned to the bottom
+ * edge adds `--safe-bottom` itself, and what is drawn outside of this box
+ * (sheets, dialogs) uses the four values on its own.
+ */
+#app {
+  padding: var(--safe-top) var(--safe-right) 0 var(--safe-left);
+}
+
+/* The layer behind a sheet, a drawer or a dialog. */
+@utility scrim {
+  background-color: var(--scrim);
+  backdrop-filter: blur(var(--scrim-blur));
+}
+
+/*
+ * What is on its way out (a sheet, a dialog, a menu, the layer behind one)
+ * takes no press, and stays as its exit left it until it is removed.
+ *
+ * It is removed some time after its exit has played, and until then it would
+ * be back where it was, over whatever opened in its place: a menu's sheet
+ * over the question its line asked. A press there went to the sheet, or began
+ * on the question's button and ended on the sheet, and did nothing. Bits UI
+ * sets `pointer-events: auto` on the element itself, hence `!important`.
+ */
+[class~='data-closed:animate-out']:where(
+  [data-state='closed'],
+  [data-closed]:not([data-closed='false'])
+) {
+  pointer-events: none !important;
+  animation-fill-mode: forwards;
+}
+
+/*
+ * The reader's own switches, followed without asking again: less
+ * transparency means no blur behind a sheet (a plain, darker layer instead),
+ * less motion means nothing slides or fades.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --scrim: oklch(0 0 0 / 40%);
+    --scrim-blur: 0px;
+  }
+
+  .dark {
+    --scrim: oklch(0 0 0 / 70%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

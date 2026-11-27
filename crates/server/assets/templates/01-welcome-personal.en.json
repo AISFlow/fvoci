@@ -1,0 +1,369 @@
+{
+  "key": "welcome-personal",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "a1b2c3d4-e5f6-5789-8abc-def012345678",
+    "title": "Welcome to your personal space",
+    "description": "Everything here is yours alone. Open a card to see how your personal space works, move it to “Done it” once you try it, and delete this board whenever you are ready.",
+    "icon": "🌱",
+    "showDescription": true,
+    "dueDatePropertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+    "doneWhen": {
+      "propertyId": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+      "optionIds": [
+        "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+        "name": "Progress",
+        "type": "select",
+        "options": [
+          {
+            "id": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+            "label": "To read",
+            "color": "gray"
+          },
+          {
+            "id": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+            "label": "Trying it",
+            "color": "blue"
+          },
+          {
+            "id": "b85715c5-85df-5e1c-b84a-7e6135ad4606",
+            "label": "Done it",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "71019124-7b11-5930-9898-f92ad857b013",
+        "name": "Area",
+        "type": "select",
+        "options": [
+          {
+            "id": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+            "label": "Today",
+            "color": "blue"
+          },
+          {
+            "id": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+            "label": "Diary",
+            "color": "purple"
+          },
+          {
+            "id": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+            "label": "Course",
+            "color": "green"
+          },
+          {
+            "id": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+            "label": "Time",
+            "color": "orange"
+          },
+          {
+            "id": "4f67cfad-2507-5e05-8267-bc7815d86019",
+            "label": "Sharing",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "name": "Day",
+        "type": "date",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "22222222-1111-5111-8111-111111111101",
+      "type": "view",
+      "title": "Board",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+        ],
+        "shownProperties": [
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48"
+        ],
+        "groupBy": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"
+      }
+    },
+    {
+      "id": "22222222-1111-5111-8111-111111111102",
+      "type": "view",
+      "title": "Table",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48"
+        ]
+      }
+    },
+    {
+      "id": "22222222-1111-5111-8111-111111111103",
+      "type": "view",
+      "title": "Calendar",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "11111111-1111-5111-8111-111111111101",
+      "type": "card",
+      "title": "Open a card and check Today",
+      "fields": {
+        "icon": "👋",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-01"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Your personal space gathers your own boards, wikis, diary and courses in one private place. Open “Today” in the sidebar at any time to see due cards, scheduled units and reviews across every space you use."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111102",
+      "type": "card",
+      "title": "Write in your diary",
+      "fields": {
+        "icon": "📔",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-02"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Your personal space lets you create a Diary from the sidebar. Each day gets its own entry, and consecutive days build a writing streak on your calendar."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111103",
+      "type": "card",
+      "title": "Build a course and review on time",
+      "fields": {
+        "icon": "🎓",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-03"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Create a Course to organize chapters and units, set a study schedule, keep private notes on each unit, and schedule spaced-repetition reviews."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111104",
+      "type": "card",
+      "title": "Track focus with the personal timer",
+      "fields": {
+        "icon": "⏱️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-04"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start the timer on any card, wiki page or course unit—or open “My Time” in the sidebar—to log focused sessions that belong solely to your account."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111105",
+      "type": "card",
+      "title": "Share read-only with a public link",
+      "fields": {
+        "icon": "🔗",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-05"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Even in your private personal space, you can publish a read-only link to a board or wiki from “Share” whenever you want someone else to read it, and turn the link off at any moment."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111106",
+      "type": "card",
+      "title": "Start an organization whenever you need colleagues",
+      "fields": {
+        "icon": "🏢",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-06"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Your personal space never admits other members. When you want to collaborate in real time, open the workspace switcher at the top left to start a shared organization—and copy any board, wiki or course across spaces."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

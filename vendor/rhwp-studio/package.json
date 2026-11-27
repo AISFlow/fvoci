@@ -1,0 +1,23 @@
+{
+  "name": "@fvoci/rhwp-studio",
+  "version": "0.9.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "rhwp-studio, the editor of rhwp, as the web app builds it into its editor frame: brought from rhwp's repository by import.mjs (it is not on npm), at the version of @rhwp/core.",
+  "rhwp": {
+    "repository": "https://github.com/edwardkim/rhwp",
+    "tag": "v0.9.0",
+    "commit": "c9095c5f67632e6721e800ccc7fb43ea49d26682",
+    "patched": [
+      "rhwp-studio/src/core/font-loader.ts",
+      "rhwp-studio/src/core/font-substitution.ts",
+      "rhwp-studio/src/core/pdf-open.ts",
+      "rhwp-studio/src/main.ts"
+    ]
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@rhwp/core": "0.9.0"
+  }
+}

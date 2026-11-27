@@ -1,0 +1,6 @@
+/* A small example still has a full viewport. Its content height must not make
+   a desktop picker switch to the short-screen sheet while it is opening. */
+html,
+body {
+  min-height: 100vh;
+}

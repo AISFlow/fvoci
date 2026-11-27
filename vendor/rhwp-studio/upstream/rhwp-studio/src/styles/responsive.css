@@ -1,0 +1,216 @@
+/* ================================================================
+   반응형 레이아웃 — 모바일 / 태블릿 / 데스크톱
+   ================================================================
+   브레이크포인트:
+     모바일:   ~767px
+     태블릿:   768px ~ 1023px
+     데스크톱: 1024px~
+
+   눈금자는 편집 화면의 모든 너비·높이에서 20px grid 슬롯을 유지한다 (#6187).
+   입력별 조작 여부는 Ruler가 판단하며, 인쇄에서만 눈금자를 숨긴다.
+   resize 중 bitmap 갱신·그리기 순서는 표시 정책과 별도 책임이다.
+   ================================================================ */
+
+/* ─── 모바일 (~767px) ────────────────────────────────── */
+@media (max-width: 767px) {
+  /* 전체 레이아웃: 편집 영역 최대화 */
+  body {
+    height: 100vh;
+    height: 100dvh; /* 폴백: 100vh → 100dvh (미지원 브라우저에서 100vh 사용) */
+  }
+  #studio-root {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* 눈금자 grid는 유지하고 문서의 기본 터치 스크롤·확대만 허용한다. */
+  #scroll-container {
+    touch-action: pan-x pan-y pinch-zoom;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── 상태 표시줄: 최소 정보 ── */
+  #status-bar {
+    height: 32px;
+    font-size: var(--font-size-sm);
+    padding: 0 4px;
+  }
+  .stb-divider { display: none; }
+  .stb-message { display: none; }
+  /* 모바일 줌: 쪽맞춤 + 통합 배율 메뉴만 표시 */
+  #sb-zoom-fit-width { display: none; }
+  #sb-zoom-out { display: none; }
+  .stb-zoom-range-wrap { display: none; }
+  #sb-zoom-in { display: none; }
+  /* 통합 배율 표시를 확대/축소 대화상자 진입점으로 활용 */
+  .stb-zoom-display {
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .stb-zoom-display:active {
+    background: var(--color-hover-bg);
+  }
+  /* 줌 버튼 터치 타겟 확대 */
+  .stb-icon-btn {
+    width: var(--touch-target-min);
+    height: 32px;
+  }
+
+  /* ── 대화상자: 풀스크린 시트 ── */
+  .modal-overlay {
+    align-items: flex-end; /* 하단에서 올라오는 시트 */
+  }
+  .dialog-wrap {
+    width: 100% !important;
+    max-width: 100%;
+    max-height: 90dvh;
+    border-radius: 12px 12px 0 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .dialog-wrap.recovery-dialog {
+    max-height: 90dvh;
+    overflow: hidden;
+  }
+  .dialog-title {
+    padding: 12px 16px;
+    font-size: var(--font-size-lg);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .dialog-close {
+    width: var(--touch-target-min);
+    height: var(--touch-target-min);
+    font-size: 20px;
+  }
+  .dialog-body {
+    padding: 16px;
+  }
+  .dialog-btn {
+    min-height: var(--touch-target-min);
+    padding: 8px 16px;
+    font-size: var(--font-size-md);
+  }
+  .dialog-input, .dialog-select {
+    height: 36px;
+    font-size: var(--font-size-md);
+    padding: 4px 8px;
+  }
+  .dialog-row {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .dialog-label {
+    font-size: var(--font-size-base);
+    min-width: unset;
+    text-align: left;
+  }
+  .dialog-radio-group label {
+    font-size: var(--font-size-base);
+    min-height: var(--touch-target-min);
+    display: flex;
+    align-items: center;
+  }
+
+  /* ── 드롭다운 메뉴: 터치 대응 ── */
+  .md-panel {
+    min-width: 200px;
+  }
+  .md-item {
+    min-height: var(--touch-target-min);
+    padding: 8px 16px 8px 32px;
+    font-size: var(--font-size-md);
+  }
+}
+
+/*
+ * 데스크톱 브라우저의 실사용 최소 너비보다 작은 embedded/mobile viewport에서는
+ * 14px 메뉴 title padding을 줄이지 않고 메뉴 행 자체만 가로 이동시킨다.
+ * toggle은 항상 오른쪽에 남기고, 열린 메뉴는 scroll clip 밖(viewport)에 표시한다.
+ */
+@media (max-width: 479px) {
+  #menu-bar {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  #menu-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .menu-toolbox-toggle {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+    background: var(--color-bg-light);
+  }
+
+  .menu-item.open > .menu-dropdown {
+    position: fixed;
+    top: 28px;
+    left: 8px;
+  }
+}
+
+/* 터치 화면은 클릭 범위만 키우고 모든 메뉴를 같은 한 줄에 유지한다. */
+@media (max-width: 767px) and (hover: none) and (pointer: coarse) {
+  #menu-bar {
+    height: 40px;
+    padding: 0 4px;
+  }
+
+  .menu-item.open > .menu-dropdown {
+    top: 40px;
+  }
+}
+
+/* ─── 터치 디바이스 공통 (pointer: coarse) ────────────── */
+@media (pointer: coarse) {
+  /* 모든 클릭 가능 요소의 최소 터치 타겟 */
+  .tb-btn, .stb-icon-btn, .md-item, .menu-title {
+    min-height: 36px;
+  }
+  .dialog-btn, .dialog-close {
+    min-height: var(--touch-target-min);
+  }
+
+  /* 스크롤바 숨김 (터치 스크롤 사용) */
+  #style-bar::-webkit-scrollbar {
+    display: none;
+  }
+  #style-bar {
+    scrollbar-width: none;
+  }
+}
+
+/* ─── 가상 키보드 대응 ───────────────────────────────── */
+@media (max-height: 500px) and (max-width: 767px) {
+  /* 키보드가 올라온 상태: 도구 영역 최소화 */
+  #menu-bar { display: none; }
+  #style-bar { display: none; }
+  #status-bar { display: none; }
+}
+
+/* ─── 인쇄 ──────────────────────────────────────────── */
+@media print {
+  #menu-bar, #icon-toolbar, #style-bar, #status-bar,
+  #ruler-corner, #h-ruler, #v-ruler {
+    display: none !important;
+  }
+  #editor-area {
+    display: flex;
+    flex-direction: column;
+  }
+  #scroll-container {
+    overflow: visible;
+  }
+  #scroll-content canvas {
+    box-shadow: none;
+  }
+  .modal-overlay {
+    display: none !important;
+  }
+}

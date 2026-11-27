@@ -1,0 +1,257 @@
+/* ================================================================
+   하단 상태 바 — 한컴 웹기안기 #status_bar 패턴
+   ================================================================ */
+#status-bar {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  background: var(--color-surface-raised);
+  border-top: 1px solid var(--ui-border-strong);
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  font-family: 'Malgun Gothic', dotum, Arial, sans-serif;
+  user-select: none;
+}
+
+/* 좌측 항목 — 한컴 .status_bar .inline_panel */
+.stb-item {
+  line-height: 22px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  flex-basis: auto;
+  flex-wrap: nowrap;
+}
+
+/* 현재 쪽 표시는 찾아가기 진입점이다. 상태 바의 다른 텍스트와 같은 치수를 유지한다. */
+.stb-page-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stb-page-button:hover {
+  color: var(--accent-primary);
+}
+
+.stb-page-button:focus-visible {
+  outline: 1px solid var(--accent-primary);
+  outline-offset: 1px;
+}
+
+/* 세로 구분선 — 한컴 .vertical_line_wrap .col_line */
+.stb-divider {
+  display: inline-block;
+  position: relative;
+  align-self: stretch;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.stb-divider::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 10px;
+  border-left: 1px solid var(--ui-border-strong);
+  border-right: 1px solid var(--doc-paper);
+}
+
+/* 상태 메시지 — 한컴 .status_bar .message */
+.stb-message {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent-primary);
+  padding: 0 12px;
+  line-height: 22px;
+}
+
+/* F5 셀 선택은 자동저장·인쇄가 쓰는 일시 #sb-message와 독립한 지속 상태다. */
+.stb-cell-selection {
+  min-width: 0;
+  max-width: 250px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--ui-border-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-secondary);
+  flex-shrink: 1;
+}
+
+.stb-cell-selection[hidden] {
+  display: none;
+}
+
+/* 우측 줌 영역 — 한컴 .inline_panel.justify_right.align_item_center */
+.stb-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
+/* 한컴 2024 상황 선: 맞춤 뒤에 축소-슬라이더-확대-배율 메뉴를 잇는다. */
+#sb-zoom-out { margin-left: 8px; }
+#sb-zoom-in { margin-right: 8px; }
+
+/* 아이콘 버튼 — 한컴 .btn_wo.btn_icon (24x24) */
+.stb-icon-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.stb-icon-btn:hover {
+  background: var(--ui-hover);
+  border-color: var(--ui-border-strong);
+}
+
+.stb-zoom-menu-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--color-text-secondary);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.stb-zoom-range-wrap {
+  --stb-zoom-thumb-size: 12px;
+  --stb-zoom-track-size: 2px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 150px;
+  min-width: 80px;
+  height: 20px;
+  margin: 0 3px;
+}
+
+.stb-zoom-range {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+  background: transparent;
+}
+
+.stb-zoom-range::-webkit-slider-runnable-track {
+  height: var(--stb-zoom-track-size);
+  border-radius: calc(var(--stb-zoom-track-size) / 2);
+  background: var(--ui-border-strong);
+}
+
+.stb-zoom-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: var(--stb-zoom-thumb-size);
+  height: var(--stb-zoom-thumb-size);
+  margin-top: calc((var(--stb-zoom-track-size) - var(--stb-zoom-thumb-size)) / 2);
+  box-sizing: border-box;
+  border: 1px solid var(--color-text-secondary);
+  border-radius: 50%;
+  background: var(--color-surface-raised);
+}
+
+.stb-zoom-range::-moz-range-track {
+  height: var(--stb-zoom-track-size);
+  border-radius: calc(var(--stb-zoom-track-size) / 2);
+  background: var(--ui-border-strong);
+}
+
+.stb-zoom-range::-moz-range-thumb {
+  width: var(--stb-zoom-thumb-size);
+  height: var(--stb-zoom-thumb-size);
+  box-sizing: border-box;
+  border: 1px solid var(--color-text-secondary);
+  border-radius: 50%;
+  background: var(--color-surface-raised);
+}
+
+/* 한컴의 100% 중립 눈금. thumb와 같은 높이로 뒤에 놓고 포인터 입력은 가로바에 통과시킨다. */
+.stb-zoom-neutral-mark {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: calc((100% - var(--stb-zoom-thumb-size)) / 2);
+  height: var(--stb-zoom-thumb-size);
+  border-left: 1px solid var(--color-text-secondary);
+  transform: translateX(-0.5px);
+  pointer-events: none;
+}
+
+.stb-zoom-range:focus-visible {
+  outline: 1px solid var(--color-focus-border);
+  outline-offset: 1px;
+}
+
+/* 돋보기와 배율은 한컴처럼 하나의 hover/focus/click 영역을 쓴다. */
+.stb-zoom-display {
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  height: 20px;
+  line-height: 20px;
+  width: 68px;
+  min-width: 68px;
+  box-sizing: border-box;
+  color: var(--color-text);
+  padding: 0 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+}
+
+.stb-zoom-display:hover {
+  background: var(--ui-hover);
+  border-color: var(--ui-border-strong);
+}
+
+.stb-zoom-display:focus-visible {
+  outline: 1px solid var(--color-focus-border);
+  outline-offset: 1px;
+}
+
+#sb-zoom-val {
+  width: 36px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  white-space: nowrap;
+}
+
+/* 줌 스프라이트 아이콘 — 한컴 hcwo.css 참조 (row 24, -960px) */
+.icon-zoom-out       { background-position: 0 -960px; }
+.icon-zoom-in        { background-position: -40px -960px; }
+.icon-zoom-fit-width { background-position: -80px -960px; }
+.icon-zoom-fit       { background-position: -120px -960px; }

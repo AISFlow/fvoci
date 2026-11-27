@@ -1,0 +1,6891 @@
+{
+  "description": "Shared test vectors for the body of a card or a comment: documents and what the server and the web app's validator must do with them. expect is accept (stored as sent), empty (stored as no body) or reject; a rejection names its kind in reason: notDocument, tooLarge, tooDeep, tooManyNodes, tableTooLarge, invalidNode. An accepted case may give text, the plain text the server stores for searching : a line per paragraph, heading, code block and formula block, the lines of blocks without words left out; a hard break is a line break kept inside its block's line, a formula inside a line gives its source there, a table gives the lines of its cells row after row, and a mention and a reference give nothing. Whole numbers count however they are written (1, 1.0, 1e0). Lengths are UTF-16 code units. The limits of depth (60), nodes (100,000) and size (8 MiB) are tested with documents each side builds from a case's build, which stands for body: {depth: n} is a document nesting n deep (doc, then n-2 blockquotes, then an empty paragraph); {nodes: n} is a document of n nodes (doc, then one paragraph of n-2 hardBreaks); {bytes: n} is a document of one paragraph of one text of the letter a, as long as makes its JSON without whitespace n bytes of UTF-8; {rows: n, columns: m} is a document of one table of n rows of m cells, each cell an empty paragraph. A table has at most 200 rows and 20 columns (its cells' spans across a row): past them is tableTooLarge. The server's test is crates/model/tests/body_vectors.rs. Either side that finds the two disagree adds a case. The allowlist is crates/model/src/allowlist.rs on the server and apps/web/src/lib/editor/schema.ts in the web app; bodyVersion is the version of it the cases are written for.",
+  "bodyVersion": 5,
+  "cases": [
+    {
+      "name": "null",
+      "body": null,
+      "expect": "empty"
+    },
+    {
+      "name": "one empty paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph"
+          }
+        ]
+      },
+      "expect": "empty"
+    },
+    {
+      "name": "one paragraph with empty content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": []
+          }
+        ]
+      },
+      "expect": "empty"
+    },
+    {
+      "name": "a string",
+      "body": "Hello",
+      "expect": "reject",
+      "reason": "notDocument"
+    },
+    {
+      "name": "a list",
+      "body": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            }
+          ]
+        }
+      ],
+      "expect": "reject",
+      "reason": "notDocument"
+    },
+    {
+      "name": "a paragraph at the top",
+      "body": {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "x"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "notDocument"
+    },
+    {
+      "name": "a document without content",
+      "body": {
+        "type": "doc"
+      },
+      "expect": "reject",
+      "reason": "notDocument"
+    },
+    {
+      "name": "a document with empty content",
+      "body": {
+        "type": "doc",
+        "content": []
+      },
+      "expect": "reject",
+      "reason": "notDocument"
+    },
+    {
+      "name": "a paragraph of text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Hello"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "Hello"
+    },
+    {
+      "name": "headings 1 to 3",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "c"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb\nc"
+    },
+    {
+      "name": "an empty heading",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": []
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a bullet list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "b"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bulletList",
+                    "content": [
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "c"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb\nc"
+    },
+    {
+      "name": "an ordered list with a start",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 3
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "an ordered list starting at 0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 0
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a task list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "done"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "open"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "done\nopen"
+    },
+    {
+      "name": "a blockquote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "q"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "q"
+    },
+    {
+      "name": "a code block with a language",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "fn main() {}"
+              }
+            ],
+            "attrs": {
+              "language": "rust"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "fn main() {}"
+    },
+    {
+      "name": "a code block without a language",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "an empty code block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [],
+            "attrs": {
+              "language": "c++"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a horizontal rule",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb"
+    },
+    {
+      "name": "a hard break",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb"
+    },
+    {
+      "name": "an image with alt",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "7abc.png",
+              "alt": "a picture"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": ""
+    },
+    {
+      "name": "an image without alt",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "7abc.png"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "an image with alt of 1000 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "x.png",
+              "alt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a mention",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "hi "
+              },
+              {
+                "type": "mention",
+                "attrs": {
+                  "userId": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "hi "
+    },
+    {
+      "name": "every mark once",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  },
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a mark with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold",
+                    "attrs": {}
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a link to a path in the app",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "/boards/1"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a link with an upper-case scheme",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "HTTPS://example.com"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a link of 2048 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a paragraph with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {},
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-1 inline math between text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "에너지는 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "E = mc^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 입니다."
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "에너지는 E = mc^2 입니다."
+    },
+    {
+      "name": "4.4-1 inline math first, last and alone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "a"
+                }
+              },
+              {
+                "type": "text",
+                "text": " b"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "c "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "d"
+                }
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a b\nc d\ne"
+    },
+    {
+      "name": "4.4-2 inline math in a heading",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x^2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "x^2"
+    },
+    {
+      "name": "4.4-3 block math in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\int_0^1 x^2 \\, dx = \\frac{1}{3}"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "\\int_0^1 x^2 \\, dx = \\frac{1}{3}"
+    },
+    {
+      "name": "4.4-3 block math in a blockquote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "blockMath",
+                "attrs": {
+                  "latex": "a"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a"
+    },
+    {
+      "name": "4.4-3 block math as the second child of a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "b"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb"
+    },
+    {
+      "name": "4.4-3 block math as the second child of a task item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "b"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb"
+    },
+    {
+      "name": "4.4-4 latex of one code unit",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-4 latex of 4000 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-5 latex of a space",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": " "
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-5 latex with a line break",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "a\\\\\nb"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-5 latex that looks like markup",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "<script>alert(1)</script>"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-5 latex with a javascript link",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\href{javascript:alert(1)}{x}"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-6 latex of 2000 emoji, 4000 UTF-16 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "4.4-7 a mermaid code block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart LR\n  A --> B"
+              }
+            ],
+            "attrs": {
+              "language": "mermaid"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "flowchart LR\n  A --> B"
+    },
+    {
+      "name": "4.4-7 a mermaid code block with an init and a click",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "%%{init: {}}%%\nflowchart LR\n  click A href \"javascript:alert(1)\""
+              }
+            ],
+            "attrs": {
+              "language": "mermaid"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "the example of 4.2",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "에너지는 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "E = mc^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 입니다."
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\int_0^1 x^2 \\, dx = \\frac{1}{3}"
+            }
+          },
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart LR\n  A --> B"
+              }
+            ],
+            "attrs": {
+              "language": "mermaid"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "에너지는 E = mc^2 입니다.\n\\int_0^1 x^2 \\, dx = \\frac{1}{3}\nflowchart LR\n  A --> B"
+    },
+    {
+      "name": "a paragraph of math alone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "x"
+    },
+    {
+      "name": "4.4-8 inlineMath without attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-8 inlineMath with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {}
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with empty latex",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": ""
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex of 4001 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex that is a number",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": 1
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex that is null",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": null
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex that is a list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": []
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex that is an object",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": {}
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 inlineMath with latex that is a boolean",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-11 inlineMath with display",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x",
+                  "display": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-11 inlineMath with html",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x",
+                  "html": "<span>x</span>"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 inlineMath with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 inlineMath with marks",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x"
+                },
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 inlineMath with text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x"
+                },
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-8 blockMath without attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-8 blockMath with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {}
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with empty latex",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": ""
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex of 4001 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex that is a number",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": 1
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex that is null",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": null
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex that is a list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": []
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex that is an object",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": {}
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-9 blockMath with latex that is a boolean",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": true
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-11 blockMath with display",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x",
+              "display": true
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-11 blockMath with html",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x",
+              "html": "<span>x</span>"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 blockMath with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 blockMath with marks",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x"
+            },
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-13 blockMath with text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "x"
+            },
+            "text": "x"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-10 latex of 2000 emoji and one more, 4001 UTF-16 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀x"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-12 inline math in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "inlineMath",
+            "attrs": {
+              "latex": "x"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-12 block math in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "blockMath",
+                "attrs": {
+                  "latex": "x"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-12 inline math in a code block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "x"
+                }
+              }
+            ],
+            "attrs": {
+              "language": "tex"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "4.4-12 block math as the first child of a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "x"
+                    }
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a level written as 1.0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1.0
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a start written as 1e2",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 100.0
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a level of 1.5",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1.5
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a level of 4.0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 4.0
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a level written as a string",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": "1"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an ordered list starting at 1000000000",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1000000000
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "an ordered list starting at 1000000001",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1000000001
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image file of 100 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "an image file of 101 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an empty task list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a list item in a task list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a task item that does not start with a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "blockquote",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "x"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a task item in a bullet list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a hard break in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "hardBreak"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a hard break with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "hardBreak",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a mention in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "mention",
+            "attrs": {
+              "userId": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a code block in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "codeBlock",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ],
+                "attrs": {
+                  "language": "rust"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a blockquote in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "blockquote",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a horizontal rule in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "horizontalRule"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a horizontal rule with empty content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "horizontalRule",
+            "content": []
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a text with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "attrs": {}
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a paragraph of a hard break alone between two",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "hardBreak"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\n\n\nb"
+    },
+    {
+      "name": "empty blocks give no line",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          },
+          {
+            "type": "paragraph"
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1
+            },
+            "content": []
+          },
+          {
+            "type": "codeBlock",
+            "content": []
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "a\nb"
+    },
+    {
+      "name": "a text holding U+0000",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a\u0000b"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an attribute holding U+0000",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "x.png",
+              "alt": "a\u0000"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an attribute name holding U+0000",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1,
+              "x\u0000": "y"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "a"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "latex holding U+0000",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "a\u0000"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link holding U+0000, which the link rule alone would allow",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "/a\u0000b"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "one empty paragraph with empty attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {}
+          }
+        ]
+      },
+      "expect": "empty"
+    },
+    {
+      "name": "an empty paragraph with an unknown member",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "id": "x"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a document with an unknown member",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ],
+        "version": 1
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a depth of 60",
+      "build": {
+        "depth": 60
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a depth of 61",
+      "build": {
+        "depth": 61
+      },
+      "expect": "reject",
+      "reason": "tooDeep"
+    },
+    {
+      "name": "100000 nodes",
+      "build": {
+        "nodes": 100000
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "100001 nodes",
+      "build": {
+        "nodes": 100001
+      },
+      "expect": "reject",
+      "reason": "tooManyNodes"
+    },
+    {
+      "name": "8 MiB",
+      "build": {
+        "bytes": 8388608
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "8 MiB and one byte",
+      "build": {
+        "bytes": 8388609
+      },
+      "expect": "reject",
+      "reason": "tooLarge"
+    },
+    {
+      "name": "an unknown node",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an unknown mark",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "underline"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an unknown member",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "id": "y"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a null attrs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": null
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a null content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": null
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a null marks on text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": null
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a null attribute value",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "x.png",
+              "alt": null
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a node without a type",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an empty text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": ""
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a text that is no string",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": 1
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "content that is no list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": {}
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a heading without a level",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a heading of level 4",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 4
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a heading of level 0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 0
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a heading in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "heading",
+                "attrs": {
+                  "level": 1
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "text directly in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "text",
+            "text": "x"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an empty bullet list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a paragraph in a bullet list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a list item that does not start with a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "blockquote",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "x"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an empty list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": []
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a task item without checked",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a task item checked as a string",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": "yes"
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an ordered list starting below 0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": -1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an empty blockquote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a mark in a code block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ],
+            "attrs": {
+              "language": "rust"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a code block language with a space",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ],
+            "attrs": {
+              "language": "two words"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a code block language of 41 characters",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ],
+            "attrs": {
+              "language": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "image",
+                "attrs": {
+                  "fileId": "x.png"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image without a file",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image with an empty file",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": ""
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image with alt of 1001 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "x.png",
+              "alt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "an image with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "x.png"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "minutes"
+              }
+            ]
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "7abc.pdf"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "minutes"
+    },
+    {
+      "name": "a file block in a list and a quote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "file",
+                    "attrs": {
+                      "fileId": "7abc.hwp"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "file",
+                "attrs": {
+                  "fileId": "7def.xlsx"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a file block file of 100 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a file block file of 101 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "file",
+                "attrs": {
+                  "fileId": "x.pdf"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block without a file",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block with an empty file",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": ""
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block with its name",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "x.pdf",
+              "name": "minutes.pdf"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block with its size",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "x.pdf",
+              "size": 7
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block whose file is a number",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": 7
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a file block with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "x.pdf"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a mention without a user",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "mention"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a mention of something that is no user identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "mention",
+                "attrs": {
+                  "userId": "u1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "see "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "see "
+    },
+    {
+      "name": "a reference alone in a heading",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": ""
+    },
+    {
+      "name": "a table of a header row and a row",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Name"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Role"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Ada"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Engineer"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "Name\nRole\nAda\nEngineer"
+    },
+    {
+      "name": "a table without a header row",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "c"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "d"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a table whose first column is headers",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "x"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "1"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "y"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "2"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a table of one cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a table among other blocks gives its cells' lines between theirs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "before"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "one"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "two"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "four"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "before\none\ntwo\nfour\nafter"
+    },
+    {
+      "name": "a cell spanning two columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "wide"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a cell spanning two rows",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "tall"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a cell spanning two rows and two columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2,
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a row the cells above cover has no cell of its own",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "spans written as 1 and as 1.0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 1.0,
+                      "rowspan": 1.0
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a cell of 20 columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 20
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a cell of 200 rows",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 200
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a header cell spanning columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "h"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a cell of every block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "heading",
+                        "attrs": {
+                          "level": 2
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "title"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "x "
+                          },
+                          {
+                            "type": "mention",
+                            "attrs": {
+                              "userId": "01930000-0000-7000-8000-00000000c002"
+                            }
+                          },
+                          {
+                            "type": "reference",
+                            "attrs": {
+                              "id": "01930000-0000-7000-8000-00000000b002"
+                            }
+                          },
+                          {
+                            "type": "inlineMath",
+                            "attrs": {
+                              "latex": "a^2"
+                            }
+                          },
+                          {
+                            "type": "hardBreak"
+                          },
+                          {
+                            "type": "text",
+                            "text": "y"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "bulletList",
+                        "content": [
+                          {
+                            "type": "listItem",
+                            "content": [
+                              {
+                                "type": "paragraph",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "item"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "orderedList",
+                        "attrs": {
+                          "start": 3
+                        },
+                        "content": [
+                          {
+                            "type": "listItem",
+                            "content": [
+                              {
+                                "type": "paragraph",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "third"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "taskList",
+                        "content": [
+                          {
+                            "type": "taskItem",
+                            "attrs": {
+                              "checked": true
+                            },
+                            "content": [
+                              {
+                                "type": "paragraph",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "done"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "blockquote",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "quoted"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "codeBlock",
+                        "attrs": {
+                          "language": "rust"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "let x = 1;"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "horizontalRule"
+                      },
+                      {
+                        "type": "image",
+                        "attrs": {
+                          "fileId": "7chart.png",
+                          "alt": "a chart"
+                        }
+                      },
+                      {
+                        "type": "file",
+                        "attrs": {
+                          "fileId": "7minutes.pdf"
+                        }
+                      },
+                      {
+                        "type": "blockMath",
+                        "attrs": {
+                          "latex": "E = mc^2"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "title\nx a^2\ny\nitem\nthird\ndone\nquoted\nlet x = 1;\nE = mc^2"
+    },
+    {
+      "name": "a table of 200 rows",
+      "build": {
+        "rows": 200,
+        "columns": 1
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a table of 20 columns",
+      "build": {
+        "rows": 1,
+        "columns": 20
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a reference in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "reference",
+            "attrs": {
+              "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference without an identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference to something that is no identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "c1"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference to the nil identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "00000000-0000-0000-0000-000000000000"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference to an identifier in upper case",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01A1C6F6-4D58-76F3-ACA0-FFF336F1535D"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference with a title",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d",
+                  "title": "Plan"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a reference in a code block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "content": [
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01a1c6f6-4d58-76f3-aca0-fff336f1535d"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a horizontal rule with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "horizontalRule",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "text on a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "text": "x"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "marks on a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "marks": [
+              {
+                "type": "bold"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "the same mark twice",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a mark with an unknown member",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold",
+                    "x": 1
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link without href",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link with a javascript scheme",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "javascript:alert(1)"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link with a tab inside the scheme",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "java\tscript:alert(1)"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link to another host without a scheme",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "//host/path"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link with a backslash",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "/\\host"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link of 2049 code units",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a link that is only spaces",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "  "
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a bold mark with an attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "x",
+                "marks": [
+                  {
+                    "type": "bold",
+                    "attrs": {
+                      "level": 1
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table of 201 rows",
+      "build": {
+        "rows": 201,
+        "columns": 1
+      },
+      "expect": "reject",
+      "reason": "tableTooLarge"
+    },
+    {
+      "name": "a table of 21 columns",
+      "build": {
+        "rows": 1,
+        "columns": 21
+      },
+      "expect": "reject",
+      "reason": "tableTooLarge"
+    },
+    {
+      "name": "a row of ten cells of two columns and one more",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "tableTooLarge"
+    },
+    {
+      "name": "a cell of 20 columns beside another",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 20
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "tableTooLarge"
+    },
+    {
+      "name": "a table without rows",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table without content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table with an attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "attrs": {
+              "style": "x"
+            },
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row with an attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "attrs": {
+                  "height": 2
+                },
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table whose rows have no cells",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow"
+              },
+              {
+                "type": "tableRow"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row narrower than the table",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row wider than the others",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell spanning past the last row",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 3
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell spanning over another",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 3
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row the cells above do not cover is empty",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 2
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "tableRow",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "tableCell",
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a header in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "tableHeader",
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell directly in a table",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableCell",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a paragraph in a row",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a row in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "tableRow",
+                        "content": [
+                          {
+                            "type": "tableCell",
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "table",
+                        "content": [
+                          {
+                            "type": "tableRow",
+                            "content": [
+                              {
+                                "type": "tableCell",
+                                "content": [
+                                  {
+                                    "type": "paragraph"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "table",
+                    "content": [
+                      {
+                        "type": "tableRow",
+                        "content": [
+                          {
+                            "type": "tableCell",
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a list in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "bulletList",
+                        "content": [
+                          {
+                            "type": "listItem",
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              },
+                              {
+                                "type": "table",
+                                "content": [
+                                  {
+                                    "type": "tableRow",
+                                    "content": [
+                                      {
+                                        "type": "tableCell",
+                                        "content": [
+                                          {
+                                            "type": "paragraph"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a task item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "table",
+                    "content": [
+                      {
+                        "type": "tableRow",
+                        "content": [
+                          {
+                            "type": "tableCell",
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a blockquote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "table",
+                "content": [
+                  {
+                    "type": "tableRow",
+                    "content": [
+                      {
+                        "type": "tableCell",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a table in a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "table",
+                "content": [
+                  {
+                    "type": "tableRow",
+                    "content": [
+                      {
+                        "type": "tableCell",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell without content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell with empty content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "text directly in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell of 0 columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 0
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell of 21 columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 21
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell of 1.5 columns",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": 1.5
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell whose columns are a text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colspan": "2"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell of 201 rows",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 201
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell of 0 rows",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "rowspan": 0
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell with column widths",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "attrs": {
+                      "colwidth": [
+                        100
+                      ]
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a header with column widths",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "attrs": {
+                      "colwidth": [
+                        100
+                      ]
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a cell with text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "text": "a",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    }
+  ]
+}

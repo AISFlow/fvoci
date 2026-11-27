@@ -1,0 +1,681 @@
+{
+  "key": "content-calendar",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "c50d84fe-4fca-5fe4-a4c6-bc7fa2146469",
+    "title": "콘텐츠 캘린더",
+    "description": "글과 영상을 언제 어디에 낼지 계획합니다. 달력에서 발행일을 보고, 갤러리에서는 본문의 첫 그림이 카드의 얼굴이 됩니다.",
+    "icon": "📣",
+    "showDescription": true,
+    "dueDatePropertyId": "d4ab6f2d-8f17-5bef-a690-13b90b012af4",
+    "doneWhen": {
+      "propertyId": "70a23d2c-c625-5914-bf38-2b743dbe75d0",
+      "optionIds": [
+        "9fbe9f25-85b1-5b41-8ce0-0d26f659836d"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "70a23d2c-c625-5914-bf38-2b743dbe75d0",
+        "name": "상태",
+        "type": "select",
+        "options": [
+          {
+            "id": "611cf64d-c9cd-516f-b30d-b7dde77c1e76",
+            "label": "아이디어",
+            "color": "gray"
+          },
+          {
+            "id": "522aec7a-93a0-5890-a880-05a834d0f399",
+            "label": "쓰는 중",
+            "color": "yellow"
+          },
+          {
+            "id": "51117d36-696b-5660-b735-d12d330a65c2",
+            "label": "검토 중",
+            "color": "purple"
+          },
+          {
+            "id": "e10523e9-db55-5cbb-960b-d88cedfaf2d1",
+            "label": "예약됨",
+            "color": "blue"
+          },
+          {
+            "id": "9fbe9f25-85b1-5b41-8ce0-0d26f659836d",
+            "label": "발행됨",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "95a734c3-abb2-5fdc-9b23-6dadf28dad22",
+        "name": "형식",
+        "type": "select",
+        "options": [
+          {
+            "id": "a91e6e13-e04e-5959-9226-4717c208be2e",
+            "label": "블로그 글",
+            "color": "blue"
+          },
+          {
+            "id": "26edc147-a209-58da-bd18-b3a78105c333",
+            "label": "영상",
+            "color": "red"
+          },
+          {
+            "id": "e2c158c6-4929-5af7-9cc1-e7671d56a02b",
+            "label": "소식지",
+            "color": "orange"
+          }
+        ]
+      },
+      {
+        "id": "8eceaf5c-f086-587b-9717-511c1a18e518",
+        "name": "채널",
+        "type": "multiSelect",
+        "options": [
+          {
+            "id": "4526d59f-d2bd-5fe6-b998-1bad43e8375e",
+            "label": "블로그",
+            "color": "blue"
+          },
+          {
+            "id": "9d466a47-418d-5dc0-99a8-ccc717713c1b",
+            "label": "메일",
+            "color": "orange"
+          },
+          {
+            "id": "07ceb846-e0bc-58a0-8ca0-82b572209906",
+            "label": "소셜",
+            "color": "pink"
+          },
+          {
+            "id": "005e6add-23c6-57ed-922b-a0f8ac8e007e",
+            "label": "영상 채널",
+            "color": "red"
+          }
+        ]
+      },
+      {
+        "id": "3a05385e-e34e-5fe1-9e50-aa29005b432c",
+        "name": "쓰는 사람",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "d4ab6f2d-8f17-5bef-a690-13b90b012af4",
+        "name": "발행일",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "0f964d15-cac0-523c-b2af-fad9f295efed",
+        "name": "발행된 주소",
+        "type": "url",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "d5df3f5c-7463-57c1-953c-0b50a79a148a",
+      "type": "view",
+      "title": "달력",
+      "fields": {
+        "cardOrder": [
+          "1a08f0e3-8816-5fb7-8610-d681645fdb94",
+          "e09e0d42-f645-5404-81b7-828c878b7fe3",
+          "8ae7f471-69b6-5af4-a778-c9ec7770b1c2",
+          "cdfbd43f-f6bd-584f-9de6-ec50431728d1",
+          "a4910976-1279-56ea-9dac-fcfaf45eeb72"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "95a734c3-abb2-5fdc-9b23-6dadf28dad22"],
+        "dateProperty": "d4ab6f2d-8f17-5bef-a690-13b90b012af4"
+      }
+    },
+    {
+      "id": "a338fa2e-c5fd-5814-a6d1-718b3d35c415",
+      "type": "view",
+      "title": "표지 갤러리",
+      "fields": {
+        "cardOrder": [
+          "1a08f0e3-8816-5fb7-8610-d681645fdb94",
+          "e09e0d42-f645-5404-81b7-828c878b7fe3",
+          "8ae7f471-69b6-5af4-a778-c9ec7770b1c2",
+          "cdfbd43f-f6bd-584f-9de6-ec50431728d1",
+          "a4910976-1279-56ea-9dac-fcfaf45eeb72"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gallery",
+        "visibleGroups": [],
+        "shownProperties": [
+          "__title",
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0",
+          "8eceaf5c-f086-587b-9717-511c1a18e518"
+        ]
+      }
+    },
+    {
+      "id": "ba6cd417-a7c3-5cf1-9d62-bcd273fdf8bf",
+      "type": "view",
+      "title": "진행 상황",
+      "fields": {
+        "cardOrder": [
+          "1a08f0e3-8816-5fb7-8610-d681645fdb94",
+          "e09e0d42-f645-5404-81b7-828c878b7fe3",
+          "8ae7f471-69b6-5af4-a778-c9ec7770b1c2",
+          "cdfbd43f-f6bd-584f-9de6-ec50431728d1",
+          "a4910976-1279-56ea-9dac-fcfaf45eeb72"
+        ],
+        "collapsedGroups": ["9fbe9f25-85b1-5b41-8ce0-0d26f659836d"],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "611cf64d-c9cd-516f-b30d-b7dde77c1e76",
+          "522aec7a-93a0-5890-a880-05a834d0f399",
+          "51117d36-696b-5660-b735-d12d330a65c2",
+          "e10523e9-db55-5cbb-960b-d88cedfaf2d1",
+          "9fbe9f25-85b1-5b41-8ce0-0d26f659836d"
+        ],
+        "shownProperties": [
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22",
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4",
+          "3a05385e-e34e-5fe1-9e50-aa29005b432c"
+        ],
+        "groupBy": "70a23d2c-c625-5914-bf38-2b743dbe75d0"
+      }
+    },
+    {
+      "id": "26965616-6518-5d2e-9551-a0c2aa1bfcaf",
+      "type": "view",
+      "title": "전체 목록",
+      "fields": {
+        "cardOrder": [
+          "1a08f0e3-8816-5fb7-8610-d681645fdb94",
+          "e09e0d42-f645-5404-81b7-828c878b7fe3",
+          "8ae7f471-69b6-5af4-a778-c9ec7770b1c2",
+          "cdfbd43f-f6bd-584f-9de6-ec50431728d1",
+          "a4910976-1279-56ea-9dac-fcfaf45eeb72"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4": "dateRange",
+          "0f964d15-cac0-523c-b2af-fad9f295efed": "countNotEmpty"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "d4ab6f2d-8f17-5bef-a690-13b90b012af4",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22",
+          "8eceaf5c-f086-587b-9717-511c1a18e518",
+          "3a05385e-e34e-5fe1-9e50-aa29005b432c",
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4",
+          "0f964d15-cac0-523c-b2af-fad9f295efed"
+        ]
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "1a08f0e3-8816-5fb7-8610-d681645fdb94",
+      "type": "card",
+      "title": "보드로 한 주를 계획하는 법",
+      "fields": {
+        "icon": "🗂️",
+        "isTemplate": false,
+        "properties": {
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0": "9fbe9f25-85b1-5b41-8ce0-0d26f659836d",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22": "a91e6e13-e04e-5959-9226-4717c208be2e",
+          "8eceaf5c-f086-587b-9717-511c1a18e518": [
+            "4526d59f-d2bd-5fe6-b998-1bad43e8375e",
+            "07ceb846-e0bc-58a0-8ca0-82b572209906"
+          ],
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4": {
+            "from": "2026-12-02"
+          },
+          "0f964d15-cac0-523c-b2af-fad9f295efed": "https://example.com/blog/plan-a-week"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "board.png",
+              "alt": "열 세 개에 카드가 놓인 보드"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "줄거리"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "월요일에 할 일을 모두 카드로 적는다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "하루에 세 장만 ‘오늘’로 옮긴다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "금요일에 남은 카드를 돌아본다"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "다 적으면 머리가 가벼워진다."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "e09e0d42-f645-5404-81b7-828c878b7fe3",
+      "type": "card",
+      "title": "3분기 숫자로 본 우리 서비스",
+      "fields": {
+        "icon": "📊",
+        "isTemplate": false,
+        "properties": {
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0": "51117d36-696b-5660-b735-d12d330a65c2",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22": "e2c158c6-4929-5af7-9cc1-e7671d56a02b",
+          "8eceaf5c-f086-587b-9717-511c1a18e518": ["9d466a47-418d-5dc0-99a8-ccc717713c1b"],
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4": {
+            "from": "2026-12-09"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "chart.png",
+              "alt": "점점 높아지는 막대 여섯 개"
+            }
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "숫자 세 개만 고릅니다. 나머지는 링크로 돌립니다."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "숫자 확인"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "제목 정하기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "시험 발송"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "8ae7f471-69b6-5af4-a778-c9ec7770b1c2",
+      "type": "card",
+      "title": "출시 소개 영상",
+      "fields": {
+        "icon": "🎬",
+        "isTemplate": false,
+        "properties": {
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0": "522aec7a-93a0-5890-a880-05a834d0f399",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22": "26edc147-a209-58da-bd18-b3a78105c333",
+          "8eceaf5c-f086-587b-9717-511c1a18e518": [
+            "005e6add-23c6-57ed-922b-a0f8ac8e007e",
+            "07ceb846-e0bc-58a0-8ca0-82b572209906"
+          ],
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4": {
+            "from": "2027-01-07"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "timeline.png",
+              "alt": "막대가 차례로 이어지는 일정"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "장면"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "문제: 흩어진 파일과 메모"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "풀이: 한 보드에서 계획하고, 쓰고, 연다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "끝: 가입 주소"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "cdfbd43f-f6bd-584f-9de6-ec50431728d1",
+      "type": "card",
+      "title": "고객 인터뷰: 작은 가게의 하루",
+      "fields": {
+        "icon": "🎙️",
+        "isTemplate": false,
+        "properties": {
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0": "611cf64d-c9cd-516f-b30d-b7dde77c1e76",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22": "a91e6e13-e04e-5959-9226-4717c208be2e",
+          "8eceaf5c-f086-587b-9717-511c1a18e518": ["4526d59f-d2bd-5fe6-b998-1bad43e8375e"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "발행일을 아직 정하지 않은 카드는 달력에 나오지 않습니다. 날짜를 넣으면 그날에 놓입니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "누구에게 물을지"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "무엇을 물을지"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "a4910976-1279-56ea-9dac-fcfaf45eeb72",
+      "type": "card",
+      "title": "올해 돌아보기",
+      "fields": {
+        "icon": "🎁",
+        "isTemplate": false,
+        "properties": {
+          "70a23d2c-c625-5914-bf38-2b743dbe75d0": "e10523e9-db55-5cbb-960b-d88cedfaf2d1",
+          "95a734c3-abb2-5fdc-9b23-6dadf28dad22": "e2c158c6-4929-5af7-9cc1-e7671d56a02b",
+          "8eceaf5c-f086-587b-9717-511c1a18e518": [
+            "9d466a47-418d-5dc0-99a8-ccc717713c1b",
+            "4526d59f-d2bd-5fe6-b998-1bad43e8375e"
+          ],
+          "d4ab6f2d-8f17-5bef-a690-13b90b012af4": {
+            "from": "2026-12-30"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "3분기 소식지의 틀을 그대로 씁니다: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "e09e0d42-f645-5404-81b7-828c878b7fe3"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "board.png",
+      "name": "보드.png"
+    },
+    {
+      "asset": "chart.png",
+      "name": "차트.png"
+    },
+    {
+      "asset": "timeline.png",
+      "name": "일정.png"
+    }
+  ]
+}

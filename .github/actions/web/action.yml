@@ -1,0 +1,114 @@
+name: Web
+description: >-
+  Installs Node, pnpm and the packages of the JavaScript workspace, and on request the
+  fonts the web app builds and a browser for Playwright.
+
+inputs:
+  fonts:
+    description: >-
+      Whether to build the fonts (`src/styles/fonts`, which git ignores). A checkout
+      that was built once has them, so the jobs that read the source get them too.
+    default: 'false'
+  browser:
+    description: The browser Playwright drives in this job (chromium or webkit), if any.
+    default: ''
+  save:
+    description: >-
+      Whether this job is the one that saves what it had to fetch or build. It does so
+      only in a run on main: a pull request reads the caches and writes none.
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Node
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 26.13.0
+        # It would save a cache from any run; the store is cached below instead.
+        package-manager-cache: false
+
+    # The version is the `packageManager` of package.json.
+    - name: Install pnpm
+      uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+    - name: Find the pnpm store
+      id: pnpm
+      shell: bash
+      run: echo "store=$(pnpm store path)" >>"$GITHUB_OUTPUT"
+
+    - name: Bring back the pnpm store
+      id: store
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.pnpm.outputs.store }}
+        key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+    - name: Install the packages
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Save the pnpm store
+      if: ${{ inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.store.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.pnpm.outputs.store }}
+        key: ${{ steps.store.outputs.cache-primary-key }}
+
+    # The downloaded sources and what the tool cut from them. The tool checks every
+    # source against its recorded SHA-256, and builds again when its inputs are not the
+    # ones its output was made from: a stale cache costs time, not correctness.
+    - name: Bring back the fonts
+      if: ${{ inputs.fonts == 'true' }}
+      id: fonts
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          target/web-fonts/src
+          apps/web/src/styles/fonts
+        key: web-fonts-${{ hashFiles('apps/web/tools/fonts/**', 'pnpm-lock.yaml') }}
+
+    - name: Build the fonts
+      if: ${{ inputs.fonts == 'true' }}
+      shell: bash
+      run: pnpm --filter web run fonts
+
+    - name: Save the fonts
+      if: ${{ inputs.fonts == 'true' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.fonts.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          target/web-fonts/src
+          apps/web/src/styles/fonts
+        key: ${{ steps.fonts.outputs.cache-primary-key }}
+
+    - name: Read the version of Playwright
+      if: ${{ inputs.browser != '' }}
+      id: playwright
+      shell: bash
+      run: |
+        version=$(jq --raw-output '.devDependencies["@playwright/test"]' apps/web/package.json)
+        echo "version=$version" >>"$GITHUB_OUTPUT"
+
+    - name: Bring back the browser
+      if: ${{ inputs.browser != '' }}
+      id: browser
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ inputs.browser }}-${{ steps.playwright.outputs.version }}
+
+    # With the browser there already this installs only the system's libraries for it.
+    - name: Install the browser
+      if: ${{ inputs.browser != '' }}
+      shell: bash
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: pnpm --filter web exec playwright install --with-deps "$BROWSER"
+
+    - name: Save the browser
+      if: ${{ inputs.browser != '' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.browser.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.browser.outputs.cache-primary-key }}

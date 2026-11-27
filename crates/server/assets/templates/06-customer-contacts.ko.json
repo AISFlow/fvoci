@@ -1,0 +1,572 @@
+{
+  "key": "customer-contacts",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "92b511de-7777-5737-837e-7f4d8c182371",
+    "title": "고객 연락처",
+    "description": "고객과 나눈 이야기와 다음 연락을 한곳에 둡니다. 표 아래에서 예상 금액의 합계를 보고, ‘영업 단계별’ 보드에서는 끝난 거래를 숨깁니다. 예시의 이름과 주소는 모두 지어낸 것입니다.",
+    "icon": "🤝",
+    "showDescription": true,
+    "dueDatePropertyId": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+    "doneWhen": {
+      "propertyId": "c98ec0be-784b-5243-931d-b2989975ff1c",
+      "optionIds": [
+        "1b78a142-f648-5a60-8a86-16933769f012",
+        "4d19697b-67b2-59c3-beb5-9b0385393563"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "c98ec0be-784b-5243-931d-b2989975ff1c",
+        "name": "단계",
+        "type": "select",
+        "options": [
+          {
+            "id": "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+            "label": "문의",
+            "color": "gray"
+          },
+          {
+            "id": "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+            "label": "상담 중",
+            "color": "blue"
+          },
+          {
+            "id": "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+            "label": "제안함",
+            "color": "purple"
+          },
+          {
+            "id": "1b78a142-f648-5a60-8a86-16933769f012",
+            "label": "계약",
+            "color": "green"
+          },
+          {
+            "id": "4d19697b-67b2-59c3-beb5-9b0385393563",
+            "label": "무산",
+            "color": "brown"
+          }
+        ]
+      },
+      {
+        "id": "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+        "name": "담당자 이름",
+        "type": "text",
+        "options": []
+      },
+      {
+        "id": "6bf8a46f-82b8-5fcf-a610-5108159360a4",
+        "name": "이메일",
+        "type": "email",
+        "options": []
+      },
+      {
+        "id": "6895da85-1998-5dcc-aa54-f30e11864d03",
+        "name": "전화",
+        "type": "phone",
+        "options": []
+      },
+      {
+        "id": "08bbbef5-3aa8-5779-8352-f3ecb950a259",
+        "name": "웹사이트",
+        "type": "url",
+        "options": []
+      },
+      {
+        "id": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+        "name": "예상 금액(만 원)",
+        "type": "number",
+        "options": []
+      },
+      {
+        "id": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+        "name": "다음 연락",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "fd8c3232-5b88-5e65-af78-737569871aed",
+        "name": "우리 쪽 담당",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "cdf13dc7-96d8-5df6-8ac4-81985e231df1",
+        "name": "마지막으로 고친 시각",
+        "type": "updatedTime",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "f951de4f-b35f-5f31-9378-c0b641b07cf5",
+      "type": "view",
+      "title": "모든 고객",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "sum",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": "earliest"
+        },
+        "columnWidths": {
+          "__title": 200,
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": 220
+        },
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "c98ec0be-784b-5243-931d-b2989975ff1c",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4",
+          "6895da85-1998-5dcc-aa54-f30e11864d03",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+          "fd8c3232-5b88-5e65-af78-737569871aed",
+          "cdf13dc7-96d8-5df6-8ac4-81985e231df1"
+        ]
+      }
+    },
+    {
+      "id": "877bf91d-ce73-52c5-8c1f-afa58c4387e5",
+      "type": "view",
+      "title": "영업 단계별",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": ["", "4d19697b-67b2-59c3-beb5-9b0385393563"],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+          "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+          "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+          "1b78a142-f648-5a60-8a86-16933769f012"
+        ],
+        "shownProperties": [
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1"
+        ],
+        "groupBy": "c98ec0be-784b-5243-931d-b2989975ff1c"
+      }
+    },
+    {
+      "id": "de6b210d-e08f-5a91-ab2a-20bce6f87e4f",
+      "type": "view",
+      "title": "진행 중인 거래",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "sum"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "c98ec0be-784b-5243-931d-b2989975ff1c",
+              "condition": "notIncludes",
+              "values": [
+                "1b78a142-f648-5a60-8a86-16933769f012",
+                "4d19697b-67b2-59c3-beb5-9b0385393563"
+              ]
+            },
+            {
+              "propertyId": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+              "condition": "isNotEmpty",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "c98ec0be-784b-5243-931d-b2989975ff1c",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+          "fd8c3232-5b88-5e65-af78-737569871aed"
+        ]
+      }
+    },
+    {
+      "id": "3d41d244-e566-507f-8e8b-0293edfca027",
+      "type": "view",
+      "title": "연락할 날",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "c98ec0be-784b-5243-931d-b2989975ff1c"],
+        "dateProperty": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+      "type": "card",
+      "title": "고객사 A",
+      "fields": {
+        "icon": "🏢",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "구매 담당",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "buyer.a@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "02-0000-0101",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/a",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "1200",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-03"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "기록"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "11월 26일: 소개 자료를 보냈다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "11월 30일: 30명 요금을 물어 왔다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "다음에 할 일"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "견적 보내기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+      "type": "card",
+      "title": "고객사 B",
+      "fields": {
+        "icon": "🏬",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "운영 팀장",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "ops.b@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "031-000-0102",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/b",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "3400",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-05"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "지금 쓰는 도구에서 옮겨 올 수 있는지가 제일 궁금합니다."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "가져오기로 옮길 수 있다고 답했다. 시연 날짜를 잡는다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+      "type": "card",
+      "title": "고객사 C",
+      "fields": {
+        "icon": "🏭",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "대표",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "owner.c@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "051-000-0103",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/c",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "500",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-10"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "소식지를 보고 문의했다. 다섯 명이 쓴다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "b8374612-f12d-51f2-add5-b969215f3356",
+      "type": "card",
+      "title": "고객사 D",
+      "fields": {
+        "icon": "🏫",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "1b78a142-f648-5a60-8a86-16933769f012",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "총무",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "office.d@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "02-0000-0104",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/d",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "2100"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "계약했다. 소개해 준 곳: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "eeaecdaf-abe3-5c1e-8561-455aeda25ac7"
+                }
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "계약서 받기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "계정 만들어 주기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52",
+      "type": "card",
+      "title": "고객사 E",
+      "fields": {
+        "icon": "🏪",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "4d19697b-67b2-59c3-beb5-9b0385393563",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "구매 담당",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "buyer.e@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "064-000-0105",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/e",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "900"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "올해 예산이 없어 내년에 다시 보기로 했다."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

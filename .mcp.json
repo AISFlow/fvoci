@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "svelte": {
+      "type": "streamable-http",
+      "url": "https://mcp.svelte.dev/mcp"
+    },
+    "beautiful-rust": {
+      "type": "streamable-http",
+      "url": "https://mcp.beautifulrust.dev/mcp"
+    }
+  }
+}

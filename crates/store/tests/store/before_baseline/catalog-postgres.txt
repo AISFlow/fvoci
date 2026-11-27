@@ -1,0 +1,1626 @@
+# tables
+_sqlx_migrations r p rls=false forced=false acl=
+api_token_workspaces r p rls=true forced=true acl=
+api_tokens r p rls=false forced=false acl=
+audit_log r p rls=true forced=true acl=
+blocks r p rls=true forced=true acl=
+body_docs r p rls=true forced=true acl=
+body_links r p rls=true forced=true acl=
+body_updates r p rls=true forced=true acl=
+body_version_editors r p rls=true forced=true acl=
+body_versions r p rls=true forced=true acl=
+card_assignees r p rls=true forced=true acl=
+card_due_notices r p rls=true forced=true acl=
+categories r p rls=true forced=true acl=
+category_containers r p rls=true forced=true acl=
+comment_versions r p rls=true forced=true acl=
+container_members r p rls=true forced=true acl=
+container_teams r p rls=true forced=true acl=
+containers r p rls=true forced=true acl=
+course_exams r p rls=true forced=true acl=
+course_meetings r p rls=true forced=true acl=
+course_schedules r p rls=true forced=true acl=
+data_steps r p rls=false forced=false acl=
+deleted_blocks r p rls=true forced=true acl=
+deleted_containers r p rls=true forced=true acl=
+diary_days r p rls=true forced=true acl=
+email_changes r p rls=false forced=false acl=
+email_reverts r p rls=false forced=false acl=
+exam_scores r p rls=true forced=true acl=
+file_refs r p rls=true forced=true acl=
+file_versions r p rls=true forced=true acl=
+files r p rls=true forced=true acl=
+instance r p rls=false forced=false acl=
+invitations r p rls=true forced=true acl=
+loose_objects r p rls=true forced=true acl=
+meeting_attendance r p rls=true forced=true acl=
+notification_outbox r p rls=true forced=true acl=
+notifications r p rls=true forced=true acl=
+oidc_former_providers r p rls=true forced=true acl=
+oidc_held_sign_ins r p rls=true forced=true acl=
+oidc_login_flows r p rls=true forced=true acl=
+oidc_pending_providers r p rls=true forced=true acl=
+oidc_providers r p rls=true forced=true acl=
+organization_members r p rls=true forced=true acl=
+organizations r p rls=true forced=true acl=
+password_resets r p rls=false forced=false acl=
+public_links r p rls=true forced=true acl=
+search_index_state r p rls=false forced=false acl=
+search_outbox r p rls=true forced=true acl=
+sessions r p rls=false forced=false acl=
+signups r p rls=false forced=false acl=
+subscriptions r p rls=true forced=true acl=
+team_members r p rls=true forced=true acl=
+teams r p rls=true forced=true acl=
+time_entries r p rls=true forced=true acl=
+unit_notes r p rls=true forced=true acl=
+unit_progress r p rls=true forced=true acl=
+unit_reviews r p rls=true forced=true acl=
+upload_parts r p rls=true forced=true acl=
+uploads r p rls=true forced=true acl=
+user_client_state r p rls=false forced=false acl=
+user_identities r p rls=false forced=false acl=
+user_settings r p rls=false forced=false acl=
+users r p rls=false forced=false acl=
+workspace_members r p rls=true forced=true acl=
+workspaces r p rls=true forced=true acl=
+# columns
+_sqlx_migrations.version bigint not null
+_sqlx_migrations.description text not null
+_sqlx_migrations.installed_on timestamp with time zone not null default now()
+_sqlx_migrations.success boolean not null
+_sqlx_migrations.checksum bytea not null
+_sqlx_migrations.execution_time bigint not null
+api_token_workspaces.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+api_token_workspaces.token_id uuid not null
+api_token_workspaces.workspace_id uuid not null
+api_tokens.id uuid not null
+api_tokens.user_id uuid not null
+api_tokens.name text not null
+api_tokens.token_prefix text not null
+api_tokens.token_hash text not null
+api_tokens.scope text not null
+api_tokens.allow_personal_space boolean not null default false
+api_tokens.notify_self boolean not null default true
+api_tokens.origin_provider_id uuid
+api_tokens.origin_provider_revision bigint
+api_tokens.origin_issuer text
+api_tokens.origin_subject text
+api_tokens.last_used_at bigint
+api_tokens.last_used_address text
+api_tokens.created_at bigint not null
+api_tokens.expires_at bigint not null
+api_tokens.revoked_at bigint
+audit_log.id uuid not null
+audit_log.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+audit_log.workspace_id uuid
+audit_log.actor_id uuid
+audit_log.action text not null
+audit_log.target_id uuid not null
+audit_log.created_at bigint not null
+audit_log.subject_id uuid
+audit_log.actor_kind text not null default 'person'::text
+audit_log.detail text
+audit_log.identity text
+blocks.id uuid not null
+blocks.container_id uuid not null
+blocks.parent_id uuid
+blocks.created_by uuid
+blocks.modified_by uuid
+blocks.type text not null
+blocks.title text not null
+blocks.fields json not null
+blocks.created_at bigint not null
+blocks.updated_at bigint not null
+blocks.body jsonb
+blocks.body_version bigint
+blocks.body_text text
+blocks.body_tasks_total bigint not null default 0
+blocks.body_tasks_done bigint not null default 0
+blocks.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+blocks.number bigint
+blocks.body_first_image text
+blocks.due_at text
+blocks.due_millis bigint
+blocks.is_done boolean not null default false
+body_docs.block_id uuid not null
+body_docs.state bytea not null
+body_docs.state_seq bigint not null
+body_docs.log_end bigint not null
+body_docs.projected_seq bigint not null
+body_docs.body_digest bytea not null
+body_docs.epoch bigint not null
+body_docs.last_writer uuid
+body_docs.created_at bigint not null
+body_docs.updated_at bigint not null
+body_docs.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+body_docs.agent_token_id uuid
+body_docs.agent_token_name text
+body_links.source_id uuid not null
+body_links.target_id uuid not null
+body_links.container_id uuid not null
+body_links.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+body_updates.block_id uuid not null
+body_updates.seq bigint not null
+body_updates.bytes bytea not null
+body_updates.written_by uuid
+body_updates.written_at bigint not null
+body_updates.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+body_updates.actor_token_id uuid
+body_version_editors.block_id uuid not null
+body_version_editors.version bigint not null
+body_version_editors.user_id uuid not null
+body_version_editors.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+body_versions.block_id uuid not null
+body_versions.version bigint not null
+body_versions.body jsonb
+body_versions.body_digest bytea not null
+body_versions.files text not null
+body_versions.kept_at bigint not null
+body_versions.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+body_versions.cause text not null default 'auto'::text
+body_versions.body_bytes bigint not null default 0
+body_versions.actor_token_id uuid
+body_versions.actor_token_name text
+card_assignees.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+card_assignees.container_id uuid not null
+card_assignees.card_id uuid not null
+card_assignees.user_id uuid not null
+card_due_notices.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+card_due_notices.card_id uuid not null
+card_due_notices.user_id uuid not null
+card_due_notices.due_key text not null
+card_due_notices.notified_at bigint not null
+categories.id uuid not null
+categories.name text not null
+categories.user_id uuid not null
+categories.workspace_id uuid not null
+categories.created_at bigint not null
+categories.updated_at bigint not null
+categories.collapsed boolean not null default false
+categories.type text not null
+categories.sort_order bigint not null default 0
+categories.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+category_containers.id uuid not null
+category_containers.user_id uuid not null
+category_containers.category_id uuid not null
+category_containers.container_id uuid not null
+category_containers.created_at bigint not null
+category_containers.updated_at bigint not null
+category_containers.sort_order bigint not null default 0
+category_containers.hidden boolean not null default false
+category_containers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+comment_versions.block_id uuid not null
+comment_versions.version bigint not null
+comment_versions.body jsonb
+comment_versions.files text not null
+comment_versions.written_by uuid
+comment_versions.written_at bigint not null
+comment_versions.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+container_members.container_id uuid not null
+container_members.user_id uuid not null
+container_members.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+container_members.role text not null
+container_teams.container_id uuid not null
+container_teams.team_id uuid not null
+container_teams.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+container_teams.workspace_id uuid not null
+container_teams.role text not null
+containers.id uuid not null
+containers.workspace_id uuid not null
+containers.created_by uuid
+containers.modified_by uuid
+containers.visibility text not null default 'private'::text
+containers.minimum_role text not null default 'editor'::text
+containers.title text not null
+containers.description text not null
+containers.icon text not null
+containers.show_description boolean not null
+containers.is_template boolean not null
+containers.is_builtin boolean not null default false
+containers.template_version bigint not null default 0
+containers.properties jsonb not null
+containers.card_properties jsonb not null
+containers.created_at bigint not null
+containers.updated_at bigint not null
+containers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+containers.kind text not null default 'board'::text
+containers.next_card_number bigint not null default 1
+containers.due_date_property_id text
+containers.done_when jsonb
+course_exams.id uuid not null
+course_exams.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+course_exams.container_id uuid not null
+course_exams.title text not null
+course_exams.exam_date text
+course_exams.max_score double precision not null
+course_exams.description text not null default ''::text
+course_exams.created_at bigint not null
+course_exams.updated_at bigint not null
+course_exams.results_published_at bigint
+course_exams.published_average_score double precision
+course_exams.published_score_bucket bigint
+course_exams.published_submission_count bigint
+course_meetings.id uuid not null
+course_meetings.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+course_meetings.container_id uuid not null
+course_meetings.title text not null
+course_meetings.starts_at bigint not null
+course_meetings.location text not null default ''::text
+course_meetings.unit_ids text not null default '[]'::text
+course_meetings.presenter_id uuid
+course_meetings.host_id uuid
+course_meetings.notes text not null default ''::text
+course_meetings.notified_at bigint
+course_meetings.created_at bigint not null
+course_meetings.updated_at bigint not null
+course_schedules.container_id uuid not null
+course_schedules.start_date text not null
+course_schedules.target_date text not null
+course_schedules.study_days smallint not null
+course_schedules.updated_at bigint not null
+course_schedules.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+data_steps.name text not null
+deleted_blocks.id uuid not null
+deleted_blocks.container_id uuid not null
+deleted_blocks.parent_id uuid
+deleted_blocks.deleted_at bigint not null
+deleted_blocks.deleted_by uuid
+deleted_blocks.deletion_id uuid not null
+deleted_blocks.block json not null
+deleted_blocks.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+deleted_blocks.block_type text not null default ''::text
+deleted_containers.id uuid not null
+deleted_containers.workspace_id uuid not null
+deleted_containers.deleted_at bigint not null
+deleted_containers.deleted_by uuid
+deleted_containers.deletion_id uuid not null
+deleted_containers.container json not null
+deleted_containers.members json not null
+deleted_containers.files json not null
+deleted_containers.places json not null default '[]'::json
+deleted_containers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+deleted_containers.team_roles jsonb not null default '[]'::jsonb
+deleted_containers.next_card_number bigint not null default 1
+diary_days.container_id uuid not null
+diary_days.day text not null
+diary_days.month_day text not null
+diary_days.entry_id uuid not null
+diary_days.mood text
+diary_days.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+email_changes.user_id uuid not null
+email_changes.new_email text not null
+email_changes.token_hash text
+email_changes.token_expires_at bigint
+email_changes.created_at bigint not null
+email_changes.expires_at bigint not null
+email_reverts.token_hash text not null
+email_reverts.user_id uuid not null
+email_reverts.email text not null
+email_reverts.created_at bigint not null
+email_reverts.expires_at bigint not null
+exam_scores.exam_id uuid not null
+exam_scores.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+exam_scores.container_id uuid not null
+exam_scores.user_id uuid not null
+exam_scores.score double precision not null
+exam_scores.note text not null default ''::text
+exam_scores.updated_at bigint not null
+file_refs.block_id uuid not null
+file_refs.container_id uuid not null
+file_refs.name text not null
+file_refs.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+file_versions.file_id uuid not null
+file_versions.version bigint not null
+file_versions.path text not null
+file_versions.size bigint not null
+file_versions.created_at bigint not null
+file_versions.created_by uuid
+file_versions.restored_from bigint
+file_versions.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+files.id uuid not null
+files.container_id uuid not null
+files.name text not null
+files.original_name text not null
+files.extension text not null
+files.size bigint not null
+files.path text not null
+files.created_at bigint not null
+files.unreferenced_at bigint
+files.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+files.version bigint not null default 1
+files.created_by uuid
+instance.id smallint not null
+instance.bootstrapped boolean not null default false
+invitations.id uuid not null
+invitations.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+invitations.workspace_id uuid not null
+invitations.role text not null
+invitations.container_id uuid
+invitations.container_role text
+invitations.token_hash text not null
+invitations.created_by uuid not null
+invitations.created_at bigint not null
+invitations.expires_at bigint not null
+invitations.max_uses bigint
+invitations.uses bigint not null default 0
+invitations.revoked_at bigint not null default 0
+invitations.parent_id uuid
+invitations.recipient text
+loose_objects.path text not null
+loose_objects.state text not null
+loose_objects.created_at bigint not null
+loose_objects.retry_at bigint not null
+loose_objects.attempts bigint not null default 0
+loose_objects.last_attempt_at bigint not null default 0
+loose_objects.last_error text not null default ''::text
+loose_objects.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+meeting_attendance.meeting_id uuid not null
+meeting_attendance.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+meeting_attendance.user_id uuid not null
+meeting_attendance.status text not null
+meeting_attendance.updated_at bigint not null
+notification_outbox.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+notification_outbox.recipient_id uuid not null
+notification_outbox.kind text not null
+notification_outbox.source_id uuid not null
+notification_outbox.block_id uuid not null
+notification_outbox.container_id uuid not null
+notification_outbox.actor_id uuid
+notification_outbox.seq bigint not null
+notification_outbox.due_at bigint not null
+notification_outbox.attempts bigint not null default 0
+notification_outbox.actor_token_name text
+notifications.id uuid not null
+notifications.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+notifications.recipient_id uuid not null
+notifications.kind text not null
+notifications.source_id uuid not null
+notifications.block_id uuid not null
+notifications.container_id uuid not null
+notifications.actor_id uuid
+notifications.created_at bigint not null
+notifications.read_at bigint not null default 0
+notifications.made_by uuid
+notifications.updated_at bigint not null default 0
+notifications.times bigint not null default 1
+notifications.doers text not null default '[]'::text
+notifications.counted text not null default '[]'::text
+notifications.actor_token_name text
+oidc_former_providers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+oidc_former_providers.issuer text not null
+oidc_former_providers.client_id text not null
+oidc_former_providers.client_secret text not null
+oidc_former_providers.created_at bigint not null
+oidc_former_providers.expires_at bigint not null
+oidc_held_sign_ins.held_hash text not null
+oidc_held_sign_ins.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+oidc_held_sign_ins.provider_id uuid not null
+oidc_held_sign_ins.revision bigint not null
+oidc_held_sign_ins.issuer text not null
+oidc_held_sign_ins.subject text not null
+oidc_held_sign_ins.email text not null
+oidc_held_sign_ins.email_unverified boolean not null
+oidc_held_sign_ins.name text not null
+oidc_held_sign_ins.preferred_username text not null
+oidc_held_sign_ins.created_at bigint not null
+oidc_held_sign_ins.expires_at bigint not null
+oidc_login_flows.state_hash text not null
+oidc_login_flows.browser_hash text not null
+oidc_login_flows.nonce text not null
+oidc_login_flows.pkce_verifier text not null
+oidc_login_flows.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+oidc_login_flows.provider_id uuid not null
+oidc_login_flows.created_at bigint not null
+oidc_login_flows.expires_at bigint not null
+oidc_login_flows.link_session_id uuid
+oidc_login_flows.pending_at bigint
+oidc_login_flows.pending_by uuid
+oidc_login_flows.held_hash text
+oidc_pending_providers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+oidc_pending_providers.provider_id uuid not null
+oidc_pending_providers.issuer text not null
+oidc_pending_providers.client_id text not null
+oidc_pending_providers.client_secret text not null
+oidc_pending_providers.created_at bigint not null
+oidc_providers.id uuid not null
+oidc_providers.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+oidc_providers.issuer text not null
+oidc_providers.client_id text not null
+oidc_providers.client_secret text not null
+oidc_providers.auto_join boolean not null default true
+oidc_providers.enabled boolean not null default true
+oidc_providers.created_at bigint not null
+oidc_providers.updated_at bigint not null
+oidc_providers.sso_required boolean not null default false
+oidc_providers.revision bigint not null default 1
+organization_members.org_id uuid not null
+organization_members.user_id uuid not null
+organization_members.role text not null
+organization_members.created_at bigint not null
+organizations.id uuid not null
+organizations.name text not null
+organizations.is_system boolean not null default false
+organizations.default_workspace_id uuid
+organizations.password_login boolean not null default true
+organizations.settings json not null
+organizations.created_at bigint not null
+organizations.updated_at bigint not null
+organizations.deleted_at bigint
+organizations.public_links boolean not null default true
+organizations.kind text not null default 'shared'::text
+organizations.owner_id uuid
+organizations.created_by uuid
+organizations.allow_copy_out boolean not null default true
+organizations.allow_api_tokens boolean not null default false
+password_resets.token_hash text not null
+password_resets.user_id uuid not null
+password_resets.expires_at bigint not null
+public_links.container_id uuid not null
+public_links.enabled boolean not null
+public_links.token text
+public_links.modified_by uuid
+public_links.updated_at bigint not null
+public_links.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+search_index_state.id smallint not null
+search_index_state.name text not null
+search_index_state.uuid text not null
+search_index_state.version bigint not null
+search_outbox.scope text not null
+search_outbox.id uuid not null
+search_outbox.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+search_outbox.seq bigint not null
+search_outbox.due_at bigint not null
+search_outbox.attempts bigint not null default 0
+sessions.id uuid not null
+sessions.token_hash text not null
+sessions.user_id uuid not null
+sessions.created_at bigint not null
+sessions.last_used_at bigint not null
+sessions.expires_at bigint not null
+sessions.user_agent text not null
+sessions.login_provider_id uuid
+sessions.login_org_id uuid
+sessions.login_issuer text
+sessions.login_revision bigint
+sessions.login_subject text
+sessions.password_confirmed_at bigint not null default 0
+signups.id uuid not null
+signups.username text not null
+signups.email text not null
+signups.display_name text not null default ''::text
+signups.password_hash text not null
+signups.language text not null default ''::text
+signups.organization_name text
+signups.invitation_id uuid
+signups.invitation_org_id uuid
+signups.token_hash text
+signups.token_expires_at bigint
+signups.created_at bigint not null
+signups.expires_at bigint not null
+signups.browser_hash text
+subscriptions.block_type text not null
+subscriptions.block_id uuid not null
+subscriptions.user_id uuid not null
+subscriptions.notified_at bigint not null default 0
+subscriptions.created_at bigint not null
+subscriptions.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+team_members.team_id uuid not null
+team_members.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+team_members.workspace_id uuid not null
+team_members.user_id uuid not null
+teams.id uuid not null
+teams.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+teams.workspace_id uuid not null
+teams.name text not null
+teams.name_key text not null
+time_entries.id uuid not null
+time_entries.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+time_entries.user_id uuid not null
+time_entries.workspace_id uuid
+time_entries.container_id uuid
+time_entries.block_id uuid
+time_entries.target_kind text
+time_entries.target_title text
+time_entries.kind text not null
+time_entries.started_at bigint not null
+time_entries.ended_at bigint
+time_entries.note text not null default ''::text
+time_entries.created_at bigint not null
+time_entries.updated_at bigint not null
+unit_notes.id uuid not null
+unit_notes.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+unit_notes.unit_id uuid not null
+unit_notes.container_id uuid not null
+unit_notes.user_id uuid not null
+unit_notes.kind text not null
+unit_notes.content text not null
+unit_notes.created_at bigint not null
+unit_notes.updated_at bigint not null
+unit_progress.unit_id uuid not null
+unit_progress.container_id uuid not null
+unit_progress.user_id uuid not null
+unit_progress.completed_at bigint
+unit_progress.planned_date text
+unit_progress.last_position text
+unit_progress.updated_at bigint not null
+unit_progress.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+unit_reviews.id uuid not null
+unit_reviews.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+unit_reviews.unit_id uuid not null
+unit_reviews.container_id uuid not null
+unit_reviews.user_id uuid not null
+unit_reviews.scheduled_date text not null
+unit_reviews.completed_at bigint
+unit_reviews.interval_days integer not null
+unit_reviews.notified_at bigint
+unit_reviews.created_at bigint not null
+unit_reviews.updated_at bigint not null
+upload_parts.upload_id text not null
+upload_parts.number bigint not null
+upload_parts.size bigint not null
+upload_parts.part_id text not null
+upload_parts.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+uploads.id text not null
+uploads.user_id uuid not null
+uploads.container_id uuid not null
+uploads.name text not null
+uploads.size bigint not null
+uploads.content_type text not null
+uploads.part_size bigint not null
+uploads.created_at bigint not null
+uploads.expires_at bigint not null
+uploads.closed_at bigint not null
+uploads.multipart_id text not null
+uploads.path text not null default ''::text
+uploads.purpose text not null default 'file'::text
+uploads.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+user_client_state.user_id uuid not null
+user_client_state.key text not null
+user_client_state.value text not null
+user_identities.issuer text not null
+user_identities.subject text not null
+user_identities.user_id uuid not null
+user_identities.email text not null
+user_identities.created_at bigint not null
+user_settings.user_id uuid not null
+user_settings.language text not null default 'auto'::text
+user_settings.theme text not null default 'auto'::text
+user_settings.density text not null default 'auto'::text
+user_settings.card_open text not null default 'center'::text
+user_settings.haptics boolean not null default true
+user_settings.week_start text not null default 'auto'::text
+user_settings.hour_cycle text not null default 'auto'::text
+user_settings.time_zone text not null default 'auto'::text
+user_settings.notify_mentions boolean not null default true
+user_settings.notify_assignments boolean not null default true
+user_settings.notify_comments boolean not null default true
+user_settings.notify_reviews boolean not null default true
+user_settings.notify_meetings boolean not null default true
+user_settings.notify_due boolean not null default true
+users.id uuid not null
+users.username text not null
+users.email text not null
+users.password_hash text not null
+users.created_at bigint not null
+users.updated_at bigint not null
+users.deleted_at bigint
+users.is_admin boolean not null default false
+users.display_name text not null default ''::text
+users.delete_after bigint not null default 0
+users.erase_started_at bigint not null default 0
+users.erased_at bigint not null default 0
+users.first_name text not null default ''::text
+users.last_name text not null default ''::text
+users.latin_first_name text not null default ''::text
+users.latin_last_name text not null default ''::text
+users.custom_name text not null default ''::text
+users.name_shown text not null default 'custom_name'::text
+users.title text not null default ''::text
+users.credentials text not null default ''::text
+users.welcomed_at bigint
+users.password_locked_at bigint not null default 0
+users.email_verified_at bigint not null default 0
+workspace_members.workspace_id uuid not null
+workspace_members.user_id uuid not null
+workspace_members.role text not null
+workspace_members.via_org_admin boolean not null default false
+workspace_members.prior_role text
+workspace_members.created_at bigint not null
+workspace_members.org_id uuid not null default (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid
+workspace_members.prior_container_roles text
+workspaces.id uuid not null
+workspaces.settings json not null
+workspaces.modified_by uuid
+workspaces.created_at bigint not null
+workspaces.updated_at bigint not null
+workspaces.org_id uuid not null
+workspaces.name text not null default ''::text
+workspaces.is_system boolean not null default false
+workspaces.deleted_at bigint
+workspaces.guest_invitations boolean not null default true
+workspaces.welcomed_at bigint
+# constraints
+_sqlx_migrations _sqlx_migrations_checksum_not_null n NOT NULL checksum
+_sqlx_migrations _sqlx_migrations_description_not_null n NOT NULL description
+_sqlx_migrations _sqlx_migrations_execution_time_not_null n NOT NULL execution_time
+_sqlx_migrations _sqlx_migrations_installed_on_not_null n NOT NULL installed_on
+_sqlx_migrations _sqlx_migrations_pkey p PRIMARY KEY (version)
+_sqlx_migrations _sqlx_migrations_success_not_null n NOT NULL success
+_sqlx_migrations _sqlx_migrations_version_not_null n NOT NULL version
+api_token_workspaces api_token_workspaces_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+api_token_workspaces api_token_workspaces_org_id_not_null n NOT NULL org_id
+api_token_workspaces api_token_workspaces_pkey p PRIMARY KEY (token_id, workspace_id)
+api_token_workspaces api_token_workspaces_token_id_fkey f FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE
+api_token_workspaces api_token_workspaces_token_id_not_null n NOT NULL token_id
+api_token_workspaces api_token_workspaces_workspace_id_not_null n NOT NULL workspace_id
+api_token_workspaces api_token_workspaces_workspace_id_org_id_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id) ON DELETE CASCADE
+api_tokens api_tokens_allow_personal_space_not_null n NOT NULL allow_personal_space
+api_tokens api_tokens_check c CHECK ((expires_at > created_at))
+api_tokens api_tokens_check1 c CHECK (((origin_provider_id IS NULL) = (origin_provider_revision IS NULL)))
+api_tokens api_tokens_check2 c CHECK (((origin_provider_id IS NULL) = (origin_issuer IS NULL)))
+api_tokens api_tokens_created_at_not_null n NOT NULL created_at
+api_tokens api_tokens_expires_at_not_null n NOT NULL expires_at
+api_tokens api_tokens_id_not_null n NOT NULL id
+api_tokens api_tokens_name_check c CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80)))
+api_tokens api_tokens_name_not_null n NOT NULL name
+api_tokens api_tokens_notify_self_not_null n NOT NULL notify_self
+api_tokens api_tokens_pkey p PRIMARY KEY (id)
+api_tokens api_tokens_scope_check c CHECK ((scope = ANY (ARRAY['read'::text, 'write'::text])))
+api_tokens api_tokens_scope_not_null n NOT NULL scope
+api_tokens api_tokens_token_hash_not_null n NOT NULL token_hash
+api_tokens api_tokens_token_prefix_not_null n NOT NULL token_prefix
+api_tokens api_tokens_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+api_tokens api_tokens_user_id_not_null n NOT NULL user_id
+audit_log audit_log_action_check c CHECK ((action = ANY (ARRAY['self_added_to_container'::text, 'added_to_container'::text, 'org_admin_joined'::text, 'org_admin_left'::text, 'org_admin_revoked'::text, 'org_admin_granted'::text, 'org_admin_removed'::text, 'org_member_removed'::text, 'workspace_created'::text, 'workspace_renamed'::text, 'workspace_deleted'::text, 'workspace_restored'::text, 'public_links_disabled'::text, 'public_links_enabled'::text, 'container_copied_out'::text, 'copy_out_disabled'::text, 'copy_out_enabled'::text, 'api_tokens_enabled'::text, 'api_tokens_disabled'::text, 'api_token_revoked'::text, 'oidc_provider_configured'::text, 'oidc_provider_removed'::text, 'sso_required'::text, 'sso_released'::text, 'oidc_provider_pending_saved'::text, 'oidc_provider_pending_applied'::text, 'oidc_provider_pending_discarded'::text, 'password_reset_link_made'::text, 'password_set_by_operator'::text, 'oidc_former_provider_kept'::text, 'oidc_former_provider_ended'::text, 'oidc_former_provider_lapsed'::text, 'oidc_identity_bound'::text, 'oidc_identity_carried_over'::text, 'email_verified_by_operator'::text])))
+audit_log audit_log_action_not_null n NOT NULL action
+audit_log audit_log_actor_check c CHECK ((((actor_kind = 'person'::text) AND (actor_id IS NOT NULL)) OR ((actor_kind = ANY (ARRAY['server_operator'::text, 'server'::text])) AND (actor_id IS NULL))))
+audit_log audit_log_actor_kind_check c CHECK ((actor_kind = ANY (ARRAY['person'::text, 'server_operator'::text, 'server'::text])))
+audit_log audit_log_actor_kind_not_null n NOT NULL actor_kind
+audit_log audit_log_created_at_not_null n NOT NULL created_at
+audit_log audit_log_id_not_null n NOT NULL id
+audit_log audit_log_org_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+audit_log audit_log_org_id_not_null n NOT NULL org_id
+audit_log audit_log_pkey p PRIMARY KEY (id, org_id)
+audit_log audit_log_place_check c CHECK (((workspace_id IS NOT NULL) OR (action = ANY (ARRAY['org_admin_granted'::text, 'org_admin_removed'::text, 'org_member_removed'::text, 'workspace_created'::text, 'workspace_renamed'::text, 'workspace_deleted'::text, 'workspace_restored'::text, 'public_links_disabled'::text, 'public_links_enabled'::text, 'container_copied_out'::text, 'copy_out_disabled'::text, 'copy_out_enabled'::text, 'api_tokens_enabled'::text, 'api_tokens_disabled'::text, 'api_token_revoked'::text, 'oidc_provider_configured'::text, 'oidc_provider_removed'::text, 'sso_required'::text, 'sso_released'::text, 'oidc_provider_pending_saved'::text, 'oidc_provider_pending_applied'::text, 'oidc_provider_pending_discarded'::text, 'password_reset_link_made'::text, 'password_set_by_operator'::text, 'oidc_former_provider_kept'::text, 'oidc_former_provider_ended'::text, 'oidc_former_provider_lapsed'::text, 'oidc_identity_bound'::text, 'oidc_identity_carried_over'::text, 'email_verified_by_operator'::text]))))
+audit_log audit_log_target_id_not_null n NOT NULL target_id
+audit_log audit_log_workspace_id_org_id_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id) ON DELETE CASCADE
+blocks blocks_body_tasks_done_not_null n NOT NULL body_tasks_done
+blocks blocks_body_tasks_total_not_null n NOT NULL body_tasks_total
+blocks blocks_container_id_fkey f FOREIGN KEY (container_id) REFERENCES containers(id)
+blocks blocks_container_id_id_key u UNIQUE (container_id, id)
+blocks blocks_container_id_not_null n NOT NULL container_id
+blocks blocks_container_id_parent_id_fkey f FOREIGN KEY (container_id, parent_id) REFERENCES blocks(container_id, id)
+blocks blocks_container_org_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id)
+blocks blocks_created_at_not_null n NOT NULL created_at
+blocks blocks_created_by_fkey f FOREIGN KEY (created_by) REFERENCES users(id)
+blocks blocks_fields_not_null n NOT NULL fields
+blocks blocks_id_not_null n NOT NULL id
+blocks blocks_id_org_id_key u UNIQUE (id, org_id)
+blocks blocks_is_done_not_null n NOT NULL is_done
+blocks blocks_modified_by_fkey f FOREIGN KEY (modified_by) REFERENCES users(id)
+blocks blocks_org_id_not_null n NOT NULL org_id
+blocks blocks_pkey p PRIMARY KEY (id)
+blocks blocks_title_not_null n NOT NULL title
+blocks blocks_type_check c CHECK ((type = ANY (ARRAY['card'::text, 'view'::text, 'comment'::text, 'attachment'::text, 'page'::text, 'entry'::text, 'unit'::text, 'chapter'::text])))
+blocks blocks_type_not_null n NOT NULL type
+blocks blocks_updated_at_not_null n NOT NULL updated_at
+body_docs body_docs_block_id_not_null n NOT NULL block_id
+body_docs body_docs_body_digest_not_null n NOT NULL body_digest
+body_docs body_docs_created_at_not_null n NOT NULL created_at
+body_docs body_docs_epoch_not_null n NOT NULL epoch
+body_docs body_docs_log_end_not_null n NOT NULL log_end
+body_docs body_docs_org_id_not_null n NOT NULL org_id
+body_docs body_docs_pkey p PRIMARY KEY (block_id, org_id)
+body_docs body_docs_projected_seq_not_null n NOT NULL projected_seq
+body_docs body_docs_state_not_null n NOT NULL state
+body_docs body_docs_state_seq_not_null n NOT NULL state_seq
+body_docs body_docs_updated_at_not_null n NOT NULL updated_at
+body_links body_links_container_id_not_null n NOT NULL container_id
+body_links body_links_org_id_not_null n NOT NULL org_id
+body_links body_links_pkey p PRIMARY KEY (source_id, org_id, target_id)
+body_links body_links_source_id_not_null n NOT NULL source_id
+body_links body_links_target_id_not_null n NOT NULL target_id
+body_updates body_updates_block_id_not_null n NOT NULL block_id
+body_updates body_updates_block_id_org_id_fkey f FOREIGN KEY (block_id, org_id) REFERENCES body_docs(block_id, org_id) ON DELETE CASCADE
+body_updates body_updates_bytes_not_null n NOT NULL bytes
+body_updates body_updates_org_id_not_null n NOT NULL org_id
+body_updates body_updates_pkey p PRIMARY KEY (block_id, org_id, seq)
+body_updates body_updates_seq_not_null n NOT NULL seq
+body_updates body_updates_written_at_not_null n NOT NULL written_at
+body_version_editors body_version_editors_block_id_not_null n NOT NULL block_id
+body_version_editors body_version_editors_org_id_not_null n NOT NULL org_id
+body_version_editors body_version_editors_pkey p PRIMARY KEY (block_id, org_id, version, user_id)
+body_version_editors body_version_editors_user_id_not_null n NOT NULL user_id
+body_version_editors body_version_editors_version_not_null n NOT NULL version
+body_versions body_versions_block_id_not_null n NOT NULL block_id
+body_versions body_versions_body_bytes_check c CHECK ((body_bytes >= 0))
+body_versions body_versions_body_bytes_not_null n NOT NULL body_bytes
+body_versions body_versions_body_digest_not_null n NOT NULL body_digest
+body_versions body_versions_cause_check c CHECK ((cause = ANY (ARRAY['auto'::text, 'manual'::text, 'restored'::text, 'agent'::text])))
+body_versions body_versions_cause_not_null n NOT NULL cause
+body_versions body_versions_files_not_null n NOT NULL files
+body_versions body_versions_kept_at_not_null n NOT NULL kept_at
+body_versions body_versions_org_id_not_null n NOT NULL org_id
+body_versions body_versions_pkey p PRIMARY KEY (block_id, org_id, version)
+body_versions body_versions_version_not_null n NOT NULL version
+card_assignees card_assignees_card_id_not_null n NOT NULL card_id
+card_assignees card_assignees_container_id_card_id_fkey f FOREIGN KEY (container_id, card_id) REFERENCES blocks(container_id, id) ON DELETE CASCADE
+card_assignees card_assignees_container_id_not_null n NOT NULL container_id
+card_assignees card_assignees_container_id_org_id_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id) ON DELETE CASCADE
+card_assignees card_assignees_org_id_not_null n NOT NULL org_id
+card_assignees card_assignees_pkey p PRIMARY KEY (org_id, card_id, user_id)
+card_assignees card_assignees_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+card_assignees card_assignees_user_id_not_null n NOT NULL user_id
+card_due_notices card_due_notices_card_id_not_null n NOT NULL card_id
+card_due_notices card_due_notices_due_key_not_null n NOT NULL due_key
+card_due_notices card_due_notices_notified_at_not_null n NOT NULL notified_at
+card_due_notices card_due_notices_org_id_not_null n NOT NULL org_id
+card_due_notices card_due_notices_pkey p PRIMARY KEY (org_id, card_id, user_id, due_key)
+card_due_notices card_due_notices_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+card_due_notices card_due_notices_user_id_not_null n NOT NULL user_id
+categories categories_collapsed_not_null n NOT NULL collapsed
+categories categories_created_at_not_null n NOT NULL created_at
+categories categories_id_not_null n NOT NULL id
+categories categories_id_org_id_key u UNIQUE (id, org_id)
+categories categories_name_not_null n NOT NULL name
+categories categories_org_id_not_null n NOT NULL org_id
+categories categories_pkey p PRIMARY KEY (id)
+categories categories_sort_order_not_null n NOT NULL sort_order
+categories categories_type_check c CHECK ((type = ANY (ARRAY['system'::text, 'custom'::text])))
+categories categories_type_not_null n NOT NULL type
+categories categories_updated_at_not_null n NOT NULL updated_at
+categories categories_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+categories categories_user_id_not_null n NOT NULL user_id
+categories categories_workspace_id_fkey f FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+categories categories_workspace_id_not_null n NOT NULL workspace_id
+categories categories_workspace_org_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id)
+category_containers category_containers_category_id_fkey f FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+category_containers category_containers_category_id_not_null n NOT NULL category_id
+category_containers category_containers_category_org_fkey f FOREIGN KEY (category_id, org_id) REFERENCES categories(id, org_id) ON DELETE CASCADE
+category_containers category_containers_container_id_fkey f FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE
+category_containers category_containers_container_id_not_null n NOT NULL container_id
+category_containers category_containers_created_at_not_null n NOT NULL created_at
+category_containers category_containers_hidden_not_null n NOT NULL hidden
+category_containers category_containers_id_not_null n NOT NULL id
+category_containers category_containers_org_id_not_null n NOT NULL org_id
+category_containers category_containers_pkey p PRIMARY KEY (id)
+category_containers category_containers_sort_order_not_null n NOT NULL sort_order
+category_containers category_containers_updated_at_not_null n NOT NULL updated_at
+category_containers category_containers_user_id_container_id_org_id_key u UNIQUE (user_id, container_id, org_id)
+category_containers category_containers_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+category_containers category_containers_user_id_not_null n NOT NULL user_id
+comment_versions comment_versions_block_id_not_null n NOT NULL block_id
+comment_versions comment_versions_files_not_null n NOT NULL files
+comment_versions comment_versions_org_id_not_null n NOT NULL org_id
+comment_versions comment_versions_pkey p PRIMARY KEY (block_id, org_id, version)
+comment_versions comment_versions_version_not_null n NOT NULL version
+comment_versions comment_versions_written_at_not_null n NOT NULL written_at
+container_members container_members_container_id_fkey f FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE
+container_members container_members_container_id_not_null n NOT NULL container_id
+container_members container_members_container_org_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id) ON DELETE CASCADE
+container_members container_members_org_id_not_null n NOT NULL org_id
+container_members container_members_pkey p PRIMARY KEY (container_id, user_id)
+container_members container_members_role_check c CHECK ((role = ANY (ARRAY['admin'::text, 'editor'::text, 'commenter'::text, 'viewer'::text])))
+container_members container_members_role_not_null n NOT NULL role
+container_members container_members_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+container_members container_members_user_id_not_null n NOT NULL user_id
+container_teams container_teams_container_id_not_null n NOT NULL container_id
+container_teams container_teams_container_id_workspace_id_org_id_fkey f FOREIGN KEY (container_id, workspace_id, org_id) REFERENCES containers(id, workspace_id, org_id) ON DELETE CASCADE
+container_teams container_teams_org_id_not_null n NOT NULL org_id
+container_teams container_teams_pkey p PRIMARY KEY (container_id, team_id, org_id)
+container_teams container_teams_role_check c CHECK ((role = ANY (ARRAY['viewer'::text, 'commenter'::text, 'editor'::text])))
+container_teams container_teams_role_not_null n NOT NULL role
+container_teams container_teams_team_id_not_null n NOT NULL team_id
+container_teams container_teams_team_id_workspace_id_org_id_fkey f FOREIGN KEY (team_id, workspace_id, org_id) REFERENCES teams(id, workspace_id, org_id) ON DELETE CASCADE
+container_teams container_teams_workspace_id_not_null n NOT NULL workspace_id
+containers containers_card_properties_not_null n NOT NULL card_properties
+containers containers_created_at_not_null n NOT NULL created_at
+containers containers_created_by_fkey f FOREIGN KEY (created_by) REFERENCES users(id)
+containers containers_description_not_null n NOT NULL description
+containers containers_icon_not_null n NOT NULL icon
+containers containers_id_not_null n NOT NULL id
+containers containers_id_org_id_key u UNIQUE (id, org_id)
+containers containers_is_builtin_not_null n NOT NULL is_builtin
+containers containers_is_template_not_null n NOT NULL is_template
+containers containers_kind_check c CHECK ((kind = ANY (ARRAY['board'::text, 'wiki'::text, 'diary'::text, 'course'::text])))
+containers containers_kind_not_null n NOT NULL kind
+containers containers_minimum_role_check c CHECK ((minimum_role = ANY (ARRAY['viewer'::text, 'commenter'::text, 'editor'::text])))
+containers containers_minimum_role_not_null n NOT NULL minimum_role
+containers containers_modified_by_fkey f FOREIGN KEY (modified_by) REFERENCES users(id)
+containers containers_next_card_number_not_null n NOT NULL next_card_number
+containers containers_org_id_not_null n NOT NULL org_id
+containers containers_pkey p PRIMARY KEY (id)
+containers containers_properties_not_null n NOT NULL properties
+containers containers_show_description_not_null n NOT NULL show_description
+containers containers_template_version_not_null n NOT NULL template_version
+containers containers_title_not_null n NOT NULL title
+containers containers_updated_at_not_null n NOT NULL updated_at
+containers containers_visibility_check c CHECK ((visibility = ANY (ARRAY['open'::text, 'private'::text])))
+containers containers_visibility_not_null n NOT NULL visibility
+containers containers_workspace_id_fkey f FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+containers containers_workspace_id_not_null n NOT NULL workspace_id
+containers containers_workspace_org_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id)
+course_exams course_exams_container_id_not_null n NOT NULL container_id
+course_exams course_exams_created_at_not_null n NOT NULL created_at
+course_exams course_exams_description_not_null n NOT NULL description
+course_exams course_exams_id_not_null n NOT NULL id
+course_exams course_exams_max_score_check c CHECK (((max_score > (0)::double precision) AND (max_score <= (1000000000)::double precision)))
+course_exams course_exams_max_score_not_null n NOT NULL max_score
+course_exams course_exams_org_id_not_null n NOT NULL org_id
+course_exams course_exams_pkey p PRIMARY KEY (org_id, id)
+course_exams course_exams_title_not_null n NOT NULL title
+course_exams course_exams_updated_at_not_null n NOT NULL updated_at
+course_meetings course_meetings_container_id_not_null n NOT NULL container_id
+course_meetings course_meetings_created_at_not_null n NOT NULL created_at
+course_meetings course_meetings_id_not_null n NOT NULL id
+course_meetings course_meetings_location_not_null n NOT NULL location
+course_meetings course_meetings_notes_not_null n NOT NULL notes
+course_meetings course_meetings_org_id_not_null n NOT NULL org_id
+course_meetings course_meetings_pkey p PRIMARY KEY (org_id, id)
+course_meetings course_meetings_starts_at_not_null n NOT NULL starts_at
+course_meetings course_meetings_title_not_null n NOT NULL title
+course_meetings course_meetings_unit_ids_not_null n NOT NULL unit_ids
+course_meetings course_meetings_updated_at_not_null n NOT NULL updated_at
+course_schedules course_schedules_container_id_not_null n NOT NULL container_id
+course_schedules course_schedules_org_id_not_null n NOT NULL org_id
+course_schedules course_schedules_pkey p PRIMARY KEY (container_id, org_id)
+course_schedules course_schedules_start_date_not_null n NOT NULL start_date
+course_schedules course_schedules_study_days_check c CHECK (((study_days >= 1) AND (study_days <= 127)))
+course_schedules course_schedules_study_days_not_null n NOT NULL study_days
+course_schedules course_schedules_target_date_not_null n NOT NULL target_date
+course_schedules course_schedules_updated_at_not_null n NOT NULL updated_at
+data_steps data_steps_name_not_null n NOT NULL name
+data_steps data_steps_pkey p PRIMARY KEY (name)
+deleted_blocks deleted_blocks_block_not_null n NOT NULL block
+deleted_blocks deleted_blocks_block_type_not_null n NOT NULL block_type
+deleted_blocks deleted_blocks_container_id_not_null n NOT NULL container_id
+deleted_blocks deleted_blocks_deleted_at_not_null n NOT NULL deleted_at
+deleted_blocks deleted_blocks_deletion_id_not_null n NOT NULL deletion_id
+deleted_blocks deleted_blocks_id_not_null n NOT NULL id
+deleted_blocks deleted_blocks_org_id_not_null n NOT NULL org_id
+deleted_blocks deleted_blocks_pkey p PRIMARY KEY (id, org_id)
+deleted_containers deleted_containers_container_not_null n NOT NULL container
+deleted_containers deleted_containers_deleted_at_not_null n NOT NULL deleted_at
+deleted_containers deleted_containers_deletion_id_not_null n NOT NULL deletion_id
+deleted_containers deleted_containers_files_not_null n NOT NULL files
+deleted_containers deleted_containers_id_not_null n NOT NULL id
+deleted_containers deleted_containers_members_not_null n NOT NULL members
+deleted_containers deleted_containers_next_card_number_not_null n NOT NULL next_card_number
+deleted_containers deleted_containers_org_id_not_null n NOT NULL org_id
+deleted_containers deleted_containers_pkey p PRIMARY KEY (id, org_id)
+deleted_containers deleted_containers_places_not_null n NOT NULL places
+deleted_containers deleted_containers_team_roles_not_null n NOT NULL team_roles
+deleted_containers deleted_containers_workspace_id_not_null n NOT NULL workspace_id
+diary_days diary_days_container_id_not_null n NOT NULL container_id
+diary_days diary_days_day_not_null n NOT NULL day
+diary_days diary_days_entry_id_not_null n NOT NULL entry_id
+diary_days diary_days_entry_id_org_id_fkey f FOREIGN KEY (entry_id, org_id) REFERENCES blocks(id, org_id) ON DELETE CASCADE
+diary_days diary_days_entry_id_org_id_key u UNIQUE (entry_id, org_id)
+diary_days diary_days_month_day_not_null n NOT NULL month_day
+diary_days diary_days_org_id_not_null n NOT NULL org_id
+diary_days diary_days_pkey p PRIMARY KEY (container_id, day, org_id)
+email_changes email_changes_check c CHECK (((token_hash IS NULL) = (token_expires_at IS NULL)))
+email_changes email_changes_created_at_not_null n NOT NULL created_at
+email_changes email_changes_expires_at_not_null n NOT NULL expires_at
+email_changes email_changes_new_email_not_null n NOT NULL new_email
+email_changes email_changes_pkey p PRIMARY KEY (user_id)
+email_changes email_changes_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+email_changes email_changes_user_id_not_null n NOT NULL user_id
+email_reverts email_reverts_created_at_not_null n NOT NULL created_at
+email_reverts email_reverts_email_not_null n NOT NULL email
+email_reverts email_reverts_expires_at_not_null n NOT NULL expires_at
+email_reverts email_reverts_pkey p PRIMARY KEY (token_hash)
+email_reverts email_reverts_token_hash_not_null n NOT NULL token_hash
+email_reverts email_reverts_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+email_reverts email_reverts_user_id_not_null n NOT NULL user_id
+exam_scores exam_scores_container_id_not_null n NOT NULL container_id
+exam_scores exam_scores_exam_id_not_null n NOT NULL exam_id
+exam_scores exam_scores_note_not_null n NOT NULL note
+exam_scores exam_scores_org_id_not_null n NOT NULL org_id
+exam_scores exam_scores_pkey p PRIMARY KEY (exam_id, org_id, user_id)
+exam_scores exam_scores_score_check c CHECK (((score >= (0)::double precision) AND (score <= (1000000000)::double precision)))
+exam_scores exam_scores_score_not_null n NOT NULL score
+exam_scores exam_scores_updated_at_not_null n NOT NULL updated_at
+exam_scores exam_scores_user_id_not_null n NOT NULL user_id
+file_refs file_refs_block_id_not_null n NOT NULL block_id
+file_refs file_refs_container_id_not_null n NOT NULL container_id
+file_refs file_refs_name_not_null n NOT NULL name
+file_refs file_refs_org_id_not_null n NOT NULL org_id
+file_refs file_refs_pkey p PRIMARY KEY (block_id, org_id, name)
+file_versions file_versions_created_at_not_null n NOT NULL created_at
+file_versions file_versions_file_id_not_null n NOT NULL file_id
+file_versions file_versions_org_id_not_null n NOT NULL org_id
+file_versions file_versions_path_not_null n NOT NULL path
+file_versions file_versions_pkey p PRIMARY KEY (file_id, org_id, version)
+file_versions file_versions_size_not_null n NOT NULL size
+file_versions file_versions_version_not_null n NOT NULL version
+files files_container_id_fkey f FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE
+files files_container_id_name_key u UNIQUE (container_id, name)
+files files_container_id_not_null n NOT NULL container_id
+files files_container_org_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id) ON DELETE CASCADE
+files files_created_at_not_null n NOT NULL created_at
+files files_extension_not_null n NOT NULL extension
+files files_id_not_null n NOT NULL id
+files files_name_not_null n NOT NULL name
+files files_org_id_not_null n NOT NULL org_id
+files files_original_name_not_null n NOT NULL original_name
+files files_path_not_null n NOT NULL path
+files files_pkey p PRIMARY KEY (id)
+files files_size_not_null n NOT NULL size
+files files_version_not_null n NOT NULL version
+instance instance_bootstrapped_not_null n NOT NULL bootstrapped
+instance instance_id_check c CHECK ((id = 1))
+instance instance_id_not_null n NOT NULL id
+instance instance_pkey p PRIMARY KEY (id)
+invitations invitations_check c CHECK (((role = 'guest'::text) = (container_id IS NOT NULL)))
+invitations invitations_check1 c CHECK (((role = 'guest'::text) = (container_role IS NOT NULL)))
+invitations invitations_container_id_org_id_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id) ON DELETE CASCADE
+invitations invitations_container_role_check c CHECK ((container_role = ANY (ARRAY['viewer'::text, 'commenter'::text, 'editor'::text])))
+invitations invitations_created_at_not_null n NOT NULL created_at
+invitations invitations_created_by_not_null n NOT NULL created_by
+invitations invitations_expires_at_not_null n NOT NULL expires_at
+invitations invitations_id_not_null n NOT NULL id
+invitations invitations_max_uses_check c CHECK ((max_uses > 0))
+invitations invitations_org_id_not_null n NOT NULL org_id
+invitations invitations_parent_fkey f FOREIGN KEY (parent_id, org_id) REFERENCES invitations(id, org_id) ON DELETE CASCADE
+invitations invitations_pkey p PRIMARY KEY (id, org_id)
+invitations invitations_revoked_at_not_null n NOT NULL revoked_at
+invitations invitations_role_check c CHECK ((role = ANY (ARRAY['member'::text, 'guest'::text])))
+invitations invitations_role_not_null n NOT NULL role
+invitations invitations_token_hash_not_null n NOT NULL token_hash
+invitations invitations_uses_not_null n NOT NULL uses
+invitations invitations_workspace_id_not_null n NOT NULL workspace_id
+invitations invitations_workspace_id_org_id_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id) ON DELETE CASCADE
+loose_objects loose_objects_attempts_not_null n NOT NULL attempts
+loose_objects loose_objects_created_at_not_null n NOT NULL created_at
+loose_objects loose_objects_last_attempt_at_not_null n NOT NULL last_attempt_at
+loose_objects loose_objects_last_error_not_null n NOT NULL last_error
+loose_objects loose_objects_org_id_not_null n NOT NULL org_id
+loose_objects loose_objects_path_not_null n NOT NULL path
+loose_objects loose_objects_pkey p PRIMARY KEY (org_id, path)
+loose_objects loose_objects_retry_at_not_null n NOT NULL retry_at
+loose_objects loose_objects_state_check c CHECK ((state = ANY (ARRAY['writing'::text, 'doomed'::text])))
+loose_objects loose_objects_state_not_null n NOT NULL state
+meeting_attendance meeting_attendance_meeting_id_not_null n NOT NULL meeting_id
+meeting_attendance meeting_attendance_org_id_not_null n NOT NULL org_id
+meeting_attendance meeting_attendance_pkey p PRIMARY KEY (meeting_id, org_id, user_id)
+meeting_attendance meeting_attendance_status_check c CHECK ((status = ANY (ARRAY['present'::text, 'late'::text, 'absent'::text, 'excused'::text])))
+meeting_attendance meeting_attendance_status_not_null n NOT NULL status
+meeting_attendance meeting_attendance_updated_at_not_null n NOT NULL updated_at
+meeting_attendance meeting_attendance_user_id_not_null n NOT NULL user_id
+notification_outbox notification_outbox_attempts_not_null n NOT NULL attempts
+notification_outbox notification_outbox_block_id_not_null n NOT NULL block_id
+notification_outbox notification_outbox_container_id_not_null n NOT NULL container_id
+notification_outbox notification_outbox_due_at_not_null n NOT NULL due_at
+notification_outbox notification_outbox_kind_check c CHECK ((kind = ANY (ARRAY['mention'::text, 'assignment'::text, 'comment'::text, 'review_due'::text, 'meeting_upcoming'::text, 'due_soon'::text, 'added_to_container'::text])))
+notification_outbox notification_outbox_kind_not_null n NOT NULL kind
+notification_outbox notification_outbox_org_id_not_null n NOT NULL org_id
+notification_outbox notification_outbox_pkey p PRIMARY KEY (org_id, recipient_id, kind, source_id)
+notification_outbox notification_outbox_recipient_id_not_null n NOT NULL recipient_id
+notification_outbox notification_outbox_seq_not_null n NOT NULL seq
+notification_outbox notification_outbox_source_id_not_null n NOT NULL source_id
+notifications notifications_block_id_not_null n NOT NULL block_id
+notifications notifications_container_id_not_null n NOT NULL container_id
+notifications notifications_counted_not_null n NOT NULL counted
+notifications notifications_created_at_not_null n NOT NULL created_at
+notifications notifications_doers_not_null n NOT NULL doers
+notifications notifications_id_not_null n NOT NULL id
+notifications notifications_kind_check c CHECK ((kind = ANY (ARRAY['mention'::text, 'assignment'::text, 'comment'::text, 'review_due'::text, 'meeting_upcoming'::text, 'due_soon'::text, 'added_to_container'::text])))
+notifications notifications_kind_not_null n NOT NULL kind
+notifications notifications_org_id_not_null n NOT NULL org_id
+notifications notifications_pkey p PRIMARY KEY (org_id, id)
+notifications notifications_read_at_not_null n NOT NULL read_at
+notifications notifications_recipient_id_not_null n NOT NULL recipient_id
+notifications notifications_source_id_not_null n NOT NULL source_id
+notifications notifications_times_not_null n NOT NULL times
+notifications notifications_updated_at_not_null n NOT NULL updated_at
+oidc_former_providers oidc_former_providers_client_id_not_null n NOT NULL client_id
+oidc_former_providers oidc_former_providers_client_secret_not_null n NOT NULL client_secret
+oidc_former_providers oidc_former_providers_created_at_not_null n NOT NULL created_at
+oidc_former_providers oidc_former_providers_expires_at_not_null n NOT NULL expires_at
+oidc_former_providers oidc_former_providers_issuer_not_null n NOT NULL issuer
+oidc_former_providers oidc_former_providers_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+oidc_former_providers oidc_former_providers_org_id_not_null n NOT NULL org_id
+oidc_former_providers oidc_former_providers_pkey p PRIMARY KEY (org_id)
+oidc_held_sign_ins oidc_held_sign_ins_created_at_not_null n NOT NULL created_at
+oidc_held_sign_ins oidc_held_sign_ins_email_not_null n NOT NULL email
+oidc_held_sign_ins oidc_held_sign_ins_email_unverified_not_null n NOT NULL email_unverified
+oidc_held_sign_ins oidc_held_sign_ins_expires_at_not_null n NOT NULL expires_at
+oidc_held_sign_ins oidc_held_sign_ins_held_hash_not_null n NOT NULL held_hash
+oidc_held_sign_ins oidc_held_sign_ins_issuer_not_null n NOT NULL issuer
+oidc_held_sign_ins oidc_held_sign_ins_name_not_null n NOT NULL name
+oidc_held_sign_ins oidc_held_sign_ins_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+oidc_held_sign_ins oidc_held_sign_ins_org_id_not_null n NOT NULL org_id
+oidc_held_sign_ins oidc_held_sign_ins_pkey p PRIMARY KEY (held_hash)
+oidc_held_sign_ins oidc_held_sign_ins_preferred_username_not_null n NOT NULL preferred_username
+oidc_held_sign_ins oidc_held_sign_ins_provider_id_not_null n NOT NULL provider_id
+oidc_held_sign_ins oidc_held_sign_ins_provider_id_org_id_fkey f FOREIGN KEY (provider_id, org_id) REFERENCES oidc_providers(id, org_id) ON DELETE CASCADE
+oidc_held_sign_ins oidc_held_sign_ins_revision_not_null n NOT NULL revision
+oidc_held_sign_ins oidc_held_sign_ins_subject_not_null n NOT NULL subject
+oidc_login_flows oidc_login_flows_browser_hash_not_null n NOT NULL browser_hash
+oidc_login_flows oidc_login_flows_created_at_not_null n NOT NULL created_at
+oidc_login_flows oidc_login_flows_expires_at_not_null n NOT NULL expires_at
+oidc_login_flows oidc_login_flows_nonce_not_null n NOT NULL nonce
+oidc_login_flows oidc_login_flows_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+oidc_login_flows oidc_login_flows_org_id_not_null n NOT NULL org_id
+oidc_login_flows oidc_login_flows_pkce_verifier_not_null n NOT NULL pkce_verifier
+oidc_login_flows oidc_login_flows_pkey p PRIMARY KEY (state_hash)
+oidc_login_flows oidc_login_flows_provider_id_not_null n NOT NULL provider_id
+oidc_login_flows oidc_login_flows_provider_id_org_id_fkey f FOREIGN KEY (provider_id, org_id) REFERENCES oidc_providers(id, org_id) ON DELETE CASCADE
+oidc_login_flows oidc_login_flows_state_hash_not_null n NOT NULL state_hash
+oidc_pending_providers oidc_pending_providers_client_id_not_null n NOT NULL client_id
+oidc_pending_providers oidc_pending_providers_client_secret_not_null n NOT NULL client_secret
+oidc_pending_providers oidc_pending_providers_created_at_not_null n NOT NULL created_at
+oidc_pending_providers oidc_pending_providers_issuer_not_null n NOT NULL issuer
+oidc_pending_providers oidc_pending_providers_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+oidc_pending_providers oidc_pending_providers_org_id_not_null n NOT NULL org_id
+oidc_pending_providers oidc_pending_providers_pkey p PRIMARY KEY (org_id)
+oidc_pending_providers oidc_pending_providers_provider_id_not_null n NOT NULL provider_id
+oidc_pending_providers oidc_pending_providers_provider_id_org_id_fkey f FOREIGN KEY (provider_id, org_id) REFERENCES oidc_providers(id, org_id) ON DELETE CASCADE
+oidc_providers oidc_providers_auto_join_not_null n NOT NULL auto_join
+oidc_providers oidc_providers_client_id_not_null n NOT NULL client_id
+oidc_providers oidc_providers_client_secret_not_null n NOT NULL client_secret
+oidc_providers oidc_providers_created_at_not_null n NOT NULL created_at
+oidc_providers oidc_providers_enabled_not_null n NOT NULL enabled
+oidc_providers oidc_providers_id_not_null n NOT NULL id
+oidc_providers oidc_providers_id_org_id_key u UNIQUE (id, org_id)
+oidc_providers oidc_providers_issuer_not_null n NOT NULL issuer
+oidc_providers oidc_providers_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+oidc_providers oidc_providers_org_id_not_null n NOT NULL org_id
+oidc_providers oidc_providers_pkey p PRIMARY KEY (id)
+oidc_providers oidc_providers_revision_not_null n NOT NULL revision
+oidc_providers oidc_providers_sso_required_not_null n NOT NULL sso_required
+oidc_providers oidc_providers_updated_at_not_null n NOT NULL updated_at
+organization_members organization_members_created_at_not_null n NOT NULL created_at
+organization_members organization_members_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+organization_members organization_members_org_id_not_null n NOT NULL org_id
+organization_members organization_members_pkey p PRIMARY KEY (org_id, user_id)
+organization_members organization_members_role_check c CHECK ((role = ANY (ARRAY['admin'::text, 'member'::text])))
+organization_members organization_members_role_not_null n NOT NULL role
+organization_members organization_members_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+organization_members organization_members_user_id_not_null n NOT NULL user_id
+organizations organizations_allow_api_tokens_not_null n NOT NULL allow_api_tokens
+organizations organizations_allow_copy_out_not_null n NOT NULL allow_copy_out
+organizations organizations_created_at_not_null n NOT NULL created_at
+organizations organizations_created_by_fkey f FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+organizations organizations_default_workspace_id_fkey f FOREIGN KEY (default_workspace_id) REFERENCES workspaces(id)
+organizations organizations_default_workspace_org_fkey f FOREIGN KEY (default_workspace_id, id) REFERENCES workspaces(id, org_id)
+organizations organizations_deleted_at_check c CHECK (((deleted_at IS NULL) OR (deleted_at > 0)))
+organizations organizations_id_not_null n NOT NULL id
+organizations organizations_is_system_not_null n NOT NULL is_system
+organizations organizations_kind_check c CHECK ((kind = ANY (ARRAY['shared'::text, 'personal'::text])))
+organizations organizations_kind_not_null n NOT NULL kind
+organizations organizations_name_not_null n NOT NULL name
+organizations organizations_owner_id_fkey f FOREIGN KEY (owner_id) REFERENCES users(id)
+organizations organizations_owner_of_personal c CHECK (((kind = 'personal'::text) = (owner_id IS NOT NULL)))
+organizations organizations_password_login_not_null n NOT NULL password_login
+organizations organizations_pkey p PRIMARY KEY (id)
+organizations organizations_public_links_not_null n NOT NULL public_links
+organizations organizations_settings_not_null n NOT NULL settings
+organizations organizations_system_is_no_ones c CHECK (((NOT is_system) OR (kind = 'shared'::text)))
+organizations organizations_updated_at_not_null n NOT NULL updated_at
+password_resets password_resets_expires_at_not_null n NOT NULL expires_at
+password_resets password_resets_pkey p PRIMARY KEY (token_hash)
+password_resets password_resets_token_hash_not_null n NOT NULL token_hash
+password_resets password_resets_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+password_resets password_resets_user_id_not_null n NOT NULL user_id
+public_links public_links_container_id_fkey f FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE
+public_links public_links_container_id_not_null n NOT NULL container_id
+public_links public_links_container_org_fkey f FOREIGN KEY (container_id, org_id) REFERENCES containers(id, org_id) ON DELETE CASCADE
+public_links public_links_enabled_not_null n NOT NULL enabled
+public_links public_links_modified_by_fkey f FOREIGN KEY (modified_by) REFERENCES users(id) ON DELETE SET NULL
+public_links public_links_org_id_not_null n NOT NULL org_id
+public_links public_links_pkey p PRIMARY KEY (container_id)
+public_links public_links_token_key u UNIQUE (token)
+public_links public_links_updated_at_not_null n NOT NULL updated_at
+search_index_state search_index_state_id_check c CHECK ((id = 1))
+search_index_state search_index_state_id_not_null n NOT NULL id
+search_index_state search_index_state_name_not_null n NOT NULL name
+search_index_state search_index_state_pkey p PRIMARY KEY (id)
+search_index_state search_index_state_uuid_not_null n NOT NULL uuid
+search_index_state search_index_state_version_not_null n NOT NULL version
+search_outbox search_outbox_attempts_not_null n NOT NULL attempts
+search_outbox search_outbox_due_at_not_null n NOT NULL due_at
+search_outbox search_outbox_id_not_null n NOT NULL id
+search_outbox search_outbox_org_id_not_null n NOT NULL org_id
+search_outbox search_outbox_pkey p PRIMARY KEY (org_id, scope, id)
+search_outbox search_outbox_scope_check c CHECK ((scope = ANY (ARRAY['block'::text, 'container'::text])))
+search_outbox search_outbox_scope_not_null n NOT NULL scope
+search_outbox search_outbox_seq_not_null n NOT NULL seq
+sessions sessions_created_at_not_null n NOT NULL created_at
+sessions sessions_expires_at_not_null n NOT NULL expires_at
+sessions sessions_id_not_null n NOT NULL id
+sessions sessions_last_used_at_not_null n NOT NULL last_used_at
+sessions sessions_login_origin_check c CHECK ((((login_provider_id IS NULL) AND (login_org_id IS NULL) AND (login_issuer IS NULL)) OR ((login_provider_id IS NOT NULL) AND (login_org_id IS NOT NULL) AND (login_issuer IS NOT NULL))))
+sessions sessions_login_revision_check c CHECK (((login_revision IS NULL) OR (login_issuer IS NOT NULL)))
+sessions sessions_login_subject_check c CHECK (((login_subject IS NULL) OR (login_issuer IS NOT NULL)))
+sessions sessions_password_confirmed_at_not_null n NOT NULL password_confirmed_at
+sessions sessions_pkey p PRIMARY KEY (id)
+sessions sessions_token_hash_not_null n NOT NULL token_hash
+sessions sessions_user_agent_not_null n NOT NULL user_agent
+sessions sessions_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+sessions sessions_user_id_not_null n NOT NULL user_id
+signups signups_check c CHECK (((organization_name IS NULL) <> (invitation_id IS NULL)))
+signups signups_check1 c CHECK (((invitation_id IS NULL) = (invitation_org_id IS NULL)))
+signups signups_check2 c CHECK (((token_hash IS NULL) = (token_expires_at IS NULL)))
+signups signups_created_at_not_null n NOT NULL created_at
+signups signups_display_name_not_null n NOT NULL display_name
+signups signups_email_not_null n NOT NULL email
+signups signups_expires_at_not_null n NOT NULL expires_at
+signups signups_id_not_null n NOT NULL id
+signups signups_invitation_id_invitation_org_id_fkey f FOREIGN KEY (invitation_id, invitation_org_id) REFERENCES invitations(id, org_id) ON DELETE CASCADE
+signups signups_language_not_null n NOT NULL language
+signups signups_password_hash_not_null n NOT NULL password_hash
+signups signups_pkey p PRIMARY KEY (id)
+signups signups_username_not_null n NOT NULL username
+subscriptions subscriptions_block_id_fkey f FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+subscriptions subscriptions_block_id_not_null n NOT NULL block_id
+subscriptions subscriptions_block_org_fkey f FOREIGN KEY (block_id, org_id) REFERENCES blocks(id, org_id) ON DELETE CASCADE
+subscriptions subscriptions_block_type_not_null n NOT NULL block_type
+subscriptions subscriptions_created_at_not_null n NOT NULL created_at
+subscriptions subscriptions_notified_at_not_null n NOT NULL notified_at
+subscriptions subscriptions_org_id_not_null n NOT NULL org_id
+subscriptions subscriptions_pkey p PRIMARY KEY (block_id, user_id)
+subscriptions subscriptions_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+subscriptions subscriptions_user_id_not_null n NOT NULL user_id
+team_members team_members_org_id_not_null n NOT NULL org_id
+team_members team_members_pkey p PRIMARY KEY (team_id, user_id, org_id)
+team_members team_members_team_id_not_null n NOT NULL team_id
+team_members team_members_team_id_workspace_id_org_id_fkey f FOREIGN KEY (team_id, workspace_id, org_id) REFERENCES teams(id, workspace_id, org_id) ON DELETE CASCADE
+team_members team_members_user_id_not_null n NOT NULL user_id
+team_members team_members_workspace_id_not_null n NOT NULL workspace_id
+team_members team_members_workspace_id_user_id_org_id_fkey f FOREIGN KEY (workspace_id, user_id, org_id) REFERENCES workspace_members(workspace_id, user_id, org_id) ON DELETE CASCADE
+teams teams_id_not_null n NOT NULL id
+teams teams_id_workspace_id_org_id_key u UNIQUE (id, workspace_id, org_id)
+teams teams_name_check c CHECK ((length(name) > 0))
+teams teams_name_key_check c CHECK ((length(name_key) > 0))
+teams teams_name_key_not_null n NOT NULL name_key
+teams teams_name_not_null n NOT NULL name
+teams teams_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE
+teams teams_org_id_not_null n NOT NULL org_id
+teams teams_pkey p PRIMARY KEY (id, org_id)
+teams teams_workspace_id_name_key_org_id_key u UNIQUE (workspace_id, name_key, org_id)
+teams teams_workspace_id_not_null n NOT NULL workspace_id
+teams teams_workspace_id_org_id_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id) ON DELETE CASCADE
+time_entries time_entries_check c CHECK (((ended_at IS NULL) OR (ended_at >= started_at)))
+time_entries time_entries_created_at_not_null n NOT NULL created_at
+time_entries time_entries_id_not_null n NOT NULL id
+time_entries time_entries_kind_check c CHECK ((kind = ANY (ARRAY['lecture'::text, 'study'::text, 'work'::text, 'other'::text])))
+time_entries time_entries_kind_not_null n NOT NULL kind
+time_entries time_entries_note_not_null n NOT NULL note
+time_entries time_entries_org_id_not_null n NOT NULL org_id
+time_entries time_entries_pkey p PRIMARY KEY (id)
+time_entries time_entries_started_at_not_null n NOT NULL started_at
+time_entries time_entries_target_kind_check c CHECK (((target_kind IS NULL) OR (target_kind = ANY (ARRAY['card'::text, 'unit'::text, 'board'::text, 'course'::text]))))
+time_entries time_entries_updated_at_not_null n NOT NULL updated_at
+time_entries time_entries_user_id_not_null n NOT NULL user_id
+unit_notes unit_notes_container_id_not_null n NOT NULL container_id
+unit_notes unit_notes_content_not_null n NOT NULL content
+unit_notes unit_notes_created_at_not_null n NOT NULL created_at
+unit_notes unit_notes_id_not_null n NOT NULL id
+unit_notes unit_notes_kind_check c CHECK ((kind = ANY (ARRAY['question'::text, 'mistake'::text, 'review'::text])))
+unit_notes unit_notes_kind_not_null n NOT NULL kind
+unit_notes unit_notes_org_id_not_null n NOT NULL org_id
+unit_notes unit_notes_pkey p PRIMARY KEY (org_id, id)
+unit_notes unit_notes_unit_id_not_null n NOT NULL unit_id
+unit_notes unit_notes_updated_at_not_null n NOT NULL updated_at
+unit_notes unit_notes_user_id_not_null n NOT NULL user_id
+unit_progress unit_progress_container_id_not_null n NOT NULL container_id
+unit_progress unit_progress_org_id_not_null n NOT NULL org_id
+unit_progress unit_progress_pkey p PRIMARY KEY (unit_id, org_id, user_id)
+unit_progress unit_progress_unit_id_not_null n NOT NULL unit_id
+unit_progress unit_progress_updated_at_not_null n NOT NULL updated_at
+unit_progress unit_progress_user_id_not_null n NOT NULL user_id
+unit_reviews unit_reviews_container_id_not_null n NOT NULL container_id
+unit_reviews unit_reviews_created_at_not_null n NOT NULL created_at
+unit_reviews unit_reviews_id_not_null n NOT NULL id
+unit_reviews unit_reviews_interval_days_check c CHECK (((interval_days >= 1) AND (interval_days <= 3650)))
+unit_reviews unit_reviews_interval_days_not_null n NOT NULL interval_days
+unit_reviews unit_reviews_org_id_not_null n NOT NULL org_id
+unit_reviews unit_reviews_pkey p PRIMARY KEY (org_id, id)
+unit_reviews unit_reviews_scheduled_date_not_null n NOT NULL scheduled_date
+unit_reviews unit_reviews_unit_id_not_null n NOT NULL unit_id
+unit_reviews unit_reviews_updated_at_not_null n NOT NULL updated_at
+unit_reviews unit_reviews_user_id_not_null n NOT NULL user_id
+upload_parts upload_parts_number_not_null n NOT NULL number
+upload_parts upload_parts_org_id_not_null n NOT NULL org_id
+upload_parts upload_parts_part_id_not_null n NOT NULL part_id
+upload_parts upload_parts_pkey p PRIMARY KEY (upload_id, number)
+upload_parts upload_parts_size_not_null n NOT NULL size
+upload_parts upload_parts_upload_id_fkey f FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE
+upload_parts upload_parts_upload_id_not_null n NOT NULL upload_id
+upload_parts upload_parts_upload_org_fkey f FOREIGN KEY (upload_id, org_id) REFERENCES uploads(id, org_id) ON DELETE CASCADE
+uploads uploads_closed_at_not_null n NOT NULL closed_at
+uploads uploads_container_id_not_null n NOT NULL container_id
+uploads uploads_content_type_not_null n NOT NULL content_type
+uploads uploads_created_at_not_null n NOT NULL created_at
+uploads uploads_expires_at_not_null n NOT NULL expires_at
+uploads uploads_id_not_null n NOT NULL id
+uploads uploads_id_org_id_key u UNIQUE (id, org_id)
+uploads uploads_multipart_id_not_null n NOT NULL multipart_id
+uploads uploads_name_not_null n NOT NULL name
+uploads uploads_org_id_not_null n NOT NULL org_id
+uploads uploads_part_size_not_null n NOT NULL part_size
+uploads uploads_path_not_null n NOT NULL path
+uploads uploads_pkey p PRIMARY KEY (id)
+uploads uploads_purpose_not_null n NOT NULL purpose
+uploads uploads_size_not_null n NOT NULL size
+uploads uploads_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+uploads uploads_user_id_not_null n NOT NULL user_id
+user_client_state user_client_state_key_not_null n NOT NULL key
+user_client_state user_client_state_pkey p PRIMARY KEY (user_id, key)
+user_client_state user_client_state_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+user_client_state user_client_state_user_id_not_null n NOT NULL user_id
+user_client_state user_client_state_value_not_null n NOT NULL value
+user_identities user_identities_created_at_not_null n NOT NULL created_at
+user_identities user_identities_email_not_null n NOT NULL email
+user_identities user_identities_issuer_not_null n NOT NULL issuer
+user_identities user_identities_pkey p PRIMARY KEY (issuer, subject)
+user_identities user_identities_subject_not_null n NOT NULL subject
+user_identities user_identities_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+user_identities user_identities_user_id_not_null n NOT NULL user_id
+user_settings user_settings_card_open_check c CHECK ((card_open = ANY (ARRAY['center'::text, 'side'::text, 'full'::text])))
+user_settings user_settings_card_open_not_null n NOT NULL card_open
+user_settings user_settings_density_check c CHECK ((density = ANY (ARRAY['auto'::text, 'compact'::text, 'comfortable'::text])))
+user_settings user_settings_density_not_null n NOT NULL density
+user_settings user_settings_haptics_not_null n NOT NULL haptics
+user_settings user_settings_hour_cycle_check c CHECK ((hour_cycle = ANY (ARRAY['auto'::text, 'h12'::text, 'h23'::text])))
+user_settings user_settings_hour_cycle_not_null n NOT NULL hour_cycle
+user_settings user_settings_language_not_null n NOT NULL language
+user_settings user_settings_notify_assignments_not_null n NOT NULL notify_assignments
+user_settings user_settings_notify_comments_not_null n NOT NULL notify_comments
+user_settings user_settings_notify_due_not_null n NOT NULL notify_due
+user_settings user_settings_notify_meetings_not_null n NOT NULL notify_meetings
+user_settings user_settings_notify_mentions_not_null n NOT NULL notify_mentions
+user_settings user_settings_notify_reviews_not_null n NOT NULL notify_reviews
+user_settings user_settings_pkey p PRIMARY KEY (user_id)
+user_settings user_settings_theme_check c CHECK ((theme = ANY (ARRAY['auto'::text, 'light'::text, 'dark'::text])))
+user_settings user_settings_theme_not_null n NOT NULL theme
+user_settings user_settings_time_zone_not_null n NOT NULL time_zone
+user_settings user_settings_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+user_settings user_settings_user_id_not_null n NOT NULL user_id
+user_settings user_settings_week_start_check c CHECK ((week_start = ANY (ARRAY['auto'::text, 'sunday'::text, 'monday'::text, 'saturday'::text])))
+user_settings user_settings_week_start_not_null n NOT NULL week_start
+users users_check2 c CHECK (((erased_at = 0) OR (erase_started_at > 0)))
+users users_created_at_not_null n NOT NULL created_at
+users users_credentials_not_null n NOT NULL credentials
+users users_custom_name_not_null n NOT NULL custom_name
+users users_delete_after_check c CHECK (((delete_after = 0) OR ((deleted_at IS NOT NULL) AND (deleted_at > 0))))
+users users_delete_after_not_null n NOT NULL delete_after
+users users_deleted_at_check c CHECK (((deleted_at IS NULL) OR (deleted_at > 0)))
+users users_display_name_not_null n NOT NULL display_name
+users users_email_not_null n NOT NULL email
+users users_email_verified_at_not_null n NOT NULL email_verified_at
+users users_erase_started_at_check c CHECK (((erase_started_at = 0) OR ((deleted_at IS NOT NULL) AND (deleted_at > 0))))
+users users_erase_started_at_not_null n NOT NULL erase_started_at
+users users_erased_at_not_null n NOT NULL erased_at
+users users_first_name_not_null n NOT NULL first_name
+users users_id_not_null n NOT NULL id
+users users_is_admin_not_null n NOT NULL is_admin
+users users_last_name_not_null n NOT NULL last_name
+users users_latin_first_name_not_null n NOT NULL latin_first_name
+users users_latin_last_name_not_null n NOT NULL latin_last_name
+users users_name_shown_not_null n NOT NULL name_shown
+users users_password_hash_not_null n NOT NULL password_hash
+users users_password_locked_at_not_null n NOT NULL password_locked_at
+users users_pkey p PRIMARY KEY (id)
+users users_title_not_null n NOT NULL title
+users users_updated_at_not_null n NOT NULL updated_at
+users users_username_not_null n NOT NULL username
+workspace_members workspace_members_created_at_not_null n NOT NULL created_at
+workspace_members workspace_members_org_id_not_null n NOT NULL org_id
+workspace_members workspace_members_pkey p PRIMARY KEY (workspace_id, user_id)
+workspace_members workspace_members_prior_role_check c CHECK ((prior_role = ANY (ARRAY['admin'::text, 'member'::text, 'guest'::text])))
+workspace_members workspace_members_role_check c CHECK ((role = ANY (ARRAY['admin'::text, 'member'::text, 'guest'::text])))
+workspace_members workspace_members_role_not_null n NOT NULL role
+workspace_members workspace_members_user_id_fkey f FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+workspace_members workspace_members_user_id_not_null n NOT NULL user_id
+workspace_members workspace_members_via_org_admin_not_null n NOT NULL via_org_admin
+workspace_members workspace_members_workspace_id_fkey f FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+workspace_members workspace_members_workspace_id_not_null n NOT NULL workspace_id
+workspace_members workspace_members_workspace_org_fkey f FOREIGN KEY (workspace_id, org_id) REFERENCES workspaces(id, org_id) ON DELETE CASCADE
+workspaces workspaces_created_at_not_null n NOT NULL created_at
+workspaces workspaces_deleted_at_check c CHECK (((deleted_at IS NULL) OR (deleted_at > 0)))
+workspaces workspaces_guest_invitations_not_null n NOT NULL guest_invitations
+workspaces workspaces_id_not_null n NOT NULL id
+workspaces workspaces_id_org_id_key u UNIQUE (id, org_id)
+workspaces workspaces_is_system_not_null n NOT NULL is_system
+workspaces workspaces_modified_by_fkey f FOREIGN KEY (modified_by) REFERENCES users(id) ON DELETE SET NULL
+workspaces workspaces_name_not_null n NOT NULL name
+workspaces workspaces_org_id_fkey f FOREIGN KEY (org_id) REFERENCES organizations(id)
+workspaces workspaces_org_id_not_null n NOT NULL org_id
+workspaces workspaces_pkey p PRIMARY KEY (id)
+workspaces workspaces_settings_not_null n NOT NULL settings
+workspaces workspaces_updated_at_not_null n NOT NULL updated_at
+workspaces workspaces_welcomed_at_check c CHECK (((welcomed_at IS NULL) OR (welcomed_at > 0)))
+# indexes
+CREATE UNIQUE INDEX _sqlx_migrations_pkey ON _sqlx_migrations USING btree (version)
+CREATE UNIQUE INDEX api_token_workspaces_pkey ON api_token_workspaces USING btree (token_id, workspace_id)
+CREATE INDEX api_token_workspaces_workspace_idx ON api_token_workspaces USING btree (org_id, workspace_id)
+CREATE INDEX api_tokens_origin_provider_idx ON api_tokens USING btree (origin_provider_id) WHERE (origin_provider_id IS NOT NULL)
+CREATE UNIQUE INDEX api_tokens_pkey ON api_tokens USING btree (id)
+CREATE UNIQUE INDEX api_tokens_token_hash_key ON api_tokens USING btree (token_hash)
+CREATE INDEX api_tokens_user_id_idx ON api_tokens USING btree (user_id)
+CREATE INDEX audit_log_actor_identity_idx ON audit_log USING btree (actor_id) WHERE (identity IS NOT NULL)
+CREATE INDEX audit_log_org_idx ON audit_log USING btree (org_id, created_at) WHERE (workspace_id IS NULL)
+CREATE UNIQUE INDEX audit_log_pkey ON audit_log USING btree (id, org_id)
+CREATE INDEX audit_log_subject_identity_idx ON audit_log USING btree (subject_id) WHERE (identity IS NOT NULL)
+CREATE INDEX audit_log_workspace_id_idx ON audit_log USING btree (workspace_id, created_at)
+CREATE UNIQUE INDEX blocks_container_id_id_key ON blocks USING btree (container_id, id)
+CREATE UNIQUE INDEX blocks_container_id_number_idx ON blocks USING btree (container_id, number)
+CREATE INDEX blocks_container_id_parent_id_idx ON blocks USING btree (container_id, parent_id)
+CREATE INDEX blocks_container_titled_updated_at_idx ON blocks USING btree (container_id, updated_at DESC, id) WHERE (type = ANY (ARRAY['card'::text, 'page'::text, 'unit'::text]))
+CREATE INDEX blocks_container_type_created_at_idx ON blocks USING btree (container_id, type, created_at, id)
+CREATE INDEX blocks_created_by_idx ON blocks USING btree (created_by)
+CREATE INDEX blocks_due_at_idx ON blocks USING btree (container_id, due_at) WHERE ((due_at IS NOT NULL) AND (is_done = false))
+CREATE UNIQUE INDEX blocks_id_org_id_key ON blocks USING btree (id, org_id)
+CREATE INDEX blocks_modified_by_idx ON blocks USING btree (modified_by)
+CREATE INDEX blocks_parent_type_created_at_idx ON blocks USING btree (parent_id, type, created_at)
+CREATE UNIQUE INDEX blocks_pkey ON blocks USING btree (id)
+CREATE UNIQUE INDEX body_docs_pkey ON body_docs USING btree (block_id, org_id)
+CREATE UNIQUE INDEX body_links_pkey ON body_links USING btree (source_id, org_id, target_id)
+CREATE INDEX body_links_target_idx ON body_links USING btree (target_id, org_id)
+CREATE UNIQUE INDEX body_updates_pkey ON body_updates USING btree (block_id, org_id, seq)
+CREATE UNIQUE INDEX body_version_editors_pkey ON body_version_editors USING btree (block_id, org_id, version, user_id)
+CREATE INDEX body_version_editors_user_id_idx ON body_version_editors USING btree (user_id)
+CREATE UNIQUE INDEX body_versions_pkey ON body_versions USING btree (block_id, org_id, version)
+CREATE INDEX card_assignees_container_idx ON card_assignees USING btree (container_id)
+CREATE UNIQUE INDEX card_assignees_pkey ON card_assignees USING btree (org_id, card_id, user_id)
+CREATE INDEX card_assignees_user_container_idx ON card_assignees USING btree (org_id, user_id, container_id)
+CREATE INDEX card_assignees_user_idx ON card_assignees USING btree (user_id)
+CREATE INDEX card_due_notices_card_idx ON card_due_notices USING btree (card_id)
+CREATE UNIQUE INDEX card_due_notices_pkey ON card_due_notices USING btree (org_id, card_id, user_id, due_key)
+CREATE INDEX card_due_notices_user_idx ON card_due_notices USING btree (user_id)
+CREATE UNIQUE INDEX categories_id_org_id_key ON categories USING btree (id, org_id)
+CREATE UNIQUE INDEX categories_pkey ON categories USING btree (id)
+CREATE INDEX categories_user_id_workspace_id_idx ON categories USING btree (user_id, workspace_id)
+CREATE INDEX category_containers_category_id_idx ON category_containers USING btree (category_id)
+CREATE INDEX category_containers_container_id_idx ON category_containers USING btree (container_id)
+CREATE UNIQUE INDEX category_containers_pkey ON category_containers USING btree (id)
+CREATE UNIQUE INDEX category_containers_user_id_container_id_org_id_key ON category_containers USING btree (user_id, container_id, org_id)
+CREATE UNIQUE INDEX comment_versions_pkey ON comment_versions USING btree (block_id, org_id, version)
+CREATE INDEX comment_versions_written_by_idx ON comment_versions USING btree (written_by)
+CREATE UNIQUE INDEX container_members_pkey ON container_members USING btree (container_id, user_id)
+CREATE INDEX container_members_user_id_idx ON container_members USING btree (user_id)
+CREATE UNIQUE INDEX container_teams_pkey ON container_teams USING btree (container_id, team_id, org_id)
+CREATE INDEX container_teams_team_idx ON container_teams USING btree (team_id, org_id)
+CREATE INDEX containers_created_by_idx ON containers USING btree (created_by)
+CREATE UNIQUE INDEX containers_id_org_id_key ON containers USING btree (id, org_id)
+CREATE UNIQUE INDEX containers_pkey ON containers USING btree (id)
+CREATE INDEX containers_workspace_id_is_template_idx ON containers USING btree (workspace_id, is_template)
+CREATE UNIQUE INDEX containers_workspace_scope_key ON containers USING btree (id, workspace_id, org_id)
+CREATE INDEX course_exams_container_idx ON course_exams USING btree (org_id, container_id, exam_date, created_at, id)
+CREATE UNIQUE INDEX course_exams_pkey ON course_exams USING btree (org_id, id)
+CREATE INDEX course_meetings_container_idx ON course_meetings USING btree (org_id, container_id, starts_at, id)
+CREATE UNIQUE INDEX course_meetings_pkey ON course_meetings USING btree (org_id, id)
+CREATE INDEX course_meetings_upcoming_idx ON course_meetings USING btree (starts_at) WHERE (notified_at IS NULL)
+CREATE UNIQUE INDEX course_schedules_pkey ON course_schedules USING btree (container_id, org_id)
+CREATE UNIQUE INDEX data_steps_pkey ON data_steps USING btree (name)
+CREATE INDEX deleted_blocks_container_deleted_at_idx ON deleted_blocks USING btree (container_id, deleted_at DESC, id)
+CREATE INDEX deleted_blocks_container_type_deleted_at_idx ON deleted_blocks USING btree (container_id, block_type, deleted_at DESC, id)
+CREATE INDEX deleted_blocks_deleted_at_idx ON deleted_blocks USING btree (deleted_at)
+CREATE INDEX deleted_blocks_deletion_id_idx ON deleted_blocks USING btree (deletion_id)
+CREATE UNIQUE INDEX deleted_blocks_pkey ON deleted_blocks USING btree (id, org_id)
+CREATE INDEX deleted_containers_deleted_at_idx ON deleted_containers USING btree (deleted_at)
+CREATE UNIQUE INDEX deleted_containers_pkey ON deleted_containers USING btree (id, org_id)
+CREATE INDEX deleted_containers_workspace_id_idx ON deleted_containers USING btree (workspace_id, deleted_at)
+CREATE UNIQUE INDEX diary_days_entry_id_org_id_key ON diary_days USING btree (entry_id, org_id)
+CREATE INDEX diary_days_month_day_idx ON diary_days USING btree (container_id, month_day)
+CREATE UNIQUE INDEX diary_days_pkey ON diary_days USING btree (container_id, day, org_id)
+CREATE INDEX email_changes_expires_at_idx ON email_changes USING btree (expires_at)
+CREATE UNIQUE INDEX email_changes_pkey ON email_changes USING btree (user_id)
+CREATE UNIQUE INDEX email_changes_token_hash_key ON email_changes USING btree (token_hash)
+CREATE INDEX email_reverts_email_idx ON email_reverts USING btree (lower(email))
+CREATE INDEX email_reverts_expires_at_idx ON email_reverts USING btree (expires_at)
+CREATE UNIQUE INDEX email_reverts_pkey ON email_reverts USING btree (token_hash)
+CREATE INDEX email_reverts_user_id_idx ON email_reverts USING btree (user_id, created_at)
+CREATE INDEX exam_scores_container_user_idx ON exam_scores USING btree (org_id, container_id, user_id)
+CREATE UNIQUE INDEX exam_scores_pkey ON exam_scores USING btree (exam_id, org_id, user_id)
+CREATE INDEX exam_scores_user_idx ON exam_scores USING btree (user_id)
+CREATE INDEX file_refs_container_id_name_idx ON file_refs USING btree (container_id, name)
+CREATE UNIQUE INDEX file_refs_pkey ON file_refs USING btree (block_id, org_id, name)
+CREATE INDEX file_versions_created_by_idx ON file_versions USING btree (created_by)
+CREATE INDEX file_versions_path_idx ON file_versions USING btree (path)
+CREATE UNIQUE INDEX file_versions_pkey ON file_versions USING btree (file_id, org_id, version)
+CREATE UNIQUE INDEX files_container_id_name_key ON files USING btree (container_id, name)
+CREATE INDEX files_created_by_idx ON files USING btree (created_by)
+CREATE INDEX files_path_idx ON files USING btree (path)
+CREATE UNIQUE INDEX files_pkey ON files USING btree (id)
+CREATE INDEX files_unreferenced_at_idx ON files USING btree (unreferenced_at)
+CREATE UNIQUE INDEX instance_pkey ON instance USING btree (id)
+CREATE INDEX invitations_created_by_idx ON invitations USING btree (created_by)
+CREATE INDEX invitations_parent_id_idx ON invitations USING btree (parent_id) WHERE (parent_id IS NOT NULL)
+CREATE UNIQUE INDEX invitations_pkey ON invitations USING btree (id, org_id)
+CREATE UNIQUE INDEX invitations_token_hash_key ON invitations USING btree (token_hash)
+CREATE INDEX invitations_workspace_id_idx ON invitations USING btree (workspace_id, created_at)
+CREATE INDEX loose_objects_path_idx ON loose_objects USING btree (path)
+CREATE UNIQUE INDEX loose_objects_pkey ON loose_objects USING btree (org_id, path)
+CREATE INDEX loose_objects_state_retry_at_idx ON loose_objects USING btree (state, retry_at)
+CREATE INDEX meeting_attendance_meeting_idx ON meeting_attendance USING btree (org_id, meeting_id)
+CREATE UNIQUE INDEX meeting_attendance_pkey ON meeting_attendance USING btree (meeting_id, org_id, user_id)
+CREATE INDEX meeting_attendance_user_idx ON meeting_attendance USING btree (user_id)
+CREATE INDEX notification_outbox_block_idx ON notification_outbox USING btree (block_id)
+CREATE INDEX notification_outbox_container_idx ON notification_outbox USING btree (container_id)
+CREATE INDEX notification_outbox_due_at_idx ON notification_outbox USING btree (due_at)
+CREATE UNIQUE INDEX notification_outbox_pkey ON notification_outbox USING btree (org_id, recipient_id, kind, source_id)
+CREATE INDEX notifications_block_idx ON notifications USING btree (block_id)
+CREATE INDEX notifications_container_idx ON notifications USING btree (container_id)
+CREATE INDEX notifications_id_idx ON notifications USING btree (id)
+CREATE INDEX notifications_made_by_idx ON notifications USING btree (recipient_id, made_by, created_at)
+CREATE UNIQUE INDEX notifications_pkey ON notifications USING btree (org_id, id)
+CREATE INDEX notifications_read_at_idx ON notifications USING btree (read_at) WHERE (read_at > 0)
+CREATE INDEX notifications_recipient_idx ON notifications USING btree (recipient_id, updated_at DESC, id DESC)
+CREATE INDEX notifications_same_idx ON notifications USING btree (recipient_id, block_id, kind, created_at)
+CREATE INDEX notifications_unread_idx ON notifications USING btree (recipient_id) WHERE (read_at = 0)
+CREATE INDEX oidc_former_providers_expires_at_idx ON oidc_former_providers USING btree (expires_at)
+CREATE UNIQUE INDEX oidc_former_providers_pkey ON oidc_former_providers USING btree (org_id)
+CREATE INDEX oidc_held_sign_ins_expires_at_idx ON oidc_held_sign_ins USING btree (expires_at)
+CREATE UNIQUE INDEX oidc_held_sign_ins_pkey ON oidc_held_sign_ins USING btree (held_hash)
+CREATE INDEX oidc_login_flows_expires_at_idx ON oidc_login_flows USING btree (expires_at)
+CREATE UNIQUE INDEX oidc_login_flows_pkey ON oidc_login_flows USING btree (state_hash)
+CREATE UNIQUE INDEX oidc_pending_providers_pkey ON oidc_pending_providers USING btree (org_id)
+CREATE UNIQUE INDEX oidc_providers_id_org_id_key ON oidc_providers USING btree (id, org_id)
+CREATE UNIQUE INDEX oidc_providers_org_id_key ON oidc_providers USING btree (org_id)
+CREATE UNIQUE INDEX oidc_providers_pkey ON oidc_providers USING btree (id)
+CREATE UNIQUE INDEX organization_members_pkey ON organization_members USING btree (org_id, user_id)
+CREATE INDEX organization_members_user_id_idx ON organization_members USING btree (user_id)
+CREATE INDEX organizations_created_by_idx ON organizations USING btree (created_by) WHERE (created_by IS NOT NULL)
+CREATE INDEX organizations_of_people_idx ON organizations USING btree (created_at, id) WHERE (kind = 'shared'::text)
+CREATE UNIQUE INDEX organizations_owner_id_key ON organizations USING btree (owner_id) WHERE (owner_id IS NOT NULL)
+CREATE UNIQUE INDEX organizations_pkey ON organizations USING btree (id)
+CREATE UNIQUE INDEX organizations_system_key ON organizations USING btree (is_system) WHERE is_system
+CREATE INDEX password_resets_expires_at_idx ON password_resets USING btree (expires_at)
+CREATE UNIQUE INDEX password_resets_pkey ON password_resets USING btree (token_hash)
+CREATE INDEX password_resets_user_id_idx ON password_resets USING btree (user_id)
+CREATE UNIQUE INDEX public_links_pkey ON public_links USING btree (container_id)
+CREATE UNIQUE INDEX public_links_token_key ON public_links USING btree (token)
+CREATE UNIQUE INDEX search_index_state_pkey ON search_index_state USING btree (id)
+CREATE INDEX search_outbox_due_at_idx ON search_outbox USING btree (due_at)
+CREATE UNIQUE INDEX search_outbox_pkey ON search_outbox USING btree (org_id, scope, id)
+CREATE INDEX sessions_login_origin_idx ON sessions USING btree (login_org_id, login_issuer) WHERE (login_issuer IS NOT NULL)
+CREATE UNIQUE INDEX sessions_pkey ON sessions USING btree (id)
+CREATE UNIQUE INDEX sessions_token_hash_key ON sessions USING btree (token_hash)
+CREATE INDEX sessions_user_id_idx ON sessions USING btree (user_id)
+CREATE UNIQUE INDEX signups_browser_hash_key ON signups USING btree (browser_hash)
+CREATE UNIQUE INDEX signups_email_key ON signups USING btree (lower(email))
+CREATE INDEX signups_expires_at_idx ON signups USING btree (expires_at)
+CREATE INDEX signups_invitation_idx ON signups USING btree (invitation_id, invitation_org_id) WHERE (invitation_id IS NOT NULL)
+CREATE UNIQUE INDEX signups_pkey ON signups USING btree (id)
+CREATE UNIQUE INDEX signups_token_hash_key ON signups USING btree (token_hash)
+CREATE UNIQUE INDEX signups_username_key ON signups USING btree (lower(username))
+CREATE UNIQUE INDEX subscriptions_pkey ON subscriptions USING btree (block_id, user_id)
+CREATE INDEX subscriptions_user_id_idx ON subscriptions USING btree (user_id)
+CREATE UNIQUE INDEX team_members_pkey ON team_members USING btree (team_id, user_id, org_id)
+CREATE INDEX team_members_user_idx ON team_members USING btree (user_id, workspace_id, org_id)
+CREATE UNIQUE INDEX teams_id_workspace_id_org_id_key ON teams USING btree (id, workspace_id, org_id)
+CREATE UNIQUE INDEX teams_pkey ON teams USING btree (id, org_id)
+CREATE UNIQUE INDEX teams_workspace_id_name_key_org_id_key ON teams USING btree (workspace_id, name_key, org_id)
+CREATE UNIQUE INDEX time_entries_one_active_per_user ON time_entries USING btree (user_id) WHERE (ended_at IS NULL)
+CREATE INDEX time_entries_org_user_started_idx ON time_entries USING btree (org_id, user_id, started_at DESC)
+CREATE UNIQUE INDEX time_entries_pkey ON time_entries USING btree (id)
+CREATE INDEX time_entries_user_block_started_idx ON time_entries USING btree (user_id, block_id, started_at DESC, id DESC) WHERE (block_id IS NOT NULL)
+CREATE INDEX time_entries_user_container_started_idx ON time_entries USING btree (user_id, container_id, started_at DESC, id DESC) WHERE (container_id IS NOT NULL)
+CREATE INDEX time_entries_user_started_idx ON time_entries USING btree (user_id, started_at DESC, id DESC)
+CREATE INDEX unit_notes_container_user_unit_created_idx ON unit_notes USING btree (org_id, container_id, user_id, unit_id, created_at DESC)
+CREATE UNIQUE INDEX unit_notes_pkey ON unit_notes USING btree (org_id, id)
+CREATE INDEX unit_notes_user_idx ON unit_notes USING btree (user_id)
+CREATE INDEX unit_progress_container_completed_idx ON unit_progress USING btree (org_id, container_id, completed_at)
+CREATE INDEX unit_progress_container_user_idx ON unit_progress USING btree (org_id, container_id, user_id)
+CREATE UNIQUE INDEX unit_progress_pkey ON unit_progress USING btree (unit_id, org_id, user_id)
+CREATE INDEX unit_progress_user_idx ON unit_progress USING btree (user_id)
+CREATE INDEX unit_reviews_container_user_unit_idx ON unit_reviews USING btree (org_id, container_id, user_id, unit_id)
+CREATE INDEX unit_reviews_due_notify_idx ON unit_reviews USING btree (scheduled_date, created_at, id) WHERE ((completed_at IS NULL) AND (notified_at IS NULL))
+CREATE UNIQUE INDEX unit_reviews_pkey ON unit_reviews USING btree (org_id, id)
+CREATE INDEX unit_reviews_user_idx ON unit_reviews USING btree (user_id)
+CREATE INDEX unit_reviews_user_scheduled_idx ON unit_reviews USING btree (org_id, user_id, scheduled_date)
+CREATE UNIQUE INDEX upload_parts_pkey ON upload_parts USING btree (upload_id, number)
+CREATE INDEX uploads_expires_at_idx ON uploads USING btree (expires_at)
+CREATE UNIQUE INDEX uploads_id_org_id_key ON uploads USING btree (id, org_id)
+CREATE INDEX uploads_path_idx ON uploads USING btree (path)
+CREATE UNIQUE INDEX uploads_pkey ON uploads USING btree (id)
+CREATE INDEX uploads_user_id_idx ON uploads USING btree (user_id)
+CREATE UNIQUE INDEX user_client_state_pkey ON user_client_state USING btree (user_id, key)
+CREATE UNIQUE INDEX user_identities_pkey ON user_identities USING btree (issuer, subject)
+CREATE INDEX user_identities_user_id_idx ON user_identities USING btree (user_id)
+CREATE UNIQUE INDEX user_settings_pkey ON user_settings USING btree (user_id)
+CREATE UNIQUE INDEX users_email_key ON users USING btree (lower(email)) WHERE (email <> ''::text)
+CREATE INDEX users_leaving_idx ON users USING btree (delete_after) WHERE ((deleted_at IS NOT NULL) AND (erased_at = 0))
+CREATE UNIQUE INDEX users_pkey ON users USING btree (id)
+CREATE UNIQUE INDEX users_username_key ON users USING btree (lower(username)) WHERE (username <> ''::text)
+CREATE UNIQUE INDEX workspace_members_pkey ON workspace_members USING btree (workspace_id, user_id)
+CREATE UNIQUE INDEX workspace_members_scope_key ON workspace_members USING btree (workspace_id, user_id, org_id)
+CREATE INDEX workspace_members_user_id_idx ON workspace_members USING btree (user_id)
+CREATE INDEX workspaces_deleted_idx ON workspaces USING btree (deleted_at) WHERE (deleted_at IS NOT NULL)
+CREATE UNIQUE INDEX workspaces_id_org_id_key ON workspaces USING btree (id, org_id)
+CREATE UNIQUE INDEX workspaces_name_in_use_key ON workspaces USING btree (org_id, name) WHERE ((deleted_at IS NULL) AND (name <> ''::text))
+CREATE INDEX workspaces_org_id_idx ON workspaces USING btree (org_id)
+CREATE UNIQUE INDEX workspaces_pkey ON workspaces USING btree (id)
+CREATE UNIQUE INDEX workspaces_scope_key ON workspaces USING btree (id, org_id)
+# triggers
+CREATE TRIGGER audit_log_kept BEFORE DELETE OR UPDATE ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_log_is_kept() enabled=O
+CREATE TRIGGER category_containers_container_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON category_containers FOR EACH ROW EXECUTE FUNCTION category_containers_container_of_its_organization() enabled=O
+CREATE TRIGGER diaries_of_a_space BEFORE INSERT OR UPDATE OF org_id, workspace_id, kind ON containers FOR EACH ROW EXECUTE FUNCTION diaries_are_of_a_space() enabled=O
+CREATE TRIGGER course_exams_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON course_exams FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER course_meetings_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON course_meetings FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER exam_scores_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON exam_scores FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER invitations_of_a_space BEFORE INSERT OR UPDATE OF org_id ON invitations FOR EACH ROW EXECUTE FUNCTION spaces_have_no_invitations() enabled=O
+CREATE TRIGGER organization_members_of_a_space BEFORE INSERT OR UPDATE OF org_id, user_id ON organization_members FOR EACH ROW EXECUTE FUNCTION spaces_take_their_owner_alone() enabled=O
+CREATE TRIGGER organizations_keep_their_kind BEFORE UPDATE OF kind, owner_id ON organizations FOR EACH ROW WHEN (((new.kind IS DISTINCT FROM old.kind) OR (new.owner_id IS DISTINCT FROM old.owner_id))) EXECUTE FUNCTION organizations_keep_their_kind() enabled=O
+CREATE TRIGGER public_links_of_no_diary BEFORE INSERT OR UPDATE OF org_id, container_id ON public_links FOR EACH ROW EXECUTE FUNCTION diaries_have_no_link() enabled=O
+CREATE TRIGGER unit_notes_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON unit_notes FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER unit_progress_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON unit_progress FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER unit_reviews_course_of_its_organization BEFORE INSERT OR UPDATE OF container_id, org_id ON unit_reviews FOR EACH ROW EXECUTE FUNCTION course_child_of_its_course() enabled=O
+CREATE TRIGGER uploads_target_of_its_organization BEFORE INSERT OR UPDATE OF container_id, purpose, org_id ON uploads FOR EACH ROW EXECUTE FUNCTION uploads_target_of_its_organization() enabled=O
+CREATE TRIGGER workspace_members_of_a_space BEFORE INSERT OR UPDATE OF org_id, user_id ON workspace_members FOR EACH ROW EXECUTE FUNCTION spaces_take_their_owner_alone() enabled=O
+# functions
+audit_log_is_kept() trigger plpgsql v secdef=false config= \nBEGIN\n    IF TG_OP = 'DELETE' AND (\n           NOT EXISTS (SELECT 1 FROM organizations WHERE id = OLD.org_id)\n           OR (OLD.workspace_id IS NOT NULL\n               AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id))) THEN\n        RETURN OLD;\n    END IF;\n    IF TG_OP = 'UPDATE'\n       AND NEW.identity IS NULL\n       AND (NEW.id, NEW.org_id, NEW.workspace_id, NEW.actor_id, NEW.actor_kind, NEW.action,\n            NEW.target_id, NEW.subject_id, NEW.created_at, NEW.detail)\n           IS NOT DISTINCT FROM\n           (OLD.id, OLD.org_id, OLD.workspace_id, OLD.actor_id, OLD.actor_kind, OLD.action,\n            OLD.target_id, OLD.subject_id, OLD.created_at, OLD.detail)\n       AND EXISTS (SELECT 1 FROM users\n                   WHERE id IN (OLD.actor_id, OLD.subject_id) AND erase_started_at > 0) THEN\n        RETURN NEW;\n    END IF;\n    RAISE EXCEPTION 'a record of the audit log is not changed or removed'\n        USING ERRCODE = 'restrict_violation';\nEND 
+category_containers_container_of_its_organization() trigger plpgsql v secdef=false config= \nBEGIN\n    -- A row of no organization is refused by its column, which takes no NULL.\n    IF NEW.org_id IS NULL THEN\n        RETURN NEW;\n    END IF;\n    IF NOT EXISTS (\n        SELECT 1 FROM containers WHERE id = NEW.container_id\n        AND org_id IN (NEW.org_id, '00000000-0000-7000-8000-00000000a000')\n    ) THEN\n        RAISE foreign_key_violation USING\n            MESSAGE = 'the board of a category is neither of its organization nor a template';\n    END IF;\n    RETURN NEW;\nEND 
+course_child_of_its_course() trigger plpgsql v secdef=false config= \nDECLARE\n    trashed_raw TEXT;\n    is_trashed_course BOOLEAN := false;\nBEGIN\n    IF EXISTS (\n        SELECT 1 FROM containers\n        WHERE id = NEW.container_id AND org_id = NEW.org_id AND kind = 'course'\n    ) THEN\n        RETURN NEW;\n    END IF;\n    SELECT container::text INTO trashed_raw\n    FROM deleted_containers\n    WHERE id = NEW.container_id AND org_id = NEW.org_id;\n    IF FOUND THEN\n        BEGIN\n            is_trashed_course := COALESCE((trashed_raw::json) ->> 'kind', 'board') = 'course';\n        EXCEPTION WHEN untranslatable_character OR invalid_text_representation THEN\n            is_trashed_course := trashed_raw ~ '"kind"\s*:\s*"course"';\n        END;\n    END IF;\n    IF NOT is_trashed_course THEN\n        RAISE foreign_key_violation USING\n            MESSAGE = 'the course of a course record is not a course of its organization';\n    END IF;\n    RETURN NEW;\nEND 
+diaries_are_of_a_space() trigger plpgsql v secdef=false config= \nBEGIN\n    IF NEW.kind = 'diary'\n       AND NOT EXISTS (SELECT 1 FROM organizations AS o\n                       WHERE o.id = NEW.org_id AND o.kind = 'personal') THEN\n        RAISE EXCEPTION 'a diary is of the space of an account: no other workspace has one'\n            USING ERRCODE = 'restrict_violation';\n    END IF;\n    RETURN NEW;\nEND 
+diaries_have_no_link() trigger plpgsql v secdef=false config= \nBEGIN\n    IF EXISTS (SELECT 1 FROM containers AS c\n               WHERE c.id = NEW.container_id AND c.org_id = NEW.org_id AND c.kind = 'diary') THEN\n        RAISE EXCEPTION 'a diary has no link' USING ERRCODE = 'restrict_violation';\n    END IF;\n    RETURN NEW;\nEND 
+organizations_keep_their_kind() trigger plpgsql v secdef=false config= \nBEGIN\n    RAISE EXCEPTION 'an organization does not change its kind or its owner'\n        USING ERRCODE = 'restrict_violation';\nEND 
+spaces_have_no_invitations() trigger plpgsql v secdef=false config= \nBEGIN\n    IF EXISTS (SELECT 1 FROM organizations AS o\n               WHERE o.id = NEW.org_id AND o.kind = 'personal') THEN\n        RAISE EXCEPTION 'nobody is invited into the space of an account'\n            USING ERRCODE = 'restrict_violation';\n    END IF;\n    RETURN NEW;\nEND 
+spaces_take_their_owner_alone() trigger plpgsql v secdef=false config= \nBEGIN\n    IF EXISTS (SELECT 1 FROM organizations AS o\n               WHERE o.id = NEW.org_id AND o.kind = 'personal'\n                 AND o.owner_id IS DISTINCT FROM NEW.user_id) THEN\n        RAISE EXCEPTION 'the space of an account has its owner in it and nobody else'\n            USING ERRCODE = 'restrict_violation';\n    END IF;\n    RETURN NEW;\nEND 
+uploads_target_of_its_organization() trigger plpgsql v secdef=false config= \nBEGIN\n    -- A row of no organization is refused by its column, which takes no NULL.\n    IF NEW.org_id IS NULL THEN\n        RETURN NEW;\n    END IF;\n    IF NEW.purpose = 'import' THEN\n        IF NOT EXISTS (\n            SELECT 1 FROM workspaces WHERE id = NEW.container_id AND org_id = NEW.org_id\n        ) THEN\n            RAISE foreign_key_violation USING\n                MESSAGE = 'the workspace of an import is not one of its organization';\n        END IF;\n    ELSIF NOT EXISTS (\n        SELECT 1 FROM containers WHERE id = NEW.container_id AND org_id = NEW.org_id\n    ) THEN\n        RAISE foreign_key_violation USING\n            MESSAGE = 'the board of an upload is not one of its organization';\n    END IF;\n    RETURN NEW;\nEND 
+# policies
+api_token_workspaces org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+audit_log org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+blocks org_templates PERMISSIVE public SELECT using ((org_id = '00000000-0000-7000-8000-00000000a000'::uuid) AND (( SELECT NULLIF(current_setting('fvoci.org'::text, true), ''::text) AS "nullif") IS NOT NULL)) check 
+blocks org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+body_docs org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+body_links org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+body_updates org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+body_version_editors org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+body_versions org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+card_assignees org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+card_due_notices org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+categories org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+category_containers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+comment_versions org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+container_members org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+container_teams org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+containers org_templates PERMISSIVE public SELECT using ((org_id = '00000000-0000-7000-8000-00000000a000'::uuid) AND (( SELECT NULLIF(current_setting('fvoci.org'::text, true), ''::text) AS "nullif") IS NOT NULL)) check 
+containers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+course_exams org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+course_meetings org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+course_schedules org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+deleted_blocks org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+deleted_containers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+diary_days org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+exam_scores org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+file_refs org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+file_versions org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+files org_templates PERMISSIVE public SELECT using ((org_id = '00000000-0000-7000-8000-00000000a000'::uuid) AND (( SELECT NULLIF(current_setting('fvoci.org'::text, true), ''::text) AS "nullif") IS NOT NULL)) check 
+files org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+invitations org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+loose_objects org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+meeting_attendance org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+notification_outbox org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+notifications org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+oidc_former_providers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+oidc_held_sign_ins org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+oidc_login_flows org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+oidc_pending_providers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+oidc_providers org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+organization_members org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+organizations org_wall PERMISSIVE public ALL using ((id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+public_links org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+search_outbox org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+subscriptions org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+team_members org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+teams org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+time_entries org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+unit_notes org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+unit_progress org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+unit_reviews org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+upload_parts org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+uploads org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+workspace_members org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+workspaces org_wall PERMISSIVE public ALL using ((org_id = ( SELECT (NULLIF(current_setting('fvoci.org'::text, true), ''::text))::uuid AS "nullif")) OR (( SELECT current_setting('fvoci.system'::text, true) AS current_setting) = 'on'::text)) check 
+# types
+# comments
+# rows
+instance: {"id": 1, "bootstrapped": false}
+organizations: {"id": "00000000-0000-7000-8000-00000000a000", "kind": "shared", "name": "", "owner_id": null, "settings": {}, "is_system": true, "created_at": 0, "created_by": null, "deleted_at": null, "updated_at": 0, "public_links": true, "allow_copy_out": true, "password_login": true, "allow_api_tokens": false, "default_workspace_id": "00000000-0000-7000-8000-00000000a001"}
+workspaces: {"id": "00000000-0000-7000-8000-00000000a001", "name": "", "org_id": "00000000-0000-7000-8000-00000000a000", "settings": {}, "is_system": true, "created_at": 0, "deleted_at": null, "updated_at": 0, "modified_by": null, "welcomed_at": null, "guest_invitations": true}

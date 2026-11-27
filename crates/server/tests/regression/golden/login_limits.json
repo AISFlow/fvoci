@@ -1,0 +1,311 @@
+[
+  {
+    "name": "limits-alice: wrong password 1",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: wrong password 2",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: wrong password 3",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: wrong password 4",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: wrong password 5",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: wrong password 6",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-alice: one too many",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "headers": {
+      "Retry-After": "<seconds>"
+    },
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 1",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 2",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 3",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 4",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 5",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: wrong password 6",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "limits-nobody: one too many",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "headers": {
+      "Retry-After": "<seconds>"
+    },
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  },
+  {
+    "name": "the right password waits too",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "headers": {
+      "Retry-After": "<seconds>"
+    },
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  },
+  {
+    "name": "the account in other letters is the same account",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  },
+  {
+    "name": "another account is not held up",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "a session from before goes on",
+    "request": "GET /api/v1/users/me as limits-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "limits-alice@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:1>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "limits-alice"
+    }
+  },
+  {
+    "name": "limits-alice: with a space after it",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  },
+  {
+    "name": "limits-nobody: with a space after it",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 429,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "too many attempts; try again later",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "retryAfter": "<seconds>",
+      "status": 429,
+      "title": "Too many requests",
+      "type": "/problems/rate-limited"
+    }
+  }
+]

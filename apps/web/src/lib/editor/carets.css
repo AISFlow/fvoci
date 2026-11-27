@@ -1,0 +1,71 @@
+/*
+ * The carets of the others in a body edited together (carets.ts): a line in
+ * the person's colour, their selection tinted with it, and their name for a
+ * few seconds after they moved. `--caret` is the person's colour (the one
+ * their picture has), set on each caret and selection.
+ *
+ * The line is that colour drawn towards the text colour, so that it stands
+ * out from the page in both themes (tests/tokens/contrast.test.ts reads the
+ * share from here); the name is the text colour on the colour itself, as on
+ * the person's picture. Nothing blinks; the name fades
+ * unless the reader asked for less motion.
+ */
+.doc-caret {
+  --caret-line: color-mix(in srgb, var(--caret, var(--option-gray)) 45%, var(--foreground));
+
+  position: relative;
+  margin-inline: -1px;
+  border-inline-start: 2px solid var(--caret-line);
+  pointer-events: none;
+  user-select: none;
+}
+
+.doc-caret-name {
+  position: absolute;
+  inset-block-end: 100%;
+  inset-inline-start: -2px;
+  z-index: 1;
+  max-inline-size: min(12rem, 60vw);
+  overflow: hidden;
+  padding: 0 0.375rem;
+  border: 1px solid var(--caret-line);
+  border-radius: 0.375rem 0.375rem 0.375rem 0;
+  background: var(--caret, var(--option-gray));
+  color: var(--foreground);
+  font-size: 0.75rem;
+  font-style: normal;
+  font-weight: 500;
+  line-height: 1.25rem;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  /* At the right edge the name is moved left from its line (carets.ts). */
+  transform: translateX(var(--moved, 0));
+  transition: opacity 0.2s;
+}
+
+/* The name is no text of the body: it is drawn from the attribute. */
+.doc-caret-name::before {
+  content: attr(data-name);
+}
+
+.doc-caret[data-named] .doc-caret-name {
+  opacity: 1;
+}
+
+/* On the first line there is nothing above to draw on. */
+.doc-caret[data-below] .doc-caret-name {
+  inset-block: 100% auto;
+  border-radius: 0 0.375rem 0.375rem;
+}
+
+.doc-caret-selection {
+  background: color-mix(in srgb, var(--caret, var(--option-gray)) 55%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .doc-caret-name {
+    transition: none;
+  }
+}

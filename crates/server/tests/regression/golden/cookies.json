@@ -1,0 +1,363 @@
+[
+  {
+    "name": "login: the cookie and an empty body",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 204,
+    "headers": {
+      "Set-Cookie": "fvoci_session=<secret:1>; Max-Age=1209600; Path=/; HttpOnly; SameSite=Lax"
+    },
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "login: wrong password sets no cookie",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "headers": {
+      "Set-Cookie": ""
+    },
+    "body": {
+      "detail": "incorrect login",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "invalid_credentials",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "Invalid credentials",
+      "type": "/problems/invalid-credentials"
+    }
+  },
+  {
+    "name": "login: without the header",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the X-Requested-With: XMLHttpRequest header is required",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "csrf",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Cross-site request check failed",
+      "type": "/problems/csrf"
+    }
+  },
+  {
+    "name": "login: from another origin",
+    "request": "POST /api/v1/login as anonymous",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "requests from this origin are not accepted",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "foreign_origin",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Request from another origin",
+      "type": "/problems/foreign-origin"
+    }
+  },
+  {
+    "name": "read: cookie, no header",
+    "request": "GET /api/v1/users/me as token (cookie)",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "cookies-alice@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:1>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "cookies-alice"
+    }
+  },
+  {
+    "name": "read: bearer, no header",
+    "request": "GET /api/v1/users/me as token",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "cookies-alice@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:1>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "cookies-alice"
+    }
+  },
+  {
+    "name": "read: cookie, another origin named",
+    "request": "GET /api/v1/users/me as token (cookie)",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "credentials": [],
+      "customName": "",
+      "displayName": "",
+      "email": "cookies-alice@example.com",
+      "firstName": "",
+      "hasPassword": true,
+      "id": "<id:1>",
+      "isAdmin": false,
+      "lastName": "",
+      "latinFirstName": "",
+      "latinLastName": "",
+      "nameShown": "name",
+      "title": null,
+      "updatedAt": "<ts>",
+      "username": "cookies-alice"
+    }
+  },
+  {
+    "name": "read: the token in the address",
+    "request": "GET /api/v1/users/me?access_token=<secret:1> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "read: a cookie that is no session's",
+    "request": "GET /api/v1/users/me as token (cookie)",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "invalid session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "read: the cookie of another name",
+    "request": "GET /api/v1/users/me as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "change: cookie, no header",
+    "request": "POST /api/v1/w/<id:2>/boards as token (cookie)",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the X-Requested-With: XMLHttpRequest header is required",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "csrf",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Cross-site request check failed",
+      "type": "/problems/csrf"
+    }
+  },
+  {
+    "name": "change: cookie and header",
+    "request": "POST /api/v1/w/<id:2>/boards as token (cookie)",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:1>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:1>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "made",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:2>"
+    }
+  },
+  {
+    "name": "change: bearer, no header",
+    "request": "POST /api/v1/w/<id:2>/boards as token",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:1>",
+      "description": "",
+      "icon": "",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:1>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "made",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:2>"
+    }
+  },
+  {
+    "name": "change: cookie and header, the own origin",
+    "request": "POST /api/v1/w/<id:2>/boards as token (cookie)",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:1>",
+      "description": "",
+      "icon": "",
+      "id": "<id:5>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:1>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "made",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:2>"
+    }
+  },
+  {
+    "name": "change: cookie and header, another origin",
+    "request": "POST /api/v1/w/<id:2>/boards as token (cookie)",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "requests from this origin are not accepted",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "foreign_origin",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Request from another origin",
+      "type": "/problems/foreign-origin"
+    }
+  },
+  {
+    "name": "change: bearer, another origin",
+    "request": "POST /api/v1/w/<id:2>/boards as token",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "requests from this origin are not accepted",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "foreign_origin",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Request from another origin",
+      "type": "/problems/foreign-origin"
+    }
+  },
+  {
+    "name": "change: cookie and header, no origin to speak of",
+    "request": "POST /api/v1/w/<id:2>/boards as token (cookie)",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "requests from this origin are not accepted",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "foreign_origin",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Request from another origin",
+      "type": "/problems/foreign-origin"
+    }
+  },
+  {
+    "name": "change: bearer and cookie, the bearer is no session's",
+    "request": "POST /api/v1/w/<id:2>/boards as token",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "invalid session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "logout: cookie, no header",
+    "request": "POST /api/v1/logout as token (cookie)",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the X-Requested-With: XMLHttpRequest header is required",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "csrf",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Cross-site request check failed",
+      "type": "/problems/csrf"
+    }
+  },
+  {
+    "name": "logout: clears the cookie",
+    "request": "POST /api/v1/logout as token (cookie)",
+    "status": 204,
+    "headers": {
+      "Set-Cookie": "fvoci_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+    },
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "read: after the logout",
+    "request": "GET /api/v1/users/me as token (cookie)",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "invalid session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  }
+]

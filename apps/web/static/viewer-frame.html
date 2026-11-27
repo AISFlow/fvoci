@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  The document the file viewer draws in (src/viewer-frame/main.ts). The app
+  puts it in an iframe with `sandbox="allow-scripts"`, so it has no origin of
+  its own: it cannot read the app's cookies, storage or page. The policy below
+  keeps it off the network: scripts, style sheets and fonts come from the
+  app's own bundle, pictures only from what the renderers make in memory, and
+  `fetch` reaches nothing. `wasm-unsafe-eval` lets pdf.js run its WebAssembly
+  image decoders; it does not allow JavaScript's eval.
+
+  It lies under static/ because the server serves this folder of the build
+  and nothing else as files; the build gives it relative addresses
+  (vite.config.ts), and the server sends it with a sandbox of its own, so that
+  opened directly it is no page of the app either.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src blob: data:; font-src 'self' blob: data:; media-src blob: data:; connect-src 'none'; worker-src blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>fvoci viewer</title>
+    <script type="module" src="/src/viewer-frame/main.ts"></script>
+  </head>
+  <body>
+    <main id="document"></main>
+  </body>
+</html>

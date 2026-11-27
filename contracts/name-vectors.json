@@ -1,0 +1,293 @@
+{
+  "description": "Shared test vectors of the name a person is shown by: for each name (its parts and which of them is chosen), the name the server shows them by in displayName, which the web app's preview must give too. An empty shown is the login name. The rule: the chosen name, or the next one down the list name, latin_name, custom_name, username when it is empty. The name as written is the family name and the given name joined, family name first, when both are written in Hangul, Han or Kana alone, and the given name, a space and the family name otherwise; the name in Latin letters is the given name, a space and the family name; a part that is empty or white space alone is left out.",
+  "cases": [
+    {
+      "note": "each choice, every part there",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "Kim",
+        "customName": "YH",
+        "nameShown": "name"
+      },
+      "shown": "김영환"
+    },
+    {
+      "note": "each choice, every part there",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "Kim",
+        "customName": "YH",
+        "nameShown": "latin_name"
+      },
+      "shown": "Younghwan Kim"
+    },
+    {
+      "note": "each choice, every part there",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "Kim",
+        "customName": "YH",
+        "nameShown": "custom_name"
+      },
+      "shown": "YH"
+    },
+    {
+      "note": "the login name is shown as no name",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "Kim",
+        "customName": "YH",
+        "nameShown": "username"
+      },
+      "shown": ""
+    },
+    {
+      "note": "no name as written: the Latin one",
+      "name": {
+        "firstName": "",
+        "lastName": "",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "Kim",
+        "customName": "YH",
+        "nameShown": "name"
+      },
+      "shown": "Younghwan Kim"
+    },
+    {
+      "note": "no name as written nor in Latin letters",
+      "name": {
+        "firstName": "",
+        "lastName": "",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "YH",
+        "nameShown": "name"
+      },
+      "shown": "YH"
+    },
+    {
+      "note": "nothing at all",
+      "name": {
+        "firstName": "",
+        "lastName": "",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": ""
+    },
+    {
+      "note": "down the list only: no Latin name goes to the written one",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "YH",
+        "nameShown": "latin_name"
+      },
+      "shown": "YH"
+    },
+    {
+      "note": "down the list only: never back up to the name as written",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "latin_name"
+      },
+      "shown": ""
+    },
+    {
+      "note": "down the list only: no written name is the login name",
+      "name": {
+        "firstName": "영환",
+        "lastName": "김",
+        "latinFirstName": "Y",
+        "latinLastName": "K",
+        "customName": "",
+        "nameShown": "custom_name"
+      },
+      "shown": ""
+    },
+    {
+      "note": "white space alone is empty",
+      "name": {
+        "firstName": " ",
+        "lastName": "　",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "YH",
+        "nameShown": "name"
+      },
+      "shown": "YH"
+    },
+    {
+      "note": "white space around a part is left out",
+      "name": {
+        "firstName": " 영환 ",
+        "lastName": "김\t",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "김영환"
+    },
+    {
+      "note": "Han is joined family name first",
+      "name": {
+        "firstName": "太郎",
+        "lastName": "山田",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "山田太郎"
+    },
+    {
+      "note": "Kana is joined family name first",
+      "name": {
+        "firstName": "たろう",
+        "lastName": "やまだ",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "やまだたろう"
+    },
+    {
+      "note": "Han beyond the basic plane",
+      "name": {
+        "firstName": "𠀋",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "김𠀋"
+    },
+    {
+      "note": "Latin letters: given name, a space, family name",
+      "name": {
+        "firstName": "Ana",
+        "lastName": "Lima",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "Ana Lima"
+    },
+    {
+      "note": "mixed scripts: given name, a space, family name",
+      "name": {
+        "firstName": "Younghwan",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "Younghwan 김"
+    },
+    {
+      "note": "mixed scripts within a part",
+      "name": {
+        "firstName": "영환K",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "영환K 김"
+    },
+    {
+      "note": "a given name alone",
+      "name": {
+        "firstName": "영환",
+        "lastName": "",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "영환"
+    },
+    {
+      "note": "a family name alone",
+      "name": {
+        "firstName": "",
+        "lastName": "Kim",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "Kim"
+    },
+    {
+      "note": "a Latin given name alone",
+      "name": {
+        "firstName": "",
+        "lastName": "",
+        "latinFirstName": "Younghwan",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "latin_name"
+      },
+      "shown": "Younghwan"
+    },
+    {
+      "note": "digits and marks are no letters of a script",
+      "name": {
+        "firstName": "영환2",
+        "lastName": "김",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "김영환2"
+    },
+    {
+      "note": "the longest parts",
+      "name": {
+        "firstName": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "lastName": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    },
+    {
+      "note": "Han of CJK extension H counts as Han",
+      "name": {
+        "firstName": "영환",
+        "lastName": "𱍐",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "customName": "",
+        "nameShown": "name"
+      },
+      "shown": "𱍐영환"
+    }
+  ]
+}

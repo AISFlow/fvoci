@@ -1,0 +1,155 @@
+{
+  "accepted": [
+    {
+      "license": "IJG",
+      "reason": "Two JPEG crates patched after the Independent JPEG Group's code (rhwp-zune-jpeg, rhwp-jpeg-encoder): use and redistribution with the acknowledgement kept. Accepted for this WebAssembly by the decision to take rhwp 0.9.0 (2026-11-18)."
+    },
+    {
+      "license": "OFL-1.1",
+      "reason": "The licences of the fonts rhwp's own notices name. The licence the app already accepts for fonts (notices.ts)."
+    },
+    {
+      "license": "Bitstream-Vera",
+      "reason": "DejaVu Sans, declared in the source of a crate of the WebAssembly (the PDF backend); rhwp keeps its notice whether or not the font is built in."
+    },
+    {
+      "license": "LicenseRef-GUST-Font-License",
+      "reason": "Outlines taken from Latin Modern Math 1.959 for formulas, and a subset of it under another name: free to use and distribute with the notice kept (LPPL 1.3c with no maintenance clause). Named in the decision to take rhwp 0.9.0."
+    },
+    {
+      "license": "LicenseRef-URW-Base35-notice",
+      "reason": "The advance widths of Nimbus Roman, numbers taken from URW's Base35 font programs, whose own licence is AGPL-3 with a font exception. No font program and no outline is in the WebAssembly; rhwp keeps the notice with the numbers. Named in the decision to take rhwp 0.9.0."
+    },
+    {
+      "license": "APAFML",
+      "reason": "The advance widths of Helvetica from Adobe's Core 14 AFM files: free to use, copy and distribute with the copyright notices and Adobe's note kept (rhwp-adobe-afm.txt, which rhwp's package leaves out)."
+    }
+  ],
+  "leftOut": [
+    {
+      "file": "assets/fonts/licenses/Cafe24Ssurround-LICENSE.pdf",
+      "reason": "A licence as a PDF, of a web font of rhwp's own editor. The font is not in the WebAssembly and the app ships none of rhwp's fonts."
+    },
+    {
+      "file": "assets/fonts/licenses/Cafe24Supermagic-LICENSE.pdf",
+      "reason": "A licence as a PDF, of a web font of rhwp's own editor. The font is not in the WebAssembly and the app ships none of rhwp's fonts."
+    },
+    {
+      "file": "assets/fonts/licenses/HappinessSans-LICENSE.pdf",
+      "reason": "A licence as a PDF, of a web font of rhwp's own editor. The font is not in the WebAssembly and the app ships none of rhwp's fonts."
+    },
+    {
+      "file": "assets/fonts/licenses/font-notices.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/npm/ajv/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-hayro-ccitt/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-hayro-jbig2/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-hayro-jpeg2000/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-jpeg-decoder/UPSTREAM.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-jpeg-encoder/UPSTREAM.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-pdf-import-backend/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-qcms/UPSTREAM_FILES.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    },
+    {
+      "file": "vendor/rhwp-zune-jpeg/UPSTREAM.json",
+      "reason": "A list for machines (where the files of a patched crate came from, or the fonts of rhwp's editor), not a notice."
+    }
+  ],
+  "listed": [
+    "THIRD_PARTY_LICENSES.md",
+    "assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt",
+    "assets/fonts/MANIFEST-RHWP-LMM-VariableOutline.txt",
+    "assets/fonts/NotoSansMath-OFL.txt",
+    "assets/fonts/NotoSansSymbols2-OFL.txt",
+    "assets/fonts/SourceHanSerifK-OFL.txt",
+    "assets/fonts/licenses/D2Coding-OFL.txt",
+    "assets/fonts/licenses/GowunBatang-OFL.txt",
+    "assets/fonts/licenses/GowunDodum-OFL.txt",
+    "assets/fonts/licenses/LPPL-1.3c.txt",
+    "assets/fonts/licenses/LatinModernMath-GUST-FONT-LICENSE.txt",
+    "assets/fonts/licenses/NanumGothic-OFL.txt",
+    "assets/fonts/licenses/NanumGothicCoding-OFL.txt",
+    "assets/fonts/licenses/NanumMyeongjo-OFL.txt",
+    "assets/fonts/licenses/NotoCJKSerif-OFL.txt",
+    "assets/fonts/licenses/NotoSansKR-OFL.txt",
+    "assets/fonts/licenses/NotoSansMath-OFL.txt",
+    "assets/fonts/licenses/NotoSansSymbols2-OFL.txt",
+    "assets/fonts/licenses/Pretendard-OFL.txt",
+    "assets/fonts/licenses/README.md",
+    "assets/fonts/licenses/RHWPPublicBatang-OFL.txt",
+    "assets/fonts/licenses/SIL-OFL-1.1.txt",
+    "assets/fonts/licenses/SourceHanSerifK-OFL.txt",
+    "assets/fonts/licenses/SpoqaHanSans-OFL.txt",
+    "assets/licenses/Unicode-3.0.txt",
+    "data/font-metrics/nimbus-roman/URW-FONT-NOTICE.txt",
+    "licenses/intel-mediasdk/LICENSE",
+    "licenses/pdfium/LICENSE",
+    "licenses/pdfium/README.md",
+    "vendor/npm/ajv/LICENSE",
+    "vendor/npm/ajv/RHWP_PATCHES.md",
+    "vendor/rhwp-codec-resource/LICENSE",
+    "vendor/rhwp-hayro-ccitt/LICENSE-APACHE",
+    "vendor/rhwp-hayro-ccitt/LICENSE-MIT",
+    "vendor/rhwp-hayro-ccitt/NOTICE",
+    "vendor/rhwp-hayro-ccitt/RHWP_PATCHES.md",
+    "vendor/rhwp-hayro-jbig2/LICENSE-APACHE",
+    "vendor/rhwp-hayro-jbig2/LICENSE-MIT",
+    "vendor/rhwp-hayro-jbig2/NOTICE",
+    "vendor/rhwp-hayro-jbig2/RHWP_PATCHES.md",
+    "vendor/rhwp-hayro-jpeg2000/LICENSE-APACHE",
+    "vendor/rhwp-hayro-jpeg2000/LICENSE-MIT",
+    "vendor/rhwp-hayro-jpeg2000/NOTICE",
+    "vendor/rhwp-hayro-jpeg2000/RHWP_PATCHES.md",
+    "vendor/rhwp-hayro-jpeg2000/assets/LICENSE.txt",
+    "vendor/rhwp-jpeg-decoder/LICENSE-APACHE",
+    "vendor/rhwp-jpeg-decoder/LICENSE-MIT",
+    "vendor/rhwp-jpeg-decoder/RHWP_PATCHES.md",
+    "vendor/rhwp-jpeg-encoder/LICENSE-APACHE",
+    "vendor/rhwp-jpeg-encoder/LICENSE-IJG",
+    "vendor/rhwp-jpeg-encoder/LICENSE-MIT",
+    "vendor/rhwp-jpeg-encoder/RHWP_PATCHES.md",
+    "vendor/rhwp-pdf-import-backend/LICENSE-APACHE",
+    "vendor/rhwp-pdf-import-backend/LICENSE-MIT",
+    "vendor/rhwp-pdf-import-backend/NOTICE",
+    "vendor/rhwp-pdf-import-backend/RHWP_PATCHES.md",
+    "vendor/rhwp-pdf-import-backend/src/fonts/assets/LICENSE-DejaVu",
+    "vendor/rhwp-pdf-import-backend/src/fonts/assets/LICENSE-NotoEmoji",
+    "vendor/rhwp-pdf-import-backend/src/fonts/assets/LICENSE-fallback-fonts",
+    "vendor/rhwp-qcms/COPYING",
+    "vendor/rhwp-qcms/LICENSE",
+    "vendor/rhwp-qcms/RHWP_PATCHES.md",
+    "vendor/rhwp-zune-jpeg/LICENSE-APACHE",
+    "vendor/rhwp-zune-jpeg/LICENSE-MIT",
+    "vendor/rhwp-zune-jpeg/LICENSE-ZLIB",
+    "vendor/rhwp-zune-jpeg/README.ijg",
+    "vendor/rhwp-zune-jpeg/RHWP_PATCHES.md",
+    "vendor/svg2pdf/LICENSE-APACHE",
+    "vendor/svg2pdf/LICENSE-MIT",
+    "vendor/svg2pdf/NOTICE",
+    "vendor/svg2pdf/RHWP_PATCHES.md"
+  ]
+}

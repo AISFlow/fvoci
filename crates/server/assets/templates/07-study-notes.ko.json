@@ -1,0 +1,792 @@
+{
+  "key": "study-notes",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "a539d7df-4aaf-58af-ac3b-e4d7b7fcfc8c",
+    "title": "공부 노트",
+    "description": "배운 것을 주제 하나에 카드 하나로 적습니다. 본문에 수식, 코드, 다이어그램을 그대로 넣고, 복습할 날은 달력에서 봅니다.",
+    "icon": "📚",
+    "showDescription": true,
+    "dueDatePropertyId": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+    "doneWhen": {
+      "propertyId": "b6e28f90-d456-52b0-a448-8df9cc0baf4e"
+    },
+    "cardProperties": [
+      {
+        "id": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+        "name": "과목",
+        "type": "select",
+        "options": [
+          {
+            "id": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+            "label": "알고리즘",
+            "color": "blue"
+          },
+          {
+            "id": "460518d8-9623-5542-9c4d-fc7b09aea48d",
+            "label": "통계",
+            "color": "green"
+          },
+          {
+            "id": "e7efe65c-9889-52d3-84d7-659723d95602",
+            "label": "데이터베이스",
+            "color": "orange"
+          }
+        ]
+      },
+      {
+        "id": "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9",
+        "name": "꼬리표",
+        "type": "multiSelect",
+        "options": [
+          {
+            "id": "76becd23-173b-5eca-904f-db235ae038ce",
+            "label": "시험에 나옴",
+            "color": "red"
+          },
+          {
+            "id": "ae07b99f-4e99-5e9c-810d-c99b6f2af3c0",
+            "label": "증명",
+            "color": "purple"
+          },
+          {
+            "id": "71f4bc57-1be4-551a-849f-02ced414a6f6",
+            "label": "연습 문제",
+            "color": "yellow"
+          }
+        ]
+      },
+      {
+        "id": "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+        "name": "이해도",
+        "type": "select",
+        "options": [
+          {
+            "id": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+            "label": "처음 봄",
+            "color": "gray"
+          },
+          {
+            "id": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+            "label": "헷갈림",
+            "color": "yellow"
+          },
+          {
+            "id": "a2ffcd87-ae02-59e5-9193-cb1c8e8d4a86",
+            "label": "익숙함",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+        "name": "복습할 날",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "b6e28f90-d456-52b0-a448-8df9cc0baf4e",
+        "name": "복습함",
+        "type": "checkbox",
+        "options": []
+      },
+      {
+        "id": "50f6befe-52bc-5ce3-b2e2-eb8782121e6e",
+        "name": "먼저 알아야 할 것",
+        "type": "relation",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "4533cbe0-bdd8-568a-be35-afad7f035c5c",
+      "type": "view",
+      "title": "과목별",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "e7efe65c-9889-52d3-84d7-659723d95602"
+        ],
+        "shownProperties": [
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9"
+        ],
+        "groupBy": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9"
+      }
+    },
+    {
+      "id": "a3b51e6a-ed24-5c2c-a6df-b953cde37e3e",
+      "type": "view",
+      "title": "노트 갤러리",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gallery",
+        "visibleGroups": [],
+        "shownProperties": [
+          "__title",
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2"
+        ]
+      }
+    },
+    {
+      "id": "cddbd4a8-e49b-519a-acaa-cc4cba24e833",
+      "type": "view",
+      "title": "복습 달력",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "d8764a1f-e16d-59ad-b5b2-439794c042c7"
+      }
+    },
+    {
+      "id": "2f865728-b59e-5ef7-b240-d32e22e9817b",
+      "type": "view",
+      "title": "복습할 것",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "countValue",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": "earliest"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "b6e28f90-d456-52b0-a448-8df9cc0baf4e",
+              "condition": "isNotSet",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e"
+        ]
+      }
+    },
+    {
+      "id": "008a6275-6a97-5cc4-bc98-372333055aac",
+      "type": "view",
+      "title": "배우는 순서",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gantt",
+        "visibleGroups": [
+          "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "e7efe65c-9889-52d3-84d7-659723d95602"
+        ],
+        "shownProperties": ["2091a798-e74c-5ebf-a4a6-89d7e83f99a2"],
+        "groupBy": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+        "dateProperty": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+        "dependencyPropertyId": "50f6befe-52bc-5ce3-b2e2-eb8782121e6e",
+        "ganttZoom": "day"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+      "type": "card",
+      "title": "빅오 표기",
+      "fields": {
+        "icon": "📈",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["76becd23-173b-5eca-904f-db235ae038ce"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "a2ffcd87-ae02-59e5-9193-cb1c8e8d4a86",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-02"
+          },
+          "b6e28f90-d456-52b0-a448-8df9cc0baf4e": "true"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "입력이 커질 때 걸리는 시간이 얼마나 빨리 느는지를 적는 방법. "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "n"
+                }
+              },
+              {
+                "type": "text",
+                "text": "개를 한 번씩 보면 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(n)"
+                }
+              },
+              {
+                "type": "text",
+                "text": ", 모든 쌍을 보면 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(n^2)"
+                }
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "chart.png",
+              "alt": "점점 높아지는 막대 여섯 개"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "정의"
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "f(n) = O(g(n)) \\iff \\exists\\, c > 0,\\ n_0 : \\forall n \\ge n_0,\\ f(n) \\le c \\cdot g(n)"
+            }
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "상수와 낮은 차수는 버린다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "가장 나쁜 경우",
+                        "marks": [
+                          {
+                            "type": "italic"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "를 말하는지 "
+                      },
+                      {
+                        "type": "text",
+                        "text": "평균",
+                        "marks": [
+                          {
+                            "type": "italic"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "을 말하는지 늘 적는다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "a8f9fa11-b621-522e-bc46-343ed3f45095",
+      "type": "card",
+      "title": "이진 탐색",
+      "fields": {
+        "icon": "🔎",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": [
+            "76becd23-173b-5eca-904f-db235ae038ce",
+            "71f4bc57-1be4-551a-849f-02ced414a6f6"
+          ],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-04"
+          },
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e": [
+            {
+              "card": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "정렬된 목록에서 절반씩 버리며 찾는다. 걸리는 시간은 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(\\log n)"
+                }
+              },
+              {
+                "type": "text",
+                "text": ". 표기는 "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 에."
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "python"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "def search(items, target):\n    low, high = 0, len(items) - 1\n    while low <= high:\n        middle = (low + high) // 2\n        if items[middle] == target:\n            return middle\n        if items[middle] < target:\n            low = middle + 1\n        else:\n            high = middle - 1\n    return None"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "자주 틀리는 곳"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "끝 조건은 "
+                      },
+                      {
+                        "type": "text",
+                        "text": "low <= high",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "빈 목록에서도 도는지 해 보기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c72483ee-449e-50fe-9769-cce4e76f01dc",
+      "type": "card",
+      "title": "평균과 분산",
+      "fields": {
+        "icon": "🎲",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": [
+            "76becd23-173b-5eca-904f-db235ae038ce",
+            "ae07b99f-4e99-5e9c-810d-c99b6f2af3c0"
+          ],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-08"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\mu = \\frac{1}{n} \\sum_{i=1}^{n} x_i \\qquad \\sigma^2 = \\frac{1}{n} \\sum_{i=1}^{n} (x_i - \\mu)^2"
+            }
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "분산은 제곱의 평균에서 평균의 제곱을 뺀 것과 같다."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "곧 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "\\sigma^2 = E[X^2] - (E[X])^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": ". 전개해서 직접 보일 것."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+      "type": "card",
+      "title": "조인의 종류",
+      "fields": {
+        "icon": "🔗",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "e7efe65c-9889-52d3-84d7-659723d95602",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["71f4bc57-1be4-551a-849f-02ced414a6f6"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-11"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "sql"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "SELECT c.name, o.total\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id;"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "INNER",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 양쪽에 다 있는 줄만"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LEFT",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 왼쪽은 모두, 오른쪽은 있으면"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "erDiagram\n  CUSTOMERS ||--o{ ORDERS : places\n  ORDERS ||--|{ LINES : holds"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "64ef5921-7f17-5a7e-9be9-4008c25ac993",
+      "type": "card",
+      "title": "인덱스가 빠른 까닭",
+      "fields": {
+        "icon": "🗃️",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "e7efe65c-9889-52d3-84d7-659723d95602",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["76becd23-173b-5eca-904f-db235ae038ce"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-15"
+          },
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e": [
+            {
+              "card": "a8f9fa11-b621-522e-bc46-343ed3f45095",
+              "kind": "fs",
+              "lagDays": 0
+            },
+            {
+              "card": "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "정렬해 둔 열에서 찾는 것은 이진 탐색과 같은 생각이다: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "a8f9fa11-b621-522e-bc46-343ed3f45095"
+                }
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart TD\n  R[뿌리] --> A[1–50]\n  R --> B[51–100]\n  A --> A1[1–25]\n  A --> A2[26–50]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "chart.png",
+      "name": "차트.png"
+    }
+  ]
+}

@@ -1,0 +1,317 @@
+{
+  "description": "The messages of the websocket endpoint /ws, as the server reads and sends them; contracts/websocket.md says who sends which and when. A member's value is a JSON type (\"string\", \"boolean\", \"integer\"), the name of a schema of contracts/openapi.json after a \"#\" (\"#Block\"), an object of members for an inline object, or a list of one of these for a JSON list of it. Every member listed is always there, and no other is, but for those a message's \"optional\" names, which websocket.md says when it has; of the commands' members, websocket.md says which may be left out (readToken, epoch, stateVector). A command's \"session\" says whether the connection needs a signed-in session for it; a message's \"sent\": false says the server never sends it today. crates/server/tests/api/websocket.rs and rooms_contract.rs (the doc* messages) compare the messages the server sends with this file; the commands are not checked by a test. \"frame\" is the layout of a binary frame, in both directions: its parts in order, each a varuint of lib0 unless it says otherwise.",
+  "commands": {
+    "subscribeWorkspace": {
+      "session": true,
+      "members": {
+        "type": "string",
+        "workspaceId": "string"
+      }
+    },
+    "unsubscribeWorkspace": {
+      "session": true,
+      "members": {
+        "type": "string",
+        "workspaceId": "string"
+      }
+    },
+    "subscribeBlocks": {
+      "session": false,
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "readToken": "string",
+        "blockIds": [
+          "string"
+        ]
+      }
+    },
+    "unsubscribeBlocks": {
+      "session": false,
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "readToken": "string",
+        "blockIds": [
+          "string"
+        ]
+      }
+    },
+    "joinDoc": {
+      "session": true,
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "cardId": "string",
+        "epoch": "integer",
+        "stateVector": "string"
+      }
+    },
+    "leaveDoc": {
+      "session": true,
+      "members": {
+        "type": "string",
+        "doc": "integer"
+      }
+    },
+    "setPresence": {
+      "session": false,
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "containerId": "string",
+        "cardId": "string",
+        "readToken": "string"
+      }
+    },
+    "ping": {
+      "session": false,
+      "members": {
+        "type": "string"
+      }
+    }
+  },
+  "messages": {
+    "containerChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "container": "#Container"
+      }
+    },
+    "blockChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "block": "#Block",
+        "summary": {
+          "hasBody": "boolean",
+          "tasksTotal": "integer",
+          "tasksDone": "integer",
+          "preview": "#CardPreview"
+        }
+      },
+      "optional": [
+        "summary"
+      ]
+    },
+    "containerMemberChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "member": "#ContainerMember"
+      }
+    },
+    "containerMemberRemoved": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "member": {
+          "containerId": "string",
+          "userId": "string"
+        }
+      }
+    },
+    "userChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "userId": "string"
+      }
+    },
+    "categoryChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "category": "#Category"
+      }
+    },
+    "containerCategoriesChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "containerCategories": [
+          {
+            "containerId": "string",
+            "categoryId": "string",
+            "hidden": "boolean"
+          }
+        ]
+      }
+    },
+    "categoriesReordered": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "categoryOrder": [
+          "string"
+        ]
+      }
+    },
+    "categoryContainersReordered": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "categoryId": "string",
+        "containerOrder": [
+          "string"
+        ]
+      }
+    },
+    "clientConfigChanged": {
+      "members": {
+        "type": "string",
+        "clientConfig": "#ClientConfig"
+      },
+      "sent": false
+    },
+    "workspaceSubscribed": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string"
+      }
+    },
+    "blocksSubscribed": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "blockIds": [
+          "string"
+        ]
+      }
+    },
+    "workspaceUnsubscribed": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "reason": "string"
+      }
+    },
+    "workspaceRoleChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "userId": "string",
+        "role": "#WorkspaceRole"
+      }
+    },
+    "blocksUnsubscribed": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "blockIds": [
+          "string"
+        ],
+        "reason": "string"
+      }
+    },
+    "notificationsChanged": {
+      "members": {
+        "type": "string"
+      }
+    },
+    "docJoined": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "cardId": "string",
+        "doc": "integer",
+        "epoch": "integer",
+        "mode": "string"
+      }
+    },
+    "docRefused": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "cardId": "string",
+        "reason": "string"
+      }
+    },
+    "docAck": {
+      "members": {
+        "type": "string",
+        "doc": "integer",
+        "epoch": "integer",
+        "seq": "integer"
+      }
+    },
+    "docNack": {
+      "members": {
+        "type": "string",
+        "doc": "integer",
+        "epoch": "integer",
+        "reason": "string"
+      }
+    },
+    "docModeChanged": {
+      "members": {
+        "type": "string",
+        "doc": "integer",
+        "mode": "string"
+      }
+    },
+    "docReset": {
+      "members": {
+        "type": "string",
+        "doc": "integer",
+        "epoch": "integer"
+      }
+    },
+    "docLeft": {
+      "members": {
+        "type": "string",
+        "doc": "integer",
+        "reason": "string"
+      }
+    },
+    "presenceChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "containerId": "string",
+        "people": [
+          {
+            "userId": "string",
+            "cardIds": [
+              "string"
+            ]
+          }
+        ],
+        "anonymousCount": "integer",
+        "hiddenCount": "integer"
+      }
+    },
+    "pong": {
+      "members": {
+        "type": "string"
+      }
+    }
+  },
+  "frame": [
+    {
+      "name": "doc",
+      "is": "the room, as docJoined named it"
+    },
+    {
+      "name": "kind",
+      "is": "0: a sync message, 1: carets; a frame of another kind is dropped"
+    },
+    {
+      "name": "epoch",
+      "is": "which making of the document the frame is about"
+    },
+    {
+      "name": "sync",
+      "is": "of a sync message only (a frame of carets has none): 0: step 1 (a state vector), 1: step 2 (what the receiver is missing), 2: update"
+    },
+    {
+      "name": "length",
+      "is": "of the payload"
+    },
+    {
+      "name": "payload",
+      "is": "bytes, to the end of the frame: a Yjs state vector or update, version 1; of carets, an awareness update of y-protocols"
+    }
+  ]
+}

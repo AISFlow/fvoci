@@ -1,0 +1,477 @@
+[
+  {
+    "name": "create board Shared board",
+    "request": "POST /api/v1/w/<id:1>/boards as share-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Shared board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "add editor",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "editor",
+      "userId": "<id:4>"
+    }
+  },
+  {
+    "name": "insert blocks",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as share-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Visible card",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "get: none yet",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": false
+    }
+  },
+  {
+    "name": "post: editor",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to sharing the board",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "post: with a token of the request's",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the server makes the read token; a request cannot set it",
+      "errors": [
+        {
+          "detail": "the server makes the read token; a request cannot set it",
+          "pointer": "/token",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "post: nothing said",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "enabled must be true or false",
+      "errors": [
+        {
+          "detail": "enabled must be true or false",
+          "pointer": "/enabled",
+          "reason": "required"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "get: still none",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": false
+    }
+  },
+  {
+    "name": "post",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "post: malformed body",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing an object at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "get",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "get: editor",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/public-link as share-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to sharing the board",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "get: unknown board",
+    "request": "GET /api/v1/w/<id:1>/containers/unknown-board/public-link as share-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "post: again",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "sharing again keeps the token",
+    "request": "(observation)",
+    "status": 0,
+    "body": true
+  },
+  {
+    "name": "board with the read token",
+    "request": "GET /api/v1/shared/<id:3>?readToken=<secret:1> as anonymous",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Shared board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": ""
+    }
+  },
+  {
+    "name": "board with a wrong read token",
+    "request": "GET /api/v1/shared/<id:3>?readToken=wrong as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "board with the token under the old name of the parameter",
+    "request": "GET /api/v1/shared/<id:3>?read_token=<secret:1> as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "blocks with the read token",
+    "request": "GET /api/v1/shared/<id:3>/blocks?readToken=<secret:1> as anonymous",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "",
+        "fields": {
+          "icon": "",
+          "isTemplate": false,
+          "properties": {}
+        },
+        "id": "<id:5>",
+        "modifiedBy": "",
+        "number": 1,
+        "parentId": "",
+        "title": "Visible card",
+        "type": "card",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "blocks with a wrong read token",
+    "request": "GET /api/v1/shared/<id:3>/blocks?readToken=wrong as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "members with the read token",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/members?readToken=<secret:1> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "insert with the read token",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks?readToken=<secret:1> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "patch with the read token",
+    "request": "PATCH /api/v1/w/<id:1>/boards/<id:3>/blocks/<id:5>?readToken=<secret:1> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "regenerate",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "a regenerated token is another one",
+    "request": "(observation)",
+    "status": 0,
+    "body": true
+  },
+  {
+    "name": "board with the token from before regenerating",
+    "request": "GET /api/v1/shared/<id:3>?readToken=<secret:1> as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "board with the regenerated token",
+    "request": "GET /api/v1/shared/<id:3>?readToken=<secret:2> as anonymous",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Shared board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": ""
+    }
+  },
+  {
+    "name": "disable",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": false,
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "get: disabled",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": false,
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "board with the token of a disabled share",
+    "request": "GET /api/v1/shared/<id:3>?readToken=<secret:2> as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "enable again",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as share-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "sharing again after disabling makes a new token",
+    "request": "(observation)",
+    "status": 0,
+    "body": true
+  },
+  {
+    "name": "board with the token from before disabling",
+    "request": "GET /api/v1/shared/<id:3>?readToken=<secret:2> as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  }
+]

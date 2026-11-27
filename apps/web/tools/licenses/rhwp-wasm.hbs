@@ -1,0 +1,17 @@
+The Rust crates built into the WebAssembly of @rhwp/core (the file viewer's
+HWP renderer), each under its own license. This file is generated from rhwp's
+source with cargo-about and the repository's about.toml; see rhwp-wasm.ts.
+
+Licenses: {{#each overview}}{{id}}{{#unless @last}} {{/unless}}{{/each}}
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}}
+--------------------------------------------------------------------------------
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

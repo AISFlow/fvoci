@@ -1,0 +1,20 @@
+# From the BeautifulRust `lints/clippy.toml`.
+
+# Flag any function with a bool parameter, not just functions with four or more.
+max-fn-params-bools = 0
+
+# Allow unwrap, expect, and printing in tests, where a panic is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+
+# Names that are written as they are, not as code. `..` keeps clippy's own list.
+doc-valid-idents = ["OpenAPI", ".."]
+
+# What makes a string built at run time `&'static str`, which `Sql::push` takes as SQL
+# text it trusts (`crates/store/src/db.rs`): a leaked string would pass it unchecked.
+disallowed-methods = [
+  { path = "alloc::boxed::Box::leak", reason = "a leaked string is `&'static str` and passes `Sql::push` as trusted SQL" },
+  { path = "alloc::string::String::leak", reason = "a leaked string is `&'static str` and passes `Sql::push` as trusted SQL" },
+  { path = "alloc::vec::Vec::leak", reason = "a leaked buffer is `&'static` and passes `Sql::push` as trusted SQL" },
+]

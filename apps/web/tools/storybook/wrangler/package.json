@@ -1,0 +1,8 @@
+{
+  "name": "storybook-wrangler",
+  "private": true,
+  "description": "The Wrangler that deploys the public Storybook (tools/storybook/wrangler.ts). Its own workspace with its own lockfile, installed only by that step: workerd and sharp stay out of every other install.",
+  "dependencies": {
+    "wrangler": "4.163.0"
+  }
+}

@@ -1,0 +1,25 @@
+// The public Storybook: a Worker of static files only, built and deployed by
+// Workers Builds (the commands are the `storybook:*` scripts of package.json).
+// A push to master deploys it; a push to another branch makes a Preview.
+//
+// Its hostnames are custom domains attached in the Cloudflare dashboard, for
+// production and for Previews. There is no `routes` key on purpose: with none,
+// `wrangler deploy` and `wrangler preview` leave the attached domains as they
+// are and need no permission on the zone.
+{
+  "name": "fvoci-web-storybook",
+  "compatibility_date": "2026-11-13",
+  // No workers.dev hostname, for production or for Previews: either would
+  // show the account's subdomain, in the pull request's comment too.
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    // Written by `storybook:site`, with _headers, _redirects and robots.txt.
+    "directory": "./storybook-static",
+    // Files are served at exactly their paths; _redirects maps `/` to index.html.
+    "html_handling": "none",
+    "not_found_handling": "none",
+  },
+  // Previews use the settings above; this Worker has no bindings to separate.
+  "previews": {},
+}

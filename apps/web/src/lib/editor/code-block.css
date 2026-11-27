@@ -1,0 +1,310 @@
+/*
+ * A code block's bar, the colours of its text and the numbers of its lines,
+ * in the editor and where a body is only shown (code-paint.ts). The bar lies
+ * over the room editor.css keeps at the top of every code block from the
+ * start, and the numbers in the room it keeps at the start of the lines while
+ * they are shown, so neither moves the text when it comes. The colours are
+ * the tokens of app.css; only the colour changes, never the width of a
+ * letter.
+ */
+
+.doc-body .doc-code {
+  position: relative;
+  /* How many digits the gutter of the numbers is wide for; three unless the block is longer (editor.css). */
+  --code-digits: 3;
+}
+.doc-body .doc-code > pre {
+  position: relative;
+  margin: 0;
+}
+
+.doc-body .doc-code-bar {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: var(--code-bar);
+  padding-inline: 0.375rem;
+  font-family: var(--font-sans-stack);
+  font-size: var(--text-xs);
+  line-height: 1;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  user-select: none;
+}
+.doc-body .doc-code-bar > :first-child {
+  margin-inline-end: auto;
+  min-width: 0;
+}
+.doc-body .doc-code-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-inline: 0.5rem;
+}
+
+.doc-body .doc-code-language,
+.doc-body .doc-code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.doc-body .doc-code-language {
+  max-width: 100%;
+  padding-inline: 0.5rem;
+}
+.doc-body .doc-code-language > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.doc-body .doc-code-language:hover,
+.doc-body .doc-code-copy:hover,
+.doc-body .doc-code-language[aria-expanded='true'] {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.doc-body .doc-code-language:focus-visible,
+.doc-body .doc-code-copy:focus-visible,
+.doc-body .doc-code-search:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+/* A body that can only be read names the language and offers nothing to change it. */
+.doc-body .doc-code-language:disabled {
+  cursor: default;
+  background: none;
+  color: inherit;
+}
+.doc-body .doc-code-chevron {
+  width: 0.375rem;
+  height: 0.375rem;
+  flex: none;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  transform: translateY(-25%) rotate(45deg);
+}
+.doc-body .doc-code-language:disabled .doc-code-chevron {
+  display: none;
+}
+.doc-body .doc-code-icon {
+  width: 1rem;
+  height: 1rem;
+}
+.doc-body .doc-code-copy[data-copied] .doc-code-icon-copy,
+.doc-body .doc-code-copy:not([data-copied]) .doc-code-icon-check {
+  display: none;
+}
+/* What a press of the copy button did, for a moment, under the bar's end. */
+.doc-body .doc-code-status:not(:empty) {
+  position: absolute;
+  inset-block-start: calc(100% - 0.25rem);
+  inset-inline-end: 0.375rem;
+  max-width: min(20rem, calc(100% - 0.75rem));
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  line-height: var(--line-ui);
+  white-space: normal;
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+
+/* The list of languages, under the button. */
+.doc-body .doc-code-picker {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+.doc-body .doc-code-popup {
+  position: absolute;
+  inset-block-start: calc(100% + 0.25rem);
+  inset-inline-start: 0;
+  z-index: 30;
+  display: grid;
+  /* One column as wide as the list and no wider: the field's own width does not widen it. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.25rem;
+  width: min(16rem, calc(100vw - 2rem));
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--foreground) 15%, transparent);
+  white-space: normal;
+}
+.doc-body .doc-code-popup[hidden] {
+  display: none;
+}
+.doc-body .doc-code-search {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 2rem;
+  padding-inline: 0.5rem;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--text-sm);
+}
+/* Named under the list of languages so that the body's own lists (editor.css) do not indent it. */
+.doc-body .doc-code-popup .doc-code-options {
+  max-height: 15rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.doc-body .doc-code-options > li {
+  display: flex;
+  align-items: center;
+  min-height: 2rem;
+  padding-inline: 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  cursor: default;
+}
+.doc-body .doc-code-options > [data-active] {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.doc-body .doc-code-options > [aria-selected='true'] {
+  font-weight: 600;
+}
+.doc-body .doc-code-options > .doc-code-nothing {
+  color: var(--muted-foreground);
+}
+
+/* A finger needs more to press than a mouse pointer: the bar is a finger's height then (editor.css). */
+:is([data-density='comfortable'] .doc-body) :is(.doc-code-language, .doc-code-copy) {
+  min-width: var(--spacing-touch);
+  height: var(--spacing-touch);
+}
+:is([data-density='comfortable'] .doc-body) .doc-code-options > li {
+  min-height: var(--spacing-touch);
+}
+:is([data-density='comfortable'] .doc-body) .doc-code-search {
+  height: var(--spacing-touch);
+}
+@media (pointer: coarse) {
+  :root:not([data-density]) .doc-body :is(.doc-code-language, .doc-code-copy) {
+    min-width: var(--spacing-touch);
+    height: var(--spacing-touch);
+  }
+  :root:not([data-density]) .doc-body .doc-code-options > li {
+    min-height: var(--spacing-touch);
+  }
+}
+
+/* The numbers of the lines: counted, in the gutter, at the height of each line's start. */
+.doc-body .doc-code code {
+  counter-reset: doc-code-line;
+}
+.doc-body .doc-code-line {
+  counter-increment: doc-code-line;
+  position: absolute;
+  inset-inline-start: 0;
+  width: calc(1em + var(--code-digits) * 1ch);
+  color: var(--muted-foreground);
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+}
+.doc-body .doc-code-line::before {
+  content: counter(doc-code-line);
+}
+
+/*
+ * A block too long for a number at each line, in the editor (code-paint.ts):
+ * one column of them, beside lines that do not wrap, so that each number
+ * stays at its line.
+ */
+:root[data-code-lines] .doc-body .doc-code[data-long] > pre {
+  white-space: pre;
+  overflow-x: auto;
+}
+.doc-body .doc-code-column {
+  display: none;
+}
+/*
+ * Level with the first line of the text, a row for each line; the digits as
+ * small as the code's and where a number at each line would be. It is as
+ * wide as the gutter and as dark as the block, so that the text, scrolled
+ * sideways, goes under it.
+ */
+:root[data-code-lines] .doc-body .doc-code[data-long] > .doc-code-column {
+  display: block;
+  position: absolute;
+  inset-block-start: var(--code-bar);
+  inset-inline-start: 0;
+  width: calc(0.9 * (1em + var(--code-digits) * 1ch));
+  padding-inline-end: calc(0.85em + 0.1 * var(--code-digits) * 1ch);
+  background: var(--muted);
+  font-family: var(--font-mono-stack);
+  color: var(--muted-foreground);
+  text-align: end;
+  white-space: pre;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+}
+.doc-body .doc-code-column::before {
+  content: attr(data-numbers);
+  font-size: 0.9em;
+}
+
+/* The colours of the text. */
+.doc-body .doc-code-comment {
+  color: var(--code-comment);
+}
+.doc-body .doc-code-keyword {
+  color: var(--code-keyword);
+}
+.doc-body .doc-code-string {
+  color: var(--code-string);
+}
+.doc-body .doc-code-number {
+  color: var(--code-number);
+}
+.doc-body .doc-code-title {
+  color: var(--code-title);
+}
+.doc-body .doc-code-type {
+  color: var(--code-type);
+}
+.doc-body .doc-code-builtin {
+  color: var(--code-builtin);
+}
+.doc-body .doc-code-property {
+  color: var(--code-property);
+}
+.doc-body .doc-code-variable {
+  color: var(--code-variable);
+}
+.doc-body .doc-code-meta {
+  color: var(--code-meta);
+}
+.doc-body .doc-code-regexp {
+  color: var(--code-regexp);
+}
+.doc-body .doc-code-tag {
+  color: var(--code-tag);
+}
+.doc-body .doc-code-added {
+  color: var(--code-added);
+}
+.doc-body .doc-code-removed {
+  color: var(--code-removed);
+}

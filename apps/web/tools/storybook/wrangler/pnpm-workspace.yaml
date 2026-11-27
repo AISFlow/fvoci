@@ -1,0 +1,13 @@
+# Its own workspace, so that the web app's install does not carry Wrangler
+# (tools/storybook/wrangler.ts installs it, from pnpm-lock.yaml here).
+packages: []
+
+savePrefix: ''
+minimumReleaseAge: 1440
+
+# Deploying runs no install script: workerd, esbuild and sharp take their
+# platform binaries from optional dependencies.
+allowBuilds:
+  esbuild: false
+  sharp: false
+  workerd: false

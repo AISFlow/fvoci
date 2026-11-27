@@ -1,0 +1,92 @@
+/*
+ * What a comparison of two bodies marks (render-diff.ts), on a body drawn for
+ * reading (editor.css). The colours are tokens (styles/app.css); the marks
+ * differ by more than colour: text added is underlined and text removed
+ * struck through, a block added has a solid line beside it and a block
+ * removed a dashed one with its text struck through, and each mark says
+ * what it is to whoever hears the page (`data-diff-label`, put before it
+ * where only a screen reader finds it).
+ */
+
+.doc-body ins {
+  background-color: var(--diff-added);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+}
+
+.doc-body del {
+  background-color: var(--diff-removed);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.doc-body [data-change='format'] {
+  text-decoration: underline dotted;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+}
+
+.doc-body [data-diff='added'],
+.doc-body [data-diff='removed'] {
+  border-inline-start: 3px solid var(--diff-added-line);
+  border-radius: 2px;
+  background-color: var(--diff-added);
+  padding-inline-start: 0.5rem;
+}
+
+.doc-body [data-diff='removed'] {
+  border-inline-start-style: dashed;
+  border-inline-start-color: var(--diff-removed-line);
+  background-color: var(--diff-removed);
+  text-decoration: line-through;
+}
+
+/* Heard, not seen: what a mark is, before it. */
+.doc-body [data-diff-label] {
+  position: relative;
+}
+
+.doc-body [data-diff-label]::before {
+  content: attr(data-diff-label) ': ';
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* What a block that changed in kind or attributes was. */
+.doc-body .doc-diff-note {
+  display: block;
+  margin-block-end: 0.25rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  text-decoration: none;
+}
+
+/* A change the way through them has come to. */
+.doc-body [data-diff-stop] {
+  scroll-margin-block: 3rem;
+}
+
+.doc-body [data-diff-stop]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* A line of code removed is in no version's count: the numbers are the version's own. */
+.doc-body del .doc-code-line {
+  counter-increment: none;
+}
+.doc-body del .doc-code-line::before {
+  content: none;
+}
+
+/* A link on what is marked: the blue of links is too light to be read on its colours. */
+.doc-body :is(ins, del, [data-change], [data-diff='added'], [data-diff='removed']) a,
+.doc-body a:is(ins, del, [data-change]) {
+  color: var(--diff-link);
+}

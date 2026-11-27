@@ -1,0 +1,141 @@
+{
+  "unihan": {
+    "version": "18.0.0",
+    "url": "https://www.unicode.org/Public/18.0.0/ucd/Unihan.zip",
+    "sha256": "4c93ea9c1f636451729a840978f1667a53886af37ba854fdcce109721c63d43e"
+  },
+  "fonts": {
+    "noto-sans": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
+        "sha256": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosans/OFL.txt",
+        "sha256": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+      }
+    },
+    "noto-sans-kr": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf",
+        "sha256": "194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanskr/OFL.txt",
+        "sha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+      }
+    },
+    "noto-sans-jp": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf",
+        "sha256": "c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosansjp/OFL.txt",
+        "sha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+      }
+    },
+    "noto-sans-sc": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf",
+        "sha256": "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanssc/OFL.txt",
+        "sha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+      }
+    },
+    "noto-sans-tc": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanstc/NotoSansTC%5Bwght%5D.ttf",
+        "sha256": "864727d210d54f2537bbe23b3a839436c3992af72de9322af5270897246bd44f"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notosanstc/OFL.txt",
+        "sha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+      }
+    },
+    "noto-serif": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserif/NotoSerif%5Bwdth%2Cwght%5D.ttf",
+        "sha256": "4d8e6761424656867019081a1a01336f3cb086982682698714054fc33f782713"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserif/OFL.txt",
+        "sha256": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+      }
+    },
+    "noto-serif-kr": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifkr/NotoSerifKR%5Bwght%5D.ttf",
+        "sha256": "11f8d5de6f1b79195efba3828aaa2ec95c1178f5ae976fb23c8d53250a9938f3"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifkr/OFL.txt",
+        "sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
+      }
+    },
+    "noto-serif-jp": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifjp/NotoSerifJP%5Bwght%5D.ttf",
+        "sha256": "2fd527ba12b6a44ec30d796d633360da0aeba6c5d4af1304ce12bb4dc15a7dfc"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifjp/OFL.txt",
+        "sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
+      }
+    },
+    "noto-serif-sc": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifsc/NotoSerifSC%5Bwght%5D.ttf",
+        "sha256": "050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoserifsc/OFL.txt",
+        "sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
+      }
+    },
+    "noto-serif-tc": {
+      "origin": "google/fonts@5bb28733cec313b63fbd415b574b5ae35c8aa8b8",
+      "font": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoseriftc/NotoSerifTC%5Bwght%5D.ttf",
+        "sha256": "0077e18f57c6908f4a000969880940bdb0dad057c0e8d98b49dc364c3d1b09c6"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/google/fonts/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/notoseriftc/OFL.txt",
+        "sha256": "5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6"
+      }
+    },
+    "d2coding-regular": {
+      "origin": "naver/d2-coding-font@b0dc372e28d7abdba7f3cba854855ceffbd490a8 (VER1.4.0)",
+      "font": {
+        "url": "https://raw.githubusercontent.com/naver/d2-coding-font/b0dc372e28d7abdba7f3cba854855ceffbd490a8/fonts/ttf/D2Coding-Regular.ttf",
+        "sha256": "d5f2b6bf5b1826cfbf3734c70582f0cd42ea2e1d6c2636ae681b612bc9c5682f"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/naver/d2-coding-font/b0dc372e28d7abdba7f3cba854855ceffbd490a8/OFL.txt",
+        "sha256": "1807e8dec4d65f474cbf9be39f5e2254ecb81702babc320749e272ea66ffcc69"
+      }
+    },
+    "d2coding-bold": {
+      "origin": "naver/d2-coding-font@b0dc372e28d7abdba7f3cba854855ceffbd490a8 (VER1.4.0)",
+      "font": {
+        "url": "https://raw.githubusercontent.com/naver/d2-coding-font/b0dc372e28d7abdba7f3cba854855ceffbd490a8/fonts/ttf/D2Coding-Bold.ttf",
+        "sha256": "14a0cfa4d96fbd976bc4b1a6ef81e51df353a1689d5273ebcd908c857a4f2752"
+      },
+      "license": {
+        "url": "https://raw.githubusercontent.com/naver/d2-coding-font/b0dc372e28d7abdba7f3cba854855ceffbd490a8/OFL.txt",
+        "sha256": "1807e8dec4d65f474cbf9be39f5e2254ecb81702babc320749e272ea66ffcc69"
+      }
+    }
+  }
+}

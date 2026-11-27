@@ -1,0 +1,780 @@
+{
+  "key": "issue-tracker",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "61dfafed-a3e0-5f6f-a4fe-e2b4062f4d48",
+    "title": "이슈 트래커",
+    "description": "버그와 요청을 모아 처리합니다. 누가 언제 올리고 고쳤는지는 저절로 적히고, ‘남은 이슈’ 뷰는 닫힌 것을 걸러 냅니다.",
+    "icon": "🐞",
+    "showDescription": true,
+    "doneWhen": {
+      "propertyId": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+      "optionIds": [
+        "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+        "0dc0879a-7d99-594d-ba6b-cf906869740a"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+        "name": "상태",
+        "type": "select",
+        "options": [
+          {
+            "id": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+            "label": "새로 옴",
+            "color": "gray"
+          },
+          {
+            "id": "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+            "label": "확인됨",
+            "color": "yellow"
+          },
+          {
+            "id": "16f381d8-7af4-50a9-af83-f722169249ea",
+            "label": "고치는 중",
+            "color": "blue"
+          },
+          {
+            "id": "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+            "label": "닫힘",
+            "color": "green"
+          },
+          {
+            "id": "0dc0879a-7d99-594d-ba6b-cf906869740a",
+            "label": "안 고침",
+            "color": "brown"
+          }
+        ]
+      },
+      {
+        "id": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+        "name": "종류",
+        "type": "select",
+        "options": [
+          {
+            "id": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+            "label": "버그",
+            "color": "red"
+          },
+          {
+            "id": "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+            "label": "요청",
+            "color": "purple"
+          },
+          {
+            "id": "28939bf7-286a-58b9-b78b-42cfeff3155f",
+            "label": "정리",
+            "color": "gray"
+          }
+        ]
+      },
+      {
+        "id": "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+        "name": "심각도",
+        "type": "select",
+        "options": [
+          {
+            "id": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+            "label": "높음",
+            "color": "red"
+          },
+          {
+            "id": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+            "label": "보통",
+            "color": "orange"
+          },
+          {
+            "id": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+            "label": "낮음",
+            "color": "gray"
+          }
+        ]
+      },
+      {
+        "id": "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+        "name": "영역",
+        "type": "multiSelect",
+        "options": [
+          {
+            "id": "b6af3143-d64b-5425-863b-bc776cc46409",
+            "label": "가입",
+            "color": "blue"
+          },
+          {
+            "id": "633c044a-7e58-5e08-9f63-86101a98359e",
+            "label": "결제",
+            "color": "green"
+          },
+          {
+            "id": "a0b743ca-edd6-50a6-8551-983a195ff002",
+            "label": "검색",
+            "color": "yellow"
+          },
+          {
+            "id": "304d6fa0-f4dd-56bc-98f9-0660b6beb50d",
+            "label": "모바일",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "6ec62f07-9679-5652-9ab4-861c1ea07901",
+        "name": "담당",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6",
+        "name": "관련 이슈",
+        "type": "relation",
+        "options": []
+      },
+      {
+        "id": "6e8b0484-a81f-51c6-ae9c-11f98f1ef192",
+        "name": "올린 사람",
+        "type": "createdBy",
+        "options": []
+      },
+      {
+        "id": "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+        "name": "올린 시각",
+        "type": "createdTime",
+        "options": []
+      },
+      {
+        "id": "1be99720-7c2a-5376-8e30-f9daac480026",
+        "name": "마지막으로 고친 사람",
+        "type": "updatedBy",
+        "options": []
+      },
+      {
+        "id": "e1e24824-08ba-5d36-8db5-0517fe0d5370",
+        "name": "마지막으로 고친 시각",
+        "type": "updatedTime",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "6c07154f-bc87-5003-b31c-ada20b17cb39",
+      "type": "view",
+      "title": "남은 이슈",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+              "condition": "notIncludes",
+              "values": [
+                "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+                "0dc0879a-7d99-594d-ba6b-cf906869740a"
+              ]
+            }
+          ]
+        },
+        "hiddenGroups": [
+          "",
+          "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+          "0dc0879a-7d99-594d-ba6b-cf906869740a"
+        ],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+          "16f381d8-7af4-50a9-af83-f722169249ea"
+        ],
+        "shownProperties": [
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901"
+        ],
+        "groupBy": "41fb4307-4d35-515d-8f28-ee0bd207e0fd"
+      }
+    },
+    {
+      "id": "45663b0b-bf48-51b1-95da-4269f9eb9960",
+      "type": "view",
+      "title": "심각도별",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "bb942f44-0169-5f70-959c-e845bc3abfd0"
+        ],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5"
+        ],
+        "groupBy": "9c1adb28-489c-5bb0-b0da-56ff86b55106"
+      }
+    },
+    {
+      "id": "c46e049d-bf0c-5176-a1b5-e15a38812a7b",
+      "type": "view",
+      "title": "모든 이슈",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "countUniqueValue"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [
+          "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+          "28939bf7-286a-58b9-b78b-42cfeff3155f"
+        ],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901",
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6",
+          "6e8b0484-a81f-51c6-ae9c-11f98f1ef192",
+          "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+          "1be99720-7c2a-5376-8e30-f9daac480026",
+          "e1e24824-08ba-5d36-8db5-0517fe0d5370"
+        ],
+        "groupBy": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa"
+      }
+    },
+    {
+      "id": "b1267acb-0000-5baa-982c-b43274ad873c",
+      "type": "view",
+      "title": "버그만",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+              "condition": "includes",
+              "values": ["6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c"]
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901"
+        ]
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+      "type": "card",
+      "title": "비밀번호 재설정 메일이 두 번 온다",
+      "fields": {
+        "icon": "📨",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "16f381d8-7af4-50a9-af83-f722169249ea",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["b6af3143-d64b-5425-863b-bc776cc46409"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "다시 내는 방법"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "로그인 화면에서 ‘비밀번호를 잊었나요’를 누른다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "주소를 넣고 단추를 빠르게 두 번 누른다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "메일함을 본다"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "기대한 것과 본 것"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "기대",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ": 메일 한 통."
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "실제",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ": 내용이 같은 메일 두 통."
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "짚이는 곳"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "typescript"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "// The button stays enabled while the request is on its way.\nbutton.disabled = false;\nawait send(address);"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+      "type": "card",
+      "title": "내보낸 내역의 합계가 화면과 다르다",
+      "fields": {
+        "icon": "🧾",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["633c044a-7e58-5e08-9f63-86101a98359e"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "지난달 합계가 화면에는 1,204,000원인데 내보낸 파일에는 1,194,000원입니다."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "환불 한 건이 파일에만 빠져 있습니다. 화면이 맞습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+      "type": "card",
+      "title": "검색에서 조사가 붙은 낱말을 못 찾는다",
+      "fields": {
+        "icon": "🔍",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["a0b743ca-edd6-50a6-8551-983a195ff002"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "‘환불’로 찾으면 "
+              },
+              {
+                "type": "text",
+                "text": "환불규정을",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "이 든 카드는 나오지만, ‘배포하다’로는 "
+              },
+              {
+                "type": "text",
+                "text": "배포합니다",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "가 나오지 않습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "7b912e28-264e-5540-8bda-328541ffe898",
+      "type": "card",
+      "title": "휴대폰에서 표의 칸 너비를 바꾸고 싶다",
+      "fields": {
+        "icon": "📱",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["304d6fa0-f4dd-56bc-98f9-0660b6beb50d"],
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6": [
+            {
+              "card": "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "끌어서 바꾸기는 손가락으로 어렵습니다. 칸 머리의 메뉴에 ‘더 넓게’와 ‘더 좁게’가 있으면 좋겠습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "69938723-8f66-5682-8227-29c11ab0de54",
+      "type": "card",
+      "title": "결제 단추를 두 번 누르면 두 번 결제된다",
+      "fields": {
+        "icon": "💳",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": [
+            "633c044a-7e58-5e08-9f63-86101a98359e",
+            "304d6fa0-f4dd-56bc-98f9-0660b6beb50d"
+          ],
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6": [
+            {
+              "card": "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "같은 까닭이었습니다: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "ceb53077-29a3-5834-8dcb-cb3adff67eeb"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 단추를 요청이 끝날 때까지 막아서 고쳤습니다."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "고침"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "시험에 넣음"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "배포함"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "9faa6727-6720-577d-8e01-7dba55bf0e27",
+      "type": "card",
+      "title": "쓰지 않는 설정 지우기",
+      "fields": {
+        "icon": "🧹",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "0dc0879a-7d99-594d-ba6b-cf906869740a",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "28939bf7-286a-58b9-b78b-42cfeff3155f",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": []
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "이번 분기에 지운다.",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " 다음 큰 판에서 한꺼번에 지우기로 했습니다."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

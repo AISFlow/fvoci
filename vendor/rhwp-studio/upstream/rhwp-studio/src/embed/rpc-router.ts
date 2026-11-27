@@ -1,0 +1,225 @@
+import type { HmlSaveState } from '../core/hml-save-capability.ts';
+import type { EmbedFontDecisionTraceV1 } from '../core/font-decision-trace.ts';
+import {
+  assertEmptyParams,
+  assertOnlyParam,
+  parseApplyTextCommand,
+  parseBodyParagraphTarget,
+  parseRevertTextCommand,
+} from '../document-agent/contract.ts';
+import type {
+  RhwpApplyTextCommandV1,
+  RhwpBodyParagraphTargetV1,
+  RhwpDocumentStateV1,
+  RhwpRevertTextCommandV1,
+  RhwpSelectionContextV1,
+  RhwpTextCommandReceiptV1,
+} from '../document-agent/types.ts';
+import type {
+  CanvasKitRenderModeRequest,
+  CanvasKitSurfaceRequest,
+  LayerRenderProfile,
+  RenderBackend,
+  RenderBackendRequest,
+} from '../view/render-backend.ts';
+
+/** `getPageSvg` 의 선택 인자 `profile` 허용값 — `LayerRenderProfile` 과 같다. */
+const SVG_PAGE_PROFILES: readonly LayerRenderProfile[] = ['fastPreview', 'screen', 'print', 'highQuality'];
+
+export interface EmbedNotifySavedResult {
+  ok: true;
+  wasDirty: boolean;
+}
+
+export interface EmbedRpcHandlers {
+  getCommandErrorState?(): Promise<unknown>;
+  ready(): Promise<boolean>;
+  loadFile(
+    data: Uint8Array,
+    fileName: string,
+    skipUnsavedGuard: boolean,
+    suppressDialogs: boolean,
+  ): Promise<{ pageCount: number }>;
+  pageCount(): Promise<number>;
+  getRendererDiagnostics(page: number): Promise<EmbedRendererDiagnosticsV1>;
+  getFontDecisionTrace(page: number, maxCharacters: number): Promise<EmbedFontDecisionTraceV1>;
+  /** `profile` 생략 시 기존과 같은 화면 렌더(`renderPageSvg`). `'print'` 는 편집 화면 전용 요소(빈 누름틀 안내문 등)를 뺀다. */
+  getPageSvg(page: number, profile?: LayerRenderProfile): Promise<string>;
+  exportHwp(): Promise<Uint8Array>;
+  exportHwpx(): Promise<Uint8Array>;
+  exportHml(): Promise<Uint8Array>;
+  getHmlSaveState(): Promise<HmlSaveState>;
+  exportHwpVerify(): Promise<unknown>;
+  notifySaved(fileName?: string): Promise<EmbedNotifySavedResult>;
+  getDocumentState(): Promise<RhwpDocumentStateV1>;
+  getSelectionContext(): Promise<RhwpSelectionContextV1>;
+  applyTextCommand(command: RhwpApplyTextCommandV1): Promise<RhwpTextCommandReceiptV1>;
+  revertTextCommand(command: RhwpRevertTextCommandV1): Promise<RhwpTextCommandReceiptV1>;
+  focusTarget(target: RhwpBodyParagraphTargetV1): Promise<{ focused: boolean; page: number }>;
+
+  // ── 브리지 확장 (P4) ────────────────────────────────────
+  // 자동화·플러그인·창 제어. 부모는 **구조화 복제 가능한 값만** 보낼 수 있으므로 함수를 받는
+  // 표면(예: 확장 커맨드 등록)은 여기 없다 — 그건 iframe 안의 플러그인만 할 수 있다.
+  automationList(): Promise<unknown>;
+  automationMenuModel(): Promise<unknown>;
+  automationIsEnabled(id: string): Promise<boolean>;
+  automationExecute(
+    id: string,
+    params?: Record<string, unknown>,
+    options?: { allowDialog?: boolean },
+  ): Promise<unknown>;
+  automationContext(): Promise<unknown>;
+  pluginList(): Promise<unknown>;
+  pluginLoad(id: string): Promise<unknown>;
+  pluginUnload(id: string): Promise<unknown>;
+  pluginInvoke(id: string, method: string, args: unknown[]): Promise<unknown>;
+  chromeGet(): Promise<unknown>;
+  chromeSet(next: Record<string, unknown>): Promise<unknown>;
+}
+
+export interface EmbedRendererDiagnosticsV1 {
+  schemaVersion: 1;
+  request: EmbedRendererRuntimeRequestV1 | null;
+  initialized: boolean;
+  initializationError: string | null;
+  effectiveBackend: 'canvas2d' | 'canvaskit' | null;
+  backendFallbackReason: string | null;
+  selection: unknown;
+  page: { index: number; canvaskit: unknown };
+}
+
+export interface EmbedRendererRuntimeRequestV1 {
+  backend: Omit<RenderBackendRequest, 'backend'> & { backend: RenderBackend };
+  canvaskitMode: CanvasKitRenderModeRequest;
+  canvaskitSurface: CanvasKitSurfaceRequest;
+  renderProfile: LayerRenderProfile;
+}
+
+function asParams(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(value).filter(key => !allowed.includes(key));
+  if (unknown.length > 0) throw new Error(`${label} contains unknown field: ${unknown.sort()[0]}`);
+}
+
+/** 비어 있지 않은 문자열 식별자. 라우터에서 거르지 않으면 핸들러마다 같은 검사를 반복한다. */
+function asId(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('id must be a non-empty string');
+  }
+  return value;
+}
+
+function asBytes(value: unknown, allowLegacyArray: boolean): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (allowLegacyArray && Array.isArray(value)) return new Uint8Array(value);
+  throw new Error('loadFile requires binary data');
+}
+
+export async function routeEmbedRequest(
+  method: string,
+  rawParams: unknown,
+  handlers: EmbedRpcHandlers,
+  allowLegacyArray = false,
+): Promise<unknown> {
+  const params = asParams(rawParams);
+  switch (method) {
+    case 'ready': return handlers.ready();
+    case 'loadFile':
+      return handlers.loadFile(
+        asBytes(params.data, allowLegacyArray),
+        typeof params.fileName === 'string' ? params.fileName : 'document.hwp',
+        params.skipUnsavedGuard === true,
+        params.suppressDialogs === true,
+      );
+    case 'getCommandErrorState':
+      if (!handlers.getCommandErrorState) throw new Error('command-error-v1 is unavailable');
+      return handlers.getCommandErrorState();
+    case 'pageCount': return handlers.pageCount();
+    case 'getRendererDiagnostics': {
+      const page = params.page ?? 0;
+      if (!Number.isSafeInteger(page) || (page as number) < 0) {
+        throw new Error('page must be a non-negative safe integer');
+      }
+      return handlers.getRendererDiagnostics(page as number);
+    }
+    case 'getFontDecisionTrace': {
+      assertOnlyKeys(params, ['page', 'limits'], 'getFontDecisionTrace params');
+      const page = params.page ?? 0;
+      if (!Number.isSafeInteger(page) || (page as number) < 0) {
+        throw new Error('page must be a non-negative safe integer');
+      }
+      const limits = params.limits === undefined ? {} : asParams(params.limits);
+      if (params.limits !== undefined
+        && (typeof params.limits !== 'object' || params.limits === null || Array.isArray(params.limits))) {
+        throw new Error('limits must be an object');
+      }
+      assertOnlyKeys(limits, ['maxCharacters'], 'getFontDecisionTrace limits');
+      const maxCharacters = limits.maxCharacters ?? 1024;
+      if (!Number.isSafeInteger(maxCharacters)
+        || (maxCharacters as number) < 1 || (maxCharacters as number) > 4096) {
+        throw new Error('maxCharacters must be a safe integer in 1..=4096');
+      }
+      return handlers.getFontDecisionTrace(page as number, maxCharacters as number);
+    }
+    case 'getPageSvg': {
+      const profile = params.profile;
+      if (profile !== undefined && !SVG_PAGE_PROFILES.includes(profile as LayerRenderProfile)) {
+        throw new Error(`profile must be one of ${SVG_PAGE_PROFILES.join(', ')}`);
+      }
+      return handlers.getPageSvg(
+        typeof params.page === 'number' ? params.page : 0,
+        profile as LayerRenderProfile | undefined,
+      );
+    }
+    case 'exportHwp': return handlers.exportHwp();
+    case 'exportHwpx': return handlers.exportHwpx();
+    case 'exportHml': return handlers.exportHml();
+    case 'getHmlSaveState': return handlers.getHmlSaveState();
+    case 'exportHwpVerify': return handlers.exportHwpVerify();
+    case 'notifySaved': return handlers.notifySaved(
+      typeof params.fileName === 'string' && params.fileName.length > 0
+        ? params.fileName
+        : undefined,
+    );
+    case 'getDocumentState':
+      assertEmptyParams(params, 'getDocumentState params');
+      return handlers.getDocumentState();
+    case 'getSelectionContext':
+      assertEmptyParams(params, 'getSelectionContext params');
+      return handlers.getSelectionContext();
+    case 'applyTextCommand': return handlers.applyTextCommand(parseApplyTextCommand(
+      assertOnlyParam(params, 'command', 'applyTextCommand params'),
+    ));
+    case 'revertTextCommand': return handlers.revertTextCommand(parseRevertTextCommand(
+      assertOnlyParam(params, 'command', 'revertTextCommand params'),
+    ));
+    case 'focusTarget': return handlers.focusTarget(parseBodyParagraphTarget(
+      assertOnlyParam(params, 'target', 'focusTarget params'),
+    ));
+    // ── 브리지 확장 (P4) ──────────────────────────────────
+    case 'automation.list': return handlers.automationList();
+    case 'automation.menuModel': return handlers.automationMenuModel();
+    case 'automation.isEnabled': return handlers.automationIsEnabled(asId(params.id));
+    case 'automation.execute': return handlers.automationExecute(
+      asId(params.id),
+      typeof params.params === 'object' && params.params !== null
+        ? params.params as Record<string, unknown>
+        : undefined,
+      { allowDialog: params.allowDialog === true },
+    );
+    case 'automation.context': return handlers.automationContext();
+    case 'plugin.list': return handlers.pluginList();
+    case 'plugin.load': return handlers.pluginLoad(asId(params.id));
+    case 'plugin.unload': return handlers.pluginUnload(asId(params.id));
+    case 'plugin.invoke': return handlers.pluginInvoke(
+      asId(params.id), asId(params.method), Array.isArray(params.args) ? params.args : [],
+    );
+    case 'chrome.get': return handlers.chromeGet();
+    case 'chrome.set': return handlers.chromeSet(asParams(params.visibility));
+    default: throw new Error(`Unknown method: ${method}`);
+  }
+}

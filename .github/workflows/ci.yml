@@ -1,0 +1,432 @@
+# The whole verification of a change: what `cargo xtask check`, `cargo xtask test` and
+# the web app's `check`, `test`, `build`, `test:storybook`, `e2e`, `e2e:apple` and
+# `e2e:live` do on a developer's machine, by the same commands, cut into 21 jobs for
+# runners of four processors. At most 18 run at once (`plan` and `web build` end
+# before the end-to-end jobs start, `ci-done` starts after all), so two runs fit in
+# the 40 jobs the account runs at once. `plan` says which jobs a run may skip, from
+# what it changes (.github/scripts/plan.sh); `ci-done` is the one check that stands
+# for all of them.
+#
+# The repository is public and anyone may send a pull request, so:
+# - it runs on `pull_request` only, never with more than the right to read, and uses
+#   no secret but the run's own token, which can only read;
+# - every action is pinned to a commit, the tools the workflow downloads itself to a
+#   SHA-256, and Playwright's and the test containers' images to multi-architecture
+#   digests (xtask/src/containers.rs, .github/scripts/test-services.sh). Playwright's
+#   server (from npm, in that image) and browsers are fetched by their version;
+# - no text from outside (titles, branch names, messages) reaches a shell, and the
+#   names of the changed files are read as data, never printed;
+# - only a run on main writes a cache. A pull request reads them and writes none:
+#   what one pull request built never reaches another. What a pull request's run
+#   leaves for main (`tested-<tree>`) is read only from runs of this repository's
+#   own branches, and only for the very tree that run tested.
+name: ci
+
+on:
+  # Whatever the base: the pull requests of a stack have the branch below as theirs.
+  # GitHub tests a layer merged into the test merge of the layer below, so on the stack's
+  # base with every layer under it (before the stack is linked: into the branch below),
+  # and the plan reads all that changed there since main: the top layer's `ci-done`
+  # stands for the stack, and each layer has its own, as a layer can be merged with
+  # those below it and no more.
+  # `github.event.pull_request.stack` is not read: it is missing from a run of a pull
+  # request opened before its stack was linked (the lowest, by `gh stack submit`). Only
+  # a new head starts a run: the layer above a changed one keeps the result of its old
+  # head until `gh stack rebase` and `gh stack push`.
+  pull_request:
+  # Main after a merge: the jobs that save the caches, and the jobs of the build when
+  # the merged tree is not one that a pull request's run passed with them.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer run of a pull request ends the older one. The runs of main are one per
+# commit, and all of them finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Which jobs this run may skip. A job below runs unless its id is in the list.
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # A push asks whether a pull request's run passed on the merged branch.
+    outputs:
+      skip: ${{ steps.plan.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The history of every branch, without the files: where a pull request
+          # parted from main, and what a push changes.
+          fetch-depth: 0
+          filter: blob:none
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BEFORE: ${{ github.event.before }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
+        run: .github/scripts/plan.sh
+
+  # The S3 tests and the checks of the workflows run whatever became of the check.
+  rust-check:
+    name: cargo xtask check, the S3 tests and the workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust
+        with:
+          cache: check
+          save: 'true'
+      # Where `cargo xtask check` looks first for it.
+      - name: Fetch cargo-deny
+        run: |
+          .github/scripts/pinned-tool.sh \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+            9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f \
+            cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny target/tools/bin
+      - run: cargo xtask check
+      # xtask starts PostgreSQL and S3 itself, as on a developer's machine.
+      - name: S3 storage tests
+        if: ${{ !cancelled() }}
+        run: cargo xtask test --database s3
+      # What the jobs are cut for: four processors and 16 GB when this was written.
+      - name: The runner's processors, memory and disk
+        if: ${{ !cancelled() }}
+        run: |
+          nproc
+          free --giga
+          df --human-readable /
+      - name: Fetch actionlint and zizmor
+        if: ${{ !cancelled() }}
+        run: |
+          .github/scripts/pinned-tool.sh \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            actionlint "$RUNNER_TEMP/bin"
+          .github/scripts/pinned-tool.sh \
+            https://github.com/zizmorcore/zizmor/releases/download/v1.32.0/zizmor-x86_64-unknown-linux-gnu.tar.gz \
+            bb110cc765eca9cd7efb2e284a956be5974c60027b0970f16397d86208a9957b \
+            zizmor "$RUNNER_TEMP/bin"
+      - name: actionlint
+        if: ${{ !cancelled() }}
+        run: |
+          "$RUNNER_TEMP/bin/actionlint" -color
+      - name: shellcheck
+        if: ${{ !cancelled() }}
+        run: shellcheck .github/scripts/*.sh
+      - name: The tests of the plan and the verdict
+        if: ${{ !cancelled() }}
+        run: .github/scripts/plan-verdict-tests.sh
+      # With the token (it can only read) zizmor also asks GitHub whether a pinned
+      # commit belongs to the action's repository and carries the version beside it.
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/bin/zizmor" --color always .github
+
+  rust-sqlite:
+    name: cargo xtask test (SQLite) (${{ matrix.shard }}/3)
+    needs: plan
+    if: ${{ !contains(needs.plan.outputs.skip, '"rust-sqlite"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust
+        with:
+          cache: workspace-tests
+          # Shard 3 holds store, libs and the remaining workspace targets.
+          save: ${{ matrix.shard == 3 && 'true' || 'false' }}
+      - env:
+          PART: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: cargo xtask test --database sqlite --part "$PART"
+
+  rust-postgres:
+    name: cargo xtask test (PostgreSQL) (${{ matrix.shard }}/3)
+    needs: plan
+    if: ${{ !contains(needs.plan.outputs.skip, '"rust-postgres"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust
+        with:
+          cache: server-tests
+          # Shard 3 holds store, libs and the remaining server targets.
+          save: ${{ matrix.shard == 3 && 'true' || 'false' }}
+      # xtask starts the PostgreSQL container itself, as on a developer's machine.
+      - env:
+          PART: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: cargo xtask test --database postgres --part "$PART"
+
+  # The three commands that read the source, on one runner. Each runs even when the
+  # one before it failed.
+  web-checks:
+    name: web check, test and test:storybook
+    needs: plan
+    if: ${{ !contains(needs.plan.outputs.skip, '"web-checks"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup
+        uses: $/.github/actions/web
+        with:
+          fonts: 'true'
+          browser: chromium
+          save: 'true'
+      - name: check
+        run: pnpm --filter web run check
+      - name: test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: pnpm --filter web run test
+      - name: test:storybook
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: pnpm --filter web run test:storybook
+      - name: Keep the traces of the failed stories
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: traces-storybook
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # Built once: every end-to-end job tests this build.
+  web-build:
+    name: web build
+    needs: plan
+    if: ${{ !contains(needs.plan.outputs.skip, '"web-build"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/web
+        with:
+          fonts: 'true'
+      - run: pnpm --filter web run build
+      - name: Pack the build
+        run: tar --create --gzip --file "$RUNNER_TEMP/web-dist.tar.gz" --directory apps/web dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}/web-dist.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          # As long as the traces: a part that failed can be run again for that long.
+          retention-days: 3
+
+  web-e2e:
+    name: web e2e (${{ matrix.shard }}/2)
+    needs: [plan, web-build]
+    if: ${{ !contains(needs.plan.outputs.skip, '"web-e2e"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/web
+        with:
+          browser: chromium
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}
+      - name: Unpack the build
+        run: tar --extract --gzip --file "$RUNNER_TEMP/web-dist.tar.gz" --directory apps/web
+      - env:
+          SHARD: ${{ matrix.shard }}/2
+        run: pnpm --filter web run e2e --shard="$SHARD"
+      - name: Keep the traces of the failed tests
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: traces-e2e-${{ matrix.shard }}
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # WebKit in Playwright's image (.github/scripts/webkit-server.sh says why), with the
+  # workers playwright.apple.config.ts gives four processors.
+  web-e2e-apple:
+    name: web e2e:apple (${{ matrix.shard }}/7)
+    needs: [plan, web-build]
+    if: ${{ !contains(needs.plan.outputs.skip, '"web-e2e-apple"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/web
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}
+      - name: Unpack the build
+        run: tar --extract --gzip --file "$RUNNER_TEMP/web-dist.tar.gz" --directory apps/web
+      - run: .github/scripts/webkit-server.sh
+      - env:
+          SHARD: ${{ matrix.shard }}/7
+        run: pnpm --filter web run e2e:apple --shard="$SHARD"
+      - name: Keep the traces of the failed tests
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: traces-e2e-apple-${{ matrix.shard }}
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # The real server, built here, serving the build of `web-build`. One worker, as
+  # playwright.live.config.ts says: the tests share one server and one database.
+  web-e2e-live:
+    name: web e2e:live
+    needs: [plan, web-build]
+    if: ${{ !contains(needs.plan.outputs.skip, '"web-e2e-live"') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/rust
+        with:
+          cache: server-tests
+      - name: Build the server and the fakes beside it
+        run: cargo build --locked --package fvoci-server --bins --examples
+      - uses: $/.github/actions/web
+        with:
+          browser: chromium
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}
+      - name: Unpack the build
+        run: tar --extract --gzip --file "$RUNNER_TEMP/web-dist.tar.gz" --directory apps/web
+      # The server of the second organization runs on PostgreSQL.
+      - run: .github/scripts/test-services.sh postgres
+      - run: pnpm --filter web run e2e:live
+      - name: Keep the traces of the failed tests and the servers' logs
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: traces-e2e-live
+          path: |
+            apps/web/test-results/
+            target/web-live/*/server.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # The one check to require. It runs whatever became of the others, and passes only
+  # when each passed or was skipped by the plan: a job that failed, was cancelled, or
+  # was skipped otherwise fails it (.github/scripts/verdict.sh). A job added above
+  # must be added to `needs` here: the step before the verdict fails when one is
+  # missing.
+  ci-done:
+    name: ci-done
+    if: ${{ always() }}
+    needs:
+      - plan
+      - rust-check
+      - rust-sqlite
+      - rust-postgres
+      - web-checks
+      - web-build
+      - web-e2e
+      - web-e2e-apple
+      - web-e2e-live
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - name: Every job is one this job waits for
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          # The jobs of the workflow: whatever is written at two spaces under `jobs:`,
+          # however it is spelled. A line this does not read as a name fails the step.
+          written=$(sed -n '/^jobs:/,$p' .github/workflows/ci.yml |
+            sed -n 's/^  \([^ #].*\)$/\1/p' | sed 's/:[[:space:]]*\(#.*\)\{0,1\}$//' |
+            grep -v '^ci-done$' | sort)
+          waited=$(jq --raw-output 'keys[]' <<<"$NEEDS" | sort)
+          diff <(echo "$written") <(echo "$waited")
+      - name: Every job passed, or was skipped by the plan
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: .github/scripts/verdict.sh
+      # A pull request that passed with every job of the build keeps the name of the
+      # tree it tested, its test merge's. A push to main whose tree is that one need
+      # not run those jobs again (plan.sh). Without the record main runs them, so a
+      # failure to keep it does not fail the verdict.
+      - name: The tree this run passed
+        id: tree
+        continue-on-error: true
+        if: >-
+          ${{ github.event_name == 'pull_request'
+          && !contains(needs.plan.outputs.skip, '"web-build"')
+          && !contains(needs.plan.outputs.skip, '"web-e2e"')
+          && !contains(needs.plan.outputs.skip, '"web-e2e-apple"')
+          && !contains(needs.plan.outputs.skip, '"web-e2e-live"') }}
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "$tree" >"$RUNNER_TEMP/tested-tree"
+          echo "name=tested-$tree" >>"$GITHUB_OUTPUT"
+      - if: ${{ steps.tree.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.tree.outputs.name }}
+          path: ${{ runner.temp }}/tested-tree
+          if-no-files-found: error
+          # Long enough for a pull request to be merged after its last run.
+          retention-days: 14

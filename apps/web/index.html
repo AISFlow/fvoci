@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <!-- The path the app is served under. The server fills it in; the router reads it. -->
+    <meta name="fvoci:base" content="{{.BaseURL}}" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      Before anything is drawn: the theme and density the reader last had
+      on this device (lib/display.svelte.ts remembers them under this key), so
+      that a dark screen does not start as a light one. It runs inline because
+      it has to run before the style sheet paints; under a content security
+      policy the server allows it by its hash. The two colours are the page colours of the two
+      themes; a test holds them to the tokens.
+    -->
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var saved = {};
+        try {
+          saved = JSON.parse(localStorage.getItem('fvoci:display') || '{}') || {};
+        } catch (error) {}
+        var asks = function (query) {
+          return typeof matchMedia === 'function' && matchMedia(query).matches;
+        };
+        var dark =
+          saved.theme === 'dark' ||
+          (saved.theme !== 'light' && asks('(prefers-color-scheme: dark)'));
+        root.classList.toggle('dark', dark);
+        root.style.colorScheme = dark ? 'dark' : 'light';
+        root.dataset.density =
+          saved.density === 'compact' || saved.density === 'comfortable'
+            ? saved.density
+            : asks('(pointer: coarse)')
+              ? 'comfortable'
+              : 'compact';
+        var bar = document.querySelector('meta[name="theme-color"]');
+        if (bar) bar.setAttribute('content', dark ? '#0a0a0a' : '#ffffff');
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <title>fvoci</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+# actionlint 1.7.12 does not know the form `uses: $/…`, by which a workflow names an
+# action of its own repository at its own commit (GitHub, July 2026). Remove this once
+# a release of actionlint does.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'specifying action "\$/.+" in invalid format because ref is missing'

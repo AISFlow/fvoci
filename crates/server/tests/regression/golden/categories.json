@@ -1,0 +1,954 @@
+[
+  {
+    "name": "create board Filed board",
+    "request": "POST /api/v1/w/<id:1>/boards as cat-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Filed board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create board Other board",
+    "request": "POST /api/v1/w/<id:1>/boards as cat-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Other board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "list: default only",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 10,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "list: other user",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:7>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:8>",
+        "name": "Boards",
+        "sortOrder": 10,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:9>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "create",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "collapsed": false,
+      "createdAt": "<ts>",
+      "id": "<id:10>",
+      "name": "Projects",
+      "sortOrder": 10,
+      "type": "custom",
+      "updatedAt": "<ts>",
+      "userId": "<id:2>",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create second",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "collapsed": true,
+      "createdAt": "<ts>",
+      "id": "<id:11>",
+      "name": "Archive",
+      "sortOrder": 10,
+      "type": "custom",
+      "updatedAt": "<ts>",
+      "userId": "<id:2>",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create: no name",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the category has no name",
+      "errors": [
+        {
+          "detail": "the category has no name",
+          "pointer": "/name",
+          "reason": "required"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: for another user",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "a user makes categories for themselves only",
+      "errors": [
+        {
+          "detail": "a user makes categories for themselves only",
+          "pointer": "/userId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "create: for another workspace",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "workspaceId mismatch",
+      "errors": [
+        {
+          "detail": "workspaceId mismatch",
+          "pointer": "/workspaceId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: bad type",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "type must be \"system\" or \"custom\"",
+      "errors": [
+        {
+          "detail": "type must be \"system\" or \"custom\"",
+          "pointer": "/type",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: malformed body",
+    "request": "POST /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing an object at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "list",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:10>",
+        "name": "Projects",
+        "sortOrder": 20,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "update",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10> as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "collapsed": true,
+      "createdAt": "<ts>",
+      "id": "<id:10>",
+      "name": "Projects 2",
+      "sortOrder": 20,
+      "type": "custom",
+      "updatedAt": "<ts>",
+      "userId": "<id:2>",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "update: id mismatch",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10> as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the category of the body is not the one of the path",
+      "errors": [
+        {
+          "detail": "the category of the body is not the one of the path",
+          "pointer": "/id",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "update: other user",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10> as cat-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "update: unknown category",
+    "request": "PUT /api/v1/w/<id:1>/categories/unknown-category as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "update: system category",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:6> as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "collapsed": false,
+      "createdAt": "<ts>",
+      "id": "<id:6>",
+      "name": "Boards",
+      "sortOrder": 30,
+      "type": "system",
+      "updatedAt": "<ts>",
+      "userId": "<id:2>",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "file a board",
+    "request": "POST /api/v1/w/<id:1>/categories/<id:10>/containers/<id:3> as cat-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "file the second board",
+    "request": "POST /api/v1/w/<id:1>/categories/<id:10>/containers/<id:4> as cat-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "list after filing",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": true,
+        "containerMetadata": [
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:10>",
+        "name": "Projects 2",
+        "sortOrder": 20,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "hide",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/containers/<id:3>/hide as cat-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "hide: other user",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/containers/<id:3>/hide as cat-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list after hiding",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": true,
+        "containerMetadata": [
+          {
+            "containerId": "<id:3>",
+            "hidden": true
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:10>",
+        "name": "Projects 2",
+        "sortOrder": 20,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "unhide",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/containers/<id:3>/unhide as cat-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "reorder boards",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/container-order as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      "<id:4>",
+      "<id:3>"
+    ]
+  },
+  {
+    "name": "reorder boards: missing one",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/container-order as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the new order must list every board of the category once: it has 1, the category has 2",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "reorder boards: unknown board",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/container-order as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the new order names unknown, which is no board of the category",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "reorder boards: other user",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/container-order as cat-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old path: reorder boards",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10>/boards/reorder as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old path: reorder categories",
+    "request": "PUT /api/v1/w/<id:1>/categories/reorder as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "reorder categories",
+    "request": "PUT /api/v1/w/<id:1>/category-order as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      "<id:11>",
+      "<id:10>",
+      "<id:6>"
+    ]
+  },
+  {
+    "name": "reorder categories: missing one",
+    "request": "PUT /api/v1/w/<id:1>/category-order as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the new order must list every category once: it has 2, the user has 3",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "reorder categories: unknown id",
+    "request": "PUT /api/v1/w/<id:1>/category-order as cat-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the new order names unknown, which is none of the user's categories",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "list after reorder",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": true,
+        "containerMetadata": [
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:10>",
+        "name": "Projects 2",
+        "sortOrder": 20,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "delete: other user",
+    "request": "DELETE /api/v1/w/<id:1>/categories/<id:10> as cat-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete: system category",
+    "request": "DELETE /api/v1/w/<id:1>/categories/<id:6> as cat-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "a system category cannot be deleted",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "delete: unknown category",
+    "request": "DELETE /api/v1/w/<id:1>/categories/unknown-category as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete",
+    "request": "DELETE /api/v1/w/<id:1>/categories/<id:10> as cat-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "delete: again",
+    "request": "DELETE /api/v1/w/<id:1>/categories/<id:10> as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "update: deleted category",
+    "request": "PUT /api/v1/w/<id:1>/categories/<id:10> as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list at the end",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "file a board: other user's category",
+    "request": "POST /api/v1/w/<id:1>/categories/<id:11>/containers/<id:4> as cat-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list after the attempt on another user's category",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "file a board: unknown category",
+    "request": "POST /api/v1/w/<id:1>/categories/unknown-category/containers/<id:4> as cat-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "category not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list after filing into an unknown category",
+    "request": "GET /api/v1/w/<id:1>/categories as cat-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "collapsed": true,
+        "containerMetadata": [],
+        "createdAt": "<ts>",
+        "id": "<id:11>",
+        "name": "Archive",
+        "sortOrder": 10,
+        "type": "custom",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "collapsed": false,
+        "containerMetadata": [
+          {
+            "containerId": "<id:5>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:4>",
+            "hidden": false
+          },
+          {
+            "containerId": "<id:3>",
+            "hidden": false
+          }
+        ],
+        "createdAt": "<ts>",
+        "id": "<id:6>",
+        "name": "Boards",
+        "sortOrder": 30,
+        "type": "system",
+        "updatedAt": "<ts>",
+        "userId": "<id:2>",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  }
+]

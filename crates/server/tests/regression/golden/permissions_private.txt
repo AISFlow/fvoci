@@ -1,0 +1,55 @@
+# Status code by route and caller, on a board of the private type.
+route                                 anonymous   outsider     viewer  commenter     editor      admin
+board: get                                  401        404        200        200        200        200
+board: patch title                          401        404        403        403        200        200
+board: patch properties                     401        404        403        403        200        200
+board: patch visibility                     401        404        403        403        403        200
+board: patch minimum role                   401        404        403        403        403        200
+board: delete                               401        404        403        403        403        204
+board: restore                              401        404        403        403        403        200
+board: duplicate                            401        404        201        201        201        201
+board: duplicate as template                401        404        201        201        201        201
+board: metadata                             404        404        404        404        404        404
+members: list                               401        404        200        200        200        200
+members: add viewer                         401        404        403        403        403        200
+members: add admin                          401        404        403        403        403        200
+members: update                             401        404        403        403        403        200
+members: delete another                     401        404        403        403        403        204
+members: join                               401        404        403        403        403        403
+members: leave                              401        404        204        204        204        204
+blocks: list                                401        404        200        200        200        200
+blocks: list all                            401        404        200        200        200        200
+blocks: list by parent                      401        404        200        200        200        200
+blocks: insert card                         401        404        400        400        400        400
+blocks: insert view                         401        404        403        403        201        201
+blocks: insert comment                      401        404        403        201        201        201
+blocks: patch card                          401        404        403        403        204        204
+blocks: patch another's comment             401        404        403        403        403        204
+blocks: patch several                       401        404        403        403        204        204
+blocks: delete card                         401        404        403        403        204        204
+blocks: delete view                         401        404        403        403        204        204
+blocks: delete another's comment            401        404        403        403        403        204
+blocks: restore                             401        404        403        403        200        200
+blocks: duplicate                           401        404        403        403        201        201
+containers-and-blocks: patch                401        404        403        403        200        200
+containers-and-blocks: delete               401        404        403        403        403        204
+cards: create                               401        404        403        403        201        201
+cards: list                                 401        404        200        200        200        200
+cards: get                                  401        404        200        200        200        200
+cards: patch                                401        404        403        403        200        200
+public-link: get                            401        404        403        403        403        200
+public-link: post                           401        404        403        403        403        200
+subscriptions: create                       401        404        201        201        201        201
+subscriptions: delete                       401        404        204        204        204        204
+files: upload                               401        404        403        403        201        201
+files: download                             401        404        200        200        200        200
+files: info                                 401        404        200        200        200        200
+uploads: open                               401        404        403        403        201        201
+archive: export board                       401        404        200        200        200        200
+archive: open an upload                     401        201        201        201        201        201
+archive: export workspace                   401        200        200        200        200        200
+categories: list                            401        200        200        200        200        200
+workspace: boards                           401        200        200        200        200        200
+workspace: templates                        401        200        200        200        200        200
+workspace: search                           401        200        200        200        200        200
+workspace: users                            401        200        200        200        200        200

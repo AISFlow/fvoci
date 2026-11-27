@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "skills": {
+    "rust-best-practices": {
+      "source": "morganlinton/BeautifulRust",
+      "sourceType": "github",
+      "skillPath": "skills/rust-best-practices/SKILL.md",
+      "computedHash": "313bea7637531b7f6fe60798bed2108e49594914d4db44e303b7d2312868b3d1"
+    },
+    "rust-review": {
+      "source": "morganlinton/BeautifulRust",
+      "sourceType": "github",
+      "skillPath": "skills/rust-review/SKILL.md",
+      "computedHash": "a12087e797445bac38dc7c0b3e7441cb515fe7decb31ed983fcf24008c0523c1"
+    },
+    "svelte-code-writer": {
+      "source": "sveltejs/ai-tools",
+      "sourceType": "github",
+      "skillPath": "tools/skills/svelte-code-writer/SKILL.md",
+      "computedHash": "8eccb2e23091d482aeaca1c95db6c5aa34d055ac2d0c9797efbbecbe5a8e4fd0"
+    },
+    "svelte-core-bestpractices": {
+      "source": "sveltejs/ai-tools",
+      "sourceType": "github",
+      "skillPath": "tools/skills/svelte-core-bestpractices/SKILL.md",
+      "computedHash": "32070b91f54f92dba3f6e1739d82bf944c14e7a4a75cfe609a59bf1117c34338"
+    }
+  }
+}

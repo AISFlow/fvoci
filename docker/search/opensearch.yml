@@ -1,0 +1,26 @@
+# OpenSearch for fvoci: one node, HTTPS, the users of the security plugin only.
+# The files under tls/ are made by search-entrypoint.sh at the first start.
+cluster.name: fvoci
+network.host: 0.0.0.0
+# One node: the transport between nodes stays on this one.
+transport.host: _local_
+discovery.type: single-node
+
+plugins.security.ssl.transport.pemcert_filepath: tls/node.pem
+plugins.security.ssl.transport.pemkey_filepath: tls/node-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: tls/ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: tls/node.pem
+plugins.security.ssl.http.pemkey_filepath: tls/node-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: tls/ca.pem
+plugins.security.nodes_dn:
+  - "CN=search"
+# The users, roles and their mapping in config/opensearch-security/ become the
+# security index at the first start; at every start the entry sets fvoci's again
+# through the security API with the administrator's certificate.
+plugins.security.allow_default_init_securityindex: true
+plugins.security.authcz.admin_dn:
+  - "CN=fvoci-admin"
+plugins.security.restapi.roles_enabled: []
+plugins.security.audit.type: noop

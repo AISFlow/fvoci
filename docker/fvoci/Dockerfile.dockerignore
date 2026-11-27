@@ -1,0 +1,37 @@
+# Build context filter for docker/fvoci/Dockerfile (the context is the repository root).
+# Everything is left out except what the image is built from.
+*
+!Cargo.toml
+!Cargo.lock
+!clippy.toml
+!deny.toml
+!crates/
+!xtask/
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!apps/web/
+!vendor/
+!docker/fvoci/config.json
+!docker/fvoci/entrypoint.sh
+
+# What a checkout builds and installs locally is built anew in the image: a stale
+# copy would hide a build that fails.
+**/node_modules
+**/target
+apps/web/dist
+apps/web/storybook-static
+apps/web/test-results
+apps/web/playwright-report
+apps/web/src/styles/fonts
+apps/web/src/lib/i18n/paraglide
+apps/web/e2e
+apps/web/e2e-live
+apps/web/stories
+apps/web/tests
+apps/web/docs
+apps/web/.storybook
+# Local settings and secrets, and logs, are never sent.
+**/.env
+**/.env.*
+**/*.log

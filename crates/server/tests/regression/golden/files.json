@@ -1,0 +1,459 @@
+[
+  {
+    "name": "create board Board with files",
+    "request": "POST /api/v1/w/<id:1>/boards as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Board with files",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "upload",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "fileId": "<secret:1>.png"
+    }
+  },
+  {
+    "name": "uploaded name has the extension",
+    "request": "(observation)",
+    "status": 0,
+    "body": true
+  },
+  {
+    "name": "upload: jpeg extension",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "fileId": "<secret:2>.jpg"
+    }
+  },
+  {
+    "name": "upload: text",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "fileId": "<secret:3>.txt"
+    }
+  },
+  {
+    "name": "upload: wrong field",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the request has no part named `file` with a file name",
+      "errors": [
+        {
+          "detail": "the request has no part named `file` with a file name",
+          "parameter": "file",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "upload: non-member",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "upload: anonymous",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "upload: unknown board",
+    "request": "POST /api/v1/w/<id:1>/containers/unknown-board/files as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "upload: not multipart",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/files as files-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the body must be a multipart/form-data form",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "old path: upload",
+    "request": "POST /api/v1/teams/<id:1>/<id:3>/files as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old path: download",
+    "request": "GET /api/v1/files/teams/<id:1>/<id:3>/<secret:1>.png as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old path: info",
+    "request": "GET /api/v1/files/teams/<id:1>/<id:3>/<secret:1>.png/info as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "download",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png as files-alice",
+    "status": 200,
+    "content_type": "application/octet-stream",
+    "headers": {
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-cache",
+      "Content-Disposition": "attachment;filename=\"<secret:1>.png\"; filename*=UTF-8''pixel.png",
+      "Content-Length": "67",
+      "Content-Security-Policy": "sandbox; frame-ancestors 'none'",
+      "Content-Type": "application/octet-stream",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "body": "<67 bytes>"
+  },
+  {
+    "name": "download: text",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:3>.txt as files-alice",
+    "status": 200,
+    "content_type": "application/octet-stream",
+    "headers": {
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-cache",
+      "Content-Disposition": "attachment;filename=\"<secret:3>.txt\"; filename*=UTF-8''notes.txt",
+      "Content-Length": "5",
+      "Content-Security-Policy": "sandbox; frame-ancestors 'none'",
+      "Content-Type": "application/octet-stream",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "body": "<5 bytes>"
+  },
+  {
+    "name": "download: range",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png as files-alice",
+    "status": 206,
+    "content_type": "application/octet-stream",
+    "headers": {
+      "Content-Length": "8",
+      "Content-Range": "bytes 0-7/67"
+    },
+    "body": "<8 bytes>"
+  },
+  {
+    "name": "download: range past the end",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png as files-alice",
+    "status": 416,
+    "content_type": "application/problem+json",
+    "headers": {
+      "Content-Range": "bytes */67"
+    },
+    "body": {
+      "detail": "the range is not in the file",
+      "errors": [
+        {
+          "detail": "the range is not in the file",
+          "header": "Range",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 416,
+      "title": "Range not satisfiable",
+      "type": "/problems/range-not-satisfiable"
+    }
+  },
+  {
+    "name": "download: non-member",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png as files-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "download: anonymous",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "download: unknown file",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/7unknownfile.png as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "file not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "download: traversal",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/..%2F..%2Fconfig.json as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "file not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "info",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png/info as files-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "createdAt": "<ts>",
+      "extension": ".png",
+      "id": "<id:4>",
+      "name": "pixel.png",
+      "size": 67
+    }
+  },
+  {
+    "name": "info: non-member",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/<secret:1>.png/info as files-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "info: unknown file",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/files/7unknownfile.png/info as files-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "file not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "share",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/public-link as files-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "enabled": true,
+      "token": "<secret>",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "download with the read token",
+    "request": "GET /api/v1/shared/<id:3>/files/<secret:1>.png?readToken=<secret:4> as anonymous",
+    "status": 200,
+    "content_type": "application/octet-stream",
+    "headers": {
+      "Content-Type": "application/octet-stream"
+    },
+    "body": "<67 bytes>"
+  },
+  {
+    "name": "download with a wrong read token",
+    "request": "GET /api/v1/shared/<id:3>/files/<secret:1>.png?readToken=wrong as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "create card for attachment",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "",
+      "id": "<id:5>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card with image",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "insert an attachment block",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as files-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "fileId": "<secret:1>.png"
+        },
+        "id": "<id:6>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:5>",
+        "title": "",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "delete the image block",
+    "request": "DELETE /api/v1/w/<id:1>/boards/<id:3>/blocks/<id:6> as files-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "blocks after deleting the image",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:3>/blocks as files-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "icon": "",
+          "isTemplate": false,
+          "properties": {}
+        },
+        "id": "<id:5>",
+        "modifiedBy": "<id:2>",
+        "number": 1,
+        "parentId": "",
+        "title": "Card with image",
+        "type": "card",
+        "updatedAt": "<ts>"
+      }
+    ]
+  }
+]

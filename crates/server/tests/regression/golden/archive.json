@@ -1,0 +1,628 @@
+[
+  {
+    "name": "create board Exported board",
+    "request": "POST /api/v1/w/<id:1>/boards as arch-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "p1",
+          "name": "Status",
+          "options": [],
+          "type": "select"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "to export",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Exported board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create exported card",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as arch-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "x",
+      "id": "<id:4>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Exported card",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "insert content",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as arch-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {},
+        "id": "<id:5>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:4>",
+        "title": "Exported text",
+        "type": "comment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "fileId": "<secret:1>.png"
+        },
+        "id": "<id:6>",
+        "modifiedBy": "<id:2>",
+        "parentId": "<id:4>",
+        "title": "",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:3>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "viewType": "table"
+        },
+        "id": "<id:7>",
+        "modifiedBy": "<id:2>",
+        "parentId": "",
+        "title": "Exported view",
+        "type": "view",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "export status and type",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      200,
+      "application/octet-stream"
+    ]
+  },
+  {
+    "name": "export content",
+    "request": "(observation)",
+    "status": 0,
+    "body": {
+      "lines": [
+        {
+          "data": {
+            "cardProperties": [
+              {
+                "id": "p1",
+                "name": "Status",
+                "options": [],
+                "type": "select"
+              }
+            ],
+            "createdAt": "<ts>",
+            "createdBy": "<id:2>",
+            "description": "to export",
+            "fileNames": {
+              "<secret:1>.png": "pixel.png"
+            },
+            "icon": "",
+            "id": "<id:3>",
+            "isBuiltin": false,
+            "isTemplate": false,
+            "kind": "board",
+            "minimumRole": "editor",
+            "modifiedBy": "<id:2>",
+            "properties": {},
+            "showDescription": false,
+            "templateVersion": 0,
+            "title": "Exported board",
+            "updatedAt": "<ts>",
+            "visibility": "private",
+            "workspaceId": "<id:1>"
+          },
+          "type": "container"
+        },
+        {
+          "data": {
+            "body": null,
+            "containerId": "<id:3>",
+            "createdAt": "<ts>",
+            "createdBy": "<id:2>",
+            "fields": {
+              "icon": "x",
+              "isTemplate": false,
+              "properties": {}
+            },
+            "id": "<id:4>",
+            "modifiedBy": "<id:2>",
+            "number": 1,
+            "parentId": "",
+            "title": "Exported card",
+            "type": "card",
+            "updatedAt": "<ts>"
+          },
+          "type": "block"
+        },
+        {
+          "data": {
+            "body": null,
+            "containerId": "<id:3>",
+            "createdAt": "<ts>",
+            "createdBy": "<id:2>",
+            "fields": {},
+            "id": "<id:5>",
+            "modifiedBy": "<id:2>",
+            "parentId": "<id:4>",
+            "title": "Exported text",
+            "type": "comment",
+            "updatedAt": "<ts>"
+          },
+          "type": "block"
+        },
+        {
+          "data": {
+            "body": null,
+            "containerId": "<id:3>",
+            "createdAt": "<ts>",
+            "createdBy": "<id:2>",
+            "fields": {
+              "fileId": "<secret:1>.png"
+            },
+            "id": "<id:6>",
+            "modifiedBy": "<id:2>",
+            "parentId": "<id:4>",
+            "title": "",
+            "type": "attachment",
+            "updatedAt": "<ts>"
+          },
+          "type": "block"
+        },
+        {
+          "data": {
+            "body": null,
+            "containerId": "<id:3>",
+            "createdAt": "<ts>",
+            "createdBy": "<id:2>",
+            "fields": {
+              "viewType": "table"
+            },
+            "id": "<id:7>",
+            "modifiedBy": "<id:2>",
+            "parentId": "",
+            "title": "Exported view",
+            "type": "view",
+            "updatedAt": "<ts>"
+          },
+          "type": "block"
+        },
+        {
+          "data": {
+            "containerId": "<id:3>",
+            "role": "admin",
+            "userId": "<id:2>"
+          },
+          "type": "containerMember"
+        }
+      ],
+      "names": [
+        "<id:3>/<secret:1>.png",
+        "<id:3>/container.jsonl",
+        "version.json"
+      ],
+      "version": {
+        "date": "<ts>",
+        "version": 1
+      }
+    }
+  },
+  {
+    "name": "export: non-member",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/archive/export as arch-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "export: anonymous",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/archive/export as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "export: unknown board",
+    "request": "GET /api/v1/w/<id:1>/containers/unknown-board/archive/export as arch-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "workspace export status and type",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      200,
+      "application/octet-stream"
+    ]
+  },
+  {
+    "name": "workspace export entries",
+    "request": "(observation)",
+    "status": 0,
+    "body": 7
+  },
+  {
+    "name": "import",
+    "request": "POST /api/v1/w/<id:1>/archive/import as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerIds": [
+        "<id:8>"
+      ],
+      "format": "fvoci",
+      "imported": {
+        "boards": 1,
+        "cards": 1,
+        "comments": 1,
+        "courses": 0,
+        "files": 1,
+        "pages": 0,
+        "units": 0,
+        "wikis": 0
+      },
+      "membersLeftOut": 0,
+      "skipped": [],
+      "warnings": []
+    }
+  },
+  {
+    "name": "import: anonymous",
+    "request": "POST /api/v1/w/<id:1>/archive/uploads as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "import: not an archive",
+    "request": "POST /api/v1/w/<id:1>/archive/import as arch-bob",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "zip: invalid archive",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "import: no such upload",
+    "request": "POST /api/v1/w/<id:1>/archive/import as arch-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "upload not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "boards after import",
+    "request": "GET /api/v1/w/<id:1>/boards as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "cardProperties": [
+          {
+            "id": "<id:9>",
+            "name": "Progress",
+            "options": [
+              {
+                "color": "gray",
+                "id": "<id:10>",
+                "label": "To read"
+              },
+              {
+                "color": "blue",
+                "id": "<id:11>",
+                "label": "Trying it"
+              },
+              {
+                "color": "green",
+                "id": "<id:12>",
+                "label": "Done it"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:13>",
+            "name": "Topic",
+            "options": [
+              {
+                "color": "blue",
+                "id": "<id:14>",
+                "label": "Boards"
+              },
+              {
+                "color": "purple",
+                "id": "<id:15>",
+                "label": "Writing"
+              },
+              {
+                "color": "orange",
+                "id": "<id:16>",
+                "label": "Files"
+              },
+              {
+                "color": "green",
+                "id": "<id:17>",
+                "label": "Wiki"
+              },
+              {
+                "color": "pink",
+                "id": "<id:18>",
+                "label": "Together"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:19>",
+            "name": "Day",
+            "options": [],
+            "type": "date"
+          },
+          {
+            "id": "<id:20>",
+            "name": "Minutes",
+            "options": [],
+            "type": "number"
+          },
+          {
+            "id": "<id:21>",
+            "name": "Read first",
+            "options": [],
+            "type": "relation"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+        "doneWhen": {
+          "optionIds": [
+            "<id:12>"
+          ],
+          "propertyId": "<id:9>"
+        },
+        "dueDatePropertyId": "<id:19>",
+        "icon": "👋",
+        "id": "<id:23>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:22>",
+        "properties": {},
+        "showDescription": true,
+        "templateVersion": 13,
+        "title": "Getting started with fvoci",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [
+          {
+            "id": "p1",
+            "name": "Status",
+            "options": [],
+            "type": "select"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "description": "to export",
+        "icon": "",
+        "id": "<id:8>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:22>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Exported board",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "imported blocks",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:8>/blocks as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:8>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "fields": {
+          "icon": "x",
+          "isTemplate": false,
+          "properties": {}
+        },
+        "id": "<id:24>",
+        "modifiedBy": "<id:22>",
+        "number": 1,
+        "parentId": "",
+        "title": "Exported card",
+        "type": "card",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:8>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "fields": {},
+        "id": "<id:25>",
+        "modifiedBy": "<id:22>",
+        "parentId": "<id:24>",
+        "title": "Exported text",
+        "type": "comment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:8>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "fields": {
+          "fileId": "<secret:2>.png"
+        },
+        "id": "<id:26>",
+        "modifiedBy": "<id:22>",
+        "parentId": "<id:24>",
+        "title": "",
+        "type": "attachment",
+        "updatedAt": "<ts>"
+      },
+      {
+        "body": null,
+        "containerId": "<id:8>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "fields": {
+          "viewType": "table"
+        },
+        "id": "<id:27>",
+        "modifiedBy": "<id:22>",
+        "parentId": "",
+        "title": "Exported view",
+        "type": "view",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "imported members",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:8>/members as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:8>",
+        "role": "admin",
+        "userId": "<id:2>"
+      },
+      {
+        "containerId": "<id:8>",
+        "role": "admin",
+        "userId": "<id:22>"
+      }
+    ]
+  },
+  {
+    "name": "imported file",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:8>/files/<secret:2>.png as arch-bob",
+    "status": 200,
+    "content_type": "application/octet-stream",
+    "body": "<67 bytes>"
+  },
+  {
+    "name": "import: legacy format",
+    "request": "POST /api/v1/w/<id:1>/archive/import as arch-bob",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "zip: invalid archive",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "board titles after legacy import",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      "Getting started with fvoci",
+      "Exported board"
+    ]
+  }
+]

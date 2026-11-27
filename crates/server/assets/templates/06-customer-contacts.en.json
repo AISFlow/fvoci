@@ -1,0 +1,572 @@
+{
+  "key": "customer-contacts",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "92b511de-7777-5737-837e-7f4d8c182371",
+    "title": "Customer contacts",
+    "description": "Keeps what was said to each customer, and when to call next, in one place. The table sums the expected amounts, and the board by stage hides the deals that are over. Every name and address in the examples is made up.",
+    "icon": "🤝",
+    "showDescription": true,
+    "dueDatePropertyId": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+    "doneWhen": {
+      "propertyId": "c98ec0be-784b-5243-931d-b2989975ff1c",
+      "optionIds": [
+        "1b78a142-f648-5a60-8a86-16933769f012",
+        "4d19697b-67b2-59c3-beb5-9b0385393563"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "c98ec0be-784b-5243-931d-b2989975ff1c",
+        "name": "Stage",
+        "type": "select",
+        "options": [
+          {
+            "id": "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+            "label": "Lead",
+            "color": "gray"
+          },
+          {
+            "id": "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+            "label": "Talking",
+            "color": "blue"
+          },
+          {
+            "id": "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+            "label": "Proposal sent",
+            "color": "purple"
+          },
+          {
+            "id": "1b78a142-f648-5a60-8a86-16933769f012",
+            "label": "Won",
+            "color": "green"
+          },
+          {
+            "id": "4d19697b-67b2-59c3-beb5-9b0385393563",
+            "label": "Lost",
+            "color": "brown"
+          }
+        ]
+      },
+      {
+        "id": "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+        "name": "Contact name",
+        "type": "text",
+        "options": []
+      },
+      {
+        "id": "6bf8a46f-82b8-5fcf-a610-5108159360a4",
+        "name": "Email",
+        "type": "email",
+        "options": []
+      },
+      {
+        "id": "6895da85-1998-5dcc-aa54-f30e11864d03",
+        "name": "Phone",
+        "type": "phone",
+        "options": []
+      },
+      {
+        "id": "08bbbef5-3aa8-5779-8352-f3ecb950a259",
+        "name": "Website",
+        "type": "url",
+        "options": []
+      },
+      {
+        "id": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+        "name": "Expected amount (thousands)",
+        "type": "number",
+        "options": []
+      },
+      {
+        "id": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+        "name": "Next contact",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "fd8c3232-5b88-5e65-af78-737569871aed",
+        "name": "Our owner",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "cdf13dc7-96d8-5df6-8ac4-81985e231df1",
+        "name": "Last changed at",
+        "type": "updatedTime",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "f951de4f-b35f-5f31-9378-c0b641b07cf5",
+      "type": "view",
+      "title": "All customers",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "sum",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": "earliest"
+        },
+        "columnWidths": {
+          "__title": 200,
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": 220
+        },
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "c98ec0be-784b-5243-931d-b2989975ff1c",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4",
+          "6895da85-1998-5dcc-aa54-f30e11864d03",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+          "fd8c3232-5b88-5e65-af78-737569871aed",
+          "cdf13dc7-96d8-5df6-8ac4-81985e231df1"
+        ]
+      }
+    },
+    {
+      "id": "877bf91d-ce73-52c5-8c1f-afa58c4387e5",
+      "type": "view",
+      "title": "By stage",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": ["", "4d19697b-67b2-59c3-beb5-9b0385393563"],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+          "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+          "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+          "1b78a142-f648-5a60-8a86-16933769f012"
+        ],
+        "shownProperties": [
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1"
+        ],
+        "groupBy": "c98ec0be-784b-5243-931d-b2989975ff1c"
+      }
+    },
+    {
+      "id": "de6b210d-e08f-5a91-ab2a-20bce6f87e4f",
+      "type": "view",
+      "title": "Open deals",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "sum"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "c98ec0be-784b-5243-931d-b2989975ff1c",
+              "condition": "notIncludes",
+              "values": [
+                "1b78a142-f648-5a60-8a86-16933769f012",
+                "4d19697b-67b2-59c3-beb5-9b0385393563"
+              ]
+            },
+            {
+              "propertyId": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+              "condition": "isNotEmpty",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "06a33a0e-b88f-5e48-9e8a-683f27986949",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "c98ec0be-784b-5243-931d-b2989975ff1c",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1",
+          "fd8c3232-5b88-5e65-af78-737569871aed"
+        ]
+      }
+    },
+    {
+      "id": "3d41d244-e566-507f-8e8b-0293edfca027",
+      "type": "view",
+      "title": "Days to call",
+      "fields": {
+        "cardOrder": [
+          "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+          "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+          "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+          "b8374612-f12d-51f2-add5-b969215f3356",
+          "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "c98ec0be-784b-5243-931d-b2989975ff1c"],
+        "dateProperty": "ad1093d4-e23c-5f26-8714-3b26df6cb0b1"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "eeaecdaf-abe3-5c1e-8561-455aeda25ac7",
+      "type": "card",
+      "title": "Customer A",
+      "fields": {
+        "icon": "🏢",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "edfd6766-e5a3-5595-afdf-964f6ef8da9d",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "Purchasing",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "buyer.a@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "555-0101",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/a",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "1200",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-03"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Log"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "26 November: sent the introduction."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "30 November: asked what 30 people would cost."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Next"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Send a quote"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "34fa1e65-2064-54ff-a5b5-50a4d0264de1",
+      "type": "card",
+      "title": "Customer B",
+      "fields": {
+        "icon": "🏬",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "cffc2417-ac86-5815-acdb-5ed0b74bf624",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "Head of operations",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "ops.b@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "555-0102",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/b",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "3400",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-05"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "What we want to know most is whether we can move over from what we use now."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Told them that importing does it. A demonstration is to be arranged."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c37d24ca-4e08-5554-a6b3-9c31a1c50976",
+      "type": "card",
+      "title": "Customer C",
+      "fields": {
+        "icon": "🏭",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "a1c05e25-1bbc-5252-a408-e83f31a73fd2",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "Owner",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "owner.c@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "555-0103",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/c",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "500",
+          "ad1093d4-e23c-5f26-8714-3b26df6cb0b1": {
+            "from": "2026-12-10"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Wrote in after reading the newsletter. Five people would use it."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "b8374612-f12d-51f2-add5-b969215f3356",
+      "type": "card",
+      "title": "Customer D",
+      "fields": {
+        "icon": "🏫",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "1b78a142-f648-5a60-8a86-16933769f012",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "Office manager",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "office.d@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "555-0104",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/d",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "2100"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Signed. Introduced by "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "eeaecdaf-abe3-5c1e-8561-455aeda25ac7"
+                }
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Receive the contract"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Set up their accounts"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "1e83fc81-5ea1-521b-b5b3-74d5e1c60b52",
+      "type": "card",
+      "title": "Customer E",
+      "fields": {
+        "icon": "🏪",
+        "isTemplate": false,
+        "properties": {
+          "c98ec0be-784b-5243-931d-b2989975ff1c": "4d19697b-67b2-59c3-beb5-9b0385393563",
+          "8f0b0a71-6d15-51dc-8ea1-f4aac8c80783": "Purchasing",
+          "6bf8a46f-82b8-5fcf-a610-5108159360a4": "buyer.e@example.com",
+          "6895da85-1998-5dcc-aa54-f30e11864d03": "555-0105",
+          "08bbbef5-3aa8-5779-8352-f3ecb950a259": "https://example.com/e",
+          "06a33a0e-b88f-5e48-9e8a-683f27986949": "900"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "No budget this year. To be looked at again next year."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

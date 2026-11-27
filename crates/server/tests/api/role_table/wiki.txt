@@ -1,0 +1,52 @@
+# Status code by operation and person, on a wiki. Columns: see role_table.rs.
+operation                      admin      editor   commenter      viewer      member member@open       guest  guest@open    ws-admin   org-admin    other-ws
+container: get                   200         200         200         200         404         200         200         404         200        404=        404=
+container: patch title           200         200         403         403         404         403         200         404         403        404=        404=
+container: patch visibility         200         403         403         403         404         403         403         404         403        404=        404=
+container: change visibility         200         403         403         403         404         403         403         404         403        404=        404=
+container: delete                204         403         403         403         404         403         403         404         204        404=        404=
+container: restore               200         403         403         403         404         404         403         404         200        404=        404=
+trash: list                     200+        200-        200-        200-        200-        200-         404         404        200+        404=        200-
+members: list                    200         200         200         200         404         200         200         404         200        404=        404=
+members: add                     200         403         403         403         404         403         403         404         200        404=        404=
+members: update                  200         403         403         403         404         403         403         404         200        404=        404=
+members: remove                  204         403         403         403         404         403         403         404         204        404=        404=
+members: join                    403         403         403         403         404         200         403         404         403        404=        404=
+members: leave                   409         204         204         204         404         204         204         404         404        404=        404=
+teams: list                      200         200         200         200         404         200         404         404         200        404=        404=
+teams: set                       204         403         403         403         404         403         404         404         204        404=        404=
+teams: remove                    204         403         403         403         404         403         404         404         204        404=        404=
+public-link: get                 200         403         403         403         404         403         403         404         404        404=        404=
+public-link: set                 200         403         403         403         404         403         403         404         404        404=        404=
+files: upload                    201         201         403         403         404         403         201         404         404        404=        404=
+files: get                       200         200         200         200         404         200         200         404         404        404=        404=
+files: info                      200         200         200         200         404         200         200         404         404        404=        404=
+file versions: list              200         200         200         200         404         200         200         404         404        404=        404=
+file versions: get               200         200         200         200         404         200         200         404         404        404=        404=
+file versions: add               409         409         403         403         404         403         409         404         404        404=        404=
+file versions: restore           200         200         403         403         404         403         200         404         404        404=        404=
+uploads: open                    201         201         403         403         404         403         201         404         404        404=        404=
+sidebar: category                204         204         204         204         404         204         404         404         204        404=        404=
+sidebar: hide                    204         204         204         204         404         204         404         404         204        404=        404=
+sidebar: unhide                  204         204         204         204         404         204         404         404         204        404=        404=
+references: to                   200         200         200         200         404         200         200         404         404        404=        404=
+references: resolve             200+        200+        200+        200+        200-        200+        200+        200-        200-        404=        200-
+pages: tree                      200         200         200         200         404         200         200         404         404        404=        404=
+pages: get                       200         200         200         200         404         200         200         404         404        404=        404=
+pages: create                    201         201         403         403         404         403         201         404         404        404=        404=
+pages: patch                     200         200         403         403         404         403         200         404         404        404=        404=
+pages: move                      200         200         403         403         404         403         200         404         404        404=        404=
+pages: duplicate                 201         201         403         403         404         403         201         404         404        404=        404=
+pages: delete                    204         204         403         403         404         403         204         404         404        404=        404=
+pages: trash                     200         200         403         403         404         403         200         404         404        404=        404=
+pages: comments                  200         200         200         200         404         200         200         404         404        404=        404=
+pages: comment                   201         201         201         403         404         403         201         404         404        404=        404=
+pages: versions                  200         200         200         200         404         200         200         404         404        404=        404=
+pages: restore                   200         200         403         403         404         403         200         404         404        404=        404=
+pages: comment versions          200         200         200         200         404         200         200         404         404        404=        404=
+pages: comment change            200         403         403         403         404         403         403         404         404        404=        404=
+pages: comment delete            204         403         403         403         404         403         403         404         404        404=        404=
+pages: comment restore           200         403         403         403         404         403         403         404         404        404=        404=
+pages: version                   200         200         200         200         404         200         200         404         404        404=        404=
+pages: version restore           200         200         403         403         404         403         200         404         404        404=        404=
+pages: keep version              200         200         403         403         404         403         200         404         404        404=        404=

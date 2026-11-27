@@ -1,0 +1,25 @@
+[package]
+name = "fvoci-collab"
+description = "The body of a card as a Y document: made from the stored JSON, projected back to it, repaired and checked, without input or output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The steps of take_update one by one, for this crate's own tests.
+test-util = []
+
+[dependencies]
+fvoci-model.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+fvoci-collab = { path = ".", features = ["test-util"] }
+
+[lints]
+workspace = true

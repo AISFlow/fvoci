@@ -1,0 +1,154 @@
+[
+  {
+    "name": "workspaces",
+    "request": "GET /api/v1/users/me/workspaces as workspaces-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "id": "<id:1>",
+        "kind": "shared",
+        "name": "The Firm",
+        "orgId": "<id:2>",
+        "passwordRequired": false,
+        "role": "member",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:3>",
+        "kind": "shared",
+        "name": "",
+        "orgId": "<id:2>",
+        "passwordRequired": false,
+        "role": "member",
+        "ssoRequired": false
+      },
+      {
+        "id": "<id:4>",
+        "kind": "personal",
+        "name": "",
+        "orgId": "<id:5>",
+        "passwordRequired": false,
+        "role": "admin",
+        "ssoRequired": false
+      }
+    ]
+  },
+  {
+    "name": "workspace 0",
+    "request": "GET /api/v1/w/<id:1> as workspaces-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "guestInvitations": true,
+      "id": "<id:1>",
+      "modifiedBy": "",
+      "settings": {},
+      "title": "The Firm",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "some other workspace id",
+    "request": "GET /api/v1/w/anything as workspaces-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "workspace not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "workspace without session",
+    "request": "GET /api/v1/w/<id:1> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "workspace users include me",
+    "request": "(observation)",
+    "status": 0,
+    "body": true
+  },
+  {
+    "name": "workspace users search",
+    "request": "GET /api/v1/w/<id:1>/users?search=workspaces-ali as workspaces-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "createdAt": "<ts>",
+        "credentials": [],
+        "customName": "",
+        "displayName": "",
+        "firstName": "",
+        "id": "<id:6>",
+        "isAdmin": false,
+        "lastName": "",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "nameShown": "name",
+        "title": null,
+        "updatedAt": "<ts>",
+        "username": "workspaces-alice"
+      }
+    ]
+  },
+  {
+    "name": "workspace users search without match",
+    "request": "GET /api/v1/w/<id:1>/users?search=zzzz-no-such as workspaces-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": []
+  },
+  {
+    "name": "workspace users by id",
+    "request": "POST /api/v1/w/<id:1>/users as workspaces-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "createdAt": "<ts>",
+        "credentials": [],
+        "customName": "",
+        "displayName": "",
+        "firstName": "",
+        "id": "<id:6>",
+        "isAdmin": false,
+        "lastName": "",
+        "latinFirstName": "",
+        "latinLastName": "",
+        "nameShown": "name",
+        "title": null,
+        "updatedAt": "<ts>",
+        "username": "workspaces-alice"
+      }
+    ]
+  },
+  {
+    "name": "workspace users by id: empty",
+    "request": "POST /api/v1/w/<id:1>/users as workspaces-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "User IDs are empty",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  }
+]

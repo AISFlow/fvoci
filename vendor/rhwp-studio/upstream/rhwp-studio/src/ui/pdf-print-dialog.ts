@@ -1,0 +1,195 @@
+import { PDF_PRINT_GUIDANCE, printProgressText } from '@/command/print-pages';
+import { ModalDialog } from './dialog';
+
+import { t } from '../i18n/index.ts';
+type PdfPrintDialogState = 'confirm' | 'preparing' | 'complete' | 'error';
+
+export interface PdfPrintDecision {
+  confirmed: boolean;
+  hideFutureGuidance: boolean;
+}
+
+/**
+ * 브라우저 인쇄 기반 PDF 저장의 남은 단계를 설명하고, 확인 뒤 같은 모달에서
+ * 인쇄 문서 준비 진행률을 표시한다.
+ */
+export class PdfPrintDialog extends ModalDialog {
+  private state: PdfPrintDialogState = 'confirm';
+  private resolveDecision: (decision: PdfPrintDecision) => void = () => {};
+  private progressMessage!: HTMLDivElement;
+  private progressTrack!: HTMLDivElement;
+  private progressBar!: HTMLDivElement;
+  private errorMessage!: HTMLDivElement;
+  private hideFutureGuidanceCheck!: HTMLInputElement;
+  private confirmButton: HTMLButtonElement | null = null;
+  private cancelButton: HTMLButtonElement | null = null;
+  private closeButton: HTMLButtonElement | null = null;
+
+  constructor(
+    private readonly pageCount: number,
+    private readonly showGuidance = true,
+  ) {
+    super(t('dialog.pdfPrint.title'), 460);
+  }
+
+  protected createBody(): HTMLElement {
+    const body = document.createElement('div');
+    body.className = 'dialog-pdf-print';
+    body.dataset.testid = 'pdf-print-dialog';
+
+    const summary = document.createElement('p');
+    summary.className = 'dialog-pdf-summary';
+    summary.textContent =
+      t('dialog.pdfPrint.summary.text');
+
+    const guidance = document.createElement('div');
+    guidance.className = 'dialog-pdf-guidance';
+
+    const guidanceTitle = document.createElement('strong');
+    guidanceTitle.textContent = t('dialog.pdfPrint.guidanceTitle.text');
+
+    const guidanceText = document.createElement('span');
+    guidanceText.textContent =
+      t('dialog.pdfPrint.guidanceText.text', { p1: PDF_PRINT_GUIDANCE });
+
+    guidance.append(guidanceTitle, guidanceText);
+
+    const stateNote = document.createElement('p');
+    stateNote.className = 'dialog-pdf-note';
+    stateNote.textContent =
+      t('dialog.pdfPrint.stateNote.text');
+
+    const preference = document.createElement('div');
+    preference.className = 'dialog-pdf-preference';
+
+    this.hideFutureGuidanceCheck = document.createElement('input');
+    this.hideFutureGuidanceCheck.type = 'checkbox';
+    this.hideFutureGuidanceCheck.id = 'pdf-print-hide-guidance';
+    this.hideFutureGuidanceCheck.dataset.testid = 'pdf-print-hide-guidance';
+
+    const preferenceLabel = document.createElement('label');
+    preferenceLabel.htmlFor = 'pdf-print-hide-guidance';
+    preferenceLabel.textContent = t('dialog.pdfPrint.preferenceLabel.text');
+
+    preference.append(this.hideFutureGuidanceCheck, preferenceLabel);
+
+    const progress = document.createElement('div');
+    progress.className = 'dialog-pdf-progress';
+    progress.hidden = true;
+    progress.dataset.testid = 'pdf-print-progress';
+
+    this.progressMessage = document.createElement('div');
+    this.progressMessage.className = 'dialog-pdf-progress-message';
+    this.progressMessage.setAttribute('aria-live', 'polite');
+
+    this.progressTrack = document.createElement('div');
+    this.progressTrack.className = 'dialog-pdf-progress-track';
+    this.progressTrack.setAttribute('role', 'progressbar');
+    this.progressTrack.setAttribute('aria-valuemin', '0');
+    this.progressTrack.setAttribute('aria-valuemax', String(this.pageCount));
+    this.progressTrack.setAttribute('aria-valuenow', '0');
+
+    this.progressBar = document.createElement('div');
+    this.progressBar.className = 'dialog-pdf-progress-bar';
+    this.progressTrack.appendChild(this.progressBar);
+    progress.append(this.progressMessage, this.progressTrack);
+
+    this.errorMessage = document.createElement('div');
+    this.errorMessage.className = 'dialog-pdf-error';
+    this.errorMessage.hidden = true;
+    this.errorMessage.setAttribute('role', 'alert');
+
+    body.append(summary, guidance, stateNote, preference, progress, this.errorMessage);
+    return body;
+  }
+
+  protected onConfirm(): boolean {
+    if (this.state !== 'confirm') return false;
+    this.beginPreparing();
+    return false;
+  }
+
+  private beginPreparing(): void {
+    this.state = 'preparing';
+    this.dialog.classList.add('dialog-pdf-preparing');
+
+    const progress = this.dialog.querySelector('.dialog-pdf-progress') as HTMLElement | null;
+    if (progress) progress.hidden = false;
+    this.updateProgress(0);
+
+    if (this.confirmButton) {
+      this.confirmButton.textContent = t('dialog.pdfPrint.confirmButton.text');
+      this.confirmButton.disabled = true;
+    }
+    if (this.cancelButton) this.cancelButton.disabled = true;
+    if (this.closeButton) this.closeButton.hidden = true;
+
+    this.resolveDecision({
+      confirmed: true,
+      hideFutureGuidance: this.showGuidance && this.hideFutureGuidanceCheck.checked,
+    });
+  }
+
+  override hide(): void {
+    if (this.state === 'preparing') return;
+    this.resolveDecision({ confirmed: false, hideFutureGuidance: false });
+    super.hide();
+  }
+
+  showAsync(): Promise<PdfPrintDecision> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      this.resolveDecision = (decision: PdfPrintDecision) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(decision);
+      };
+
+      super.show();
+      this.dialog.setAttribute('role', 'dialog');
+      this.dialog.setAttribute('aria-modal', 'true');
+      this.dialog.setAttribute('aria-label', t('dialog.pdfPrint.showAsync.label'));
+
+      this.confirmButton = this.dialog.querySelector('.dialog-btn-primary');
+      this.cancelButton = this.dialog.querySelector(
+        '.dialog-footer .dialog-btn:not(.dialog-btn-primary)',
+      );
+      this.closeButton = this.dialog.querySelector('.dialog-close');
+
+      if (this.confirmButton) this.confirmButton.textContent = t('dialog.pdfPrint.confirmButton.text.xbae1d2');
+      if (!this.showGuidance) this.beginPreparing();
+    });
+  }
+
+  updateProgress(currentPage: number): void {
+    const safeCurrent = Math.max(0, Math.min(currentPage, this.pageCount));
+    const progressText = printProgressText('pdf', safeCurrent, this.pageCount);
+    this.progressMessage.textContent = progressText;
+    this.progressTrack.setAttribute('aria-valuenow', String(safeCurrent));
+    const percent = this.pageCount > 0 ? (safeCurrent / this.pageCount) * 100 : 0;
+    this.progressBar.style.width = `${percent}%`;
+  }
+
+  closeBeforePrint(): void {
+    this.state = 'complete';
+    super.hide();
+  }
+
+  showError(message: string): void {
+    this.state = 'error';
+    this.dialog.classList.remove('dialog-pdf-preparing');
+    const progress = this.dialog.querySelector('.dialog-pdf-progress') as HTMLElement | null;
+    if (progress) progress.hidden = true;
+
+    this.errorMessage.hidden = false;
+    this.errorMessage.textContent = t('dialog.pdfPrint.errorMessage.text', { p1: message });
+
+    if (this.confirmButton) this.confirmButton.hidden = true;
+    if (this.cancelButton) {
+      this.cancelButton.textContent = t('dialog.pdfPrint.cancelButton.text');
+      this.cancelButton.disabled = false;
+      this.cancelButton.focus();
+    }
+    if (this.closeButton) this.closeButton.hidden = false;
+  }
+}

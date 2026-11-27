@@ -1,0 +1,92 @@
+{
+  "tooling": [
+    {
+      "name": "lightningcss",
+      "license": "MPL-2.0",
+      "reason": "CSS transformer used by Vite and Tailwind while building. It runs on the build machine and no part of it is in the output."
+    },
+    {
+      "name": "lightningcss-*",
+      "license": "MPL-2.0",
+      "reason": "Platform binary of lightningcss."
+    },
+    {
+      "name": "lru-cache",
+      "license": "BlueOak-1.0.0",
+      "reason": "Cache used inside build and test tools (jsdom, the message compiler). Not in the output."
+    },
+    {
+      "name": "minimatch",
+      "license": "BlueOak-1.0.0",
+      "reason": "Glob matcher used by ESLint and other tools. Not in the output."
+    },
+    {
+      "name": "@isaacs/nonrecursive-glob-match",
+      "license": "BlueOak-1.0.0",
+      "reason": "Dependency of minimatch 11, which ESLint and @eslint/config-array use. Not in the output."
+    },
+    {
+      "name": "tslib",
+      "license": "0BSD",
+      "reason": "Runtime helpers of the WebAssembly loaders inside Storybook and the message compiler, and of echarts, which the PowerPoint renderer depends on and the build replaces with a stub (src/viewer-frame/no-echarts.ts). Not in the output."
+    },
+    {
+      "name": "argparse",
+      "license": "Python-2.0",
+      "reason": "Command-line parser of the WOFF2 encoder that the font tool uses. It runs on the build machine and is not in the output."
+    }
+  ],
+  "notShipped": [
+    {
+      "name": "mtx-decompressor",
+      "license": "MPL-2.0",
+      "reason": "The decoder of embedded fonts, a dependency of the PowerPoint renderer that its bundle also carries inside it. The viewer draws no embedded fonts: the build cuts the decoder out of the renderer's bundle (tools/build/pptx-renderer.ts) and fails if any of its text reaches the output."
+    },
+    {
+      "name": "elkjs",
+      "license": "EPL-2.0 OR GPL-3.0-or-later",
+      "reason": "The ELK layout engine, installed as a dependency of mermaid. The build puts a stub in its place (the alias in vite.config.ts, src/lib/editor/no-elk.ts) and diagrams are laid out with dagre. Should it ever be bundled, the notices step, which has no exceptions, fails the build."
+    },
+    {
+      "name": "robust-predicates",
+      "license": "Unlicense",
+      "reason": "Arrives with d3 (through d3-delaunay), which mermaid depends on. Nothing the diagrams use imports it, so it is not in the output; the notices step fails the build if that changes."
+    }
+  ],
+  "stated": [
+    {
+      "name": "khroma",
+      "license": "MIT",
+      "says": "The MIT License (MIT)",
+      "reason": "Colour functions used by mermaid. Its package.json has no licence field; the licence file in the package is the MIT licence."
+    },
+    {
+      "name": "svelte-toolbelt",
+      "license": "MIT",
+      "says": "MIT License",
+      "reason": "Helpers of the generated UI components. Its package.json has no licence field; the LICENSE file in the package is the MIT text."
+    }
+  ],
+  "vendored": [
+    {
+      "name": "shadcn-svelte",
+      "reason": "Its CLI writes the components under src/lib/ui, which are compiled into the output."
+    },
+    {
+      "name": "@inlang/paraglide-js",
+      "reason": "Its compiler writes the message runtime under src/lib/i18n/paraglide, which is compiled into the output."
+    }
+  ],
+  "derived": [
+    {
+      "name": "cldr-annotations-full",
+      "modules": "src/lib/editor/emoji/",
+      "reason": "tools/emoji/build.ts writes the emoji lists under src/lib/editor/emoji from its names and keywords."
+    },
+    {
+      "name": "cldr-annotations-derived-full",
+      "modules": "src/lib/editor/emoji/",
+      "reason": "The same lists take the names of flags, keycaps and joined emoji from it."
+    }
+  ]
+}

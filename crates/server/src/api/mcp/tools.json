@@ -1,0 +1,748 @@
+{
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List workspaces"
+      },
+      "description": "The workspaces this token reaches: those it was given that its owner still works in, and the owner's own space if it was given that. Start here; every other tool takes a workspaceId of this list.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "The arguments of a tool that takes none: an empty object.",
+        "type": "object"
+      },
+      "name": "list_workspaces",
+      "title": "List workspaces"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Workspace overview"
+      },
+      "description": "The workspace in one answer: its name, who the caller is, and every board, wiki and course they read, with whether they joined it, their role, and for a board the properties its cards take (cardProperties: ids, types, options). Read it before list_cards or save_card.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A workspace whose overview or day to read.",
+        "properties": {
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId"
+        ],
+        "type": "object"
+      },
+      "name": "get_workspace_overview",
+      "title": "Workspace overview"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Find people"
+      },
+      "description": "Up to ten people of the workspace whose login name or name holds q, as the caller sees them (no email): the ids to give a card's people property or mention in Markdown as @[name](fvoci-user://<id>).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "People to find in a workspace.",
+        "properties": {
+          "q": {
+            "description": "Text their login name or name holds, in any case; left out, the ten oldest\naccounts.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId"
+        ],
+        "type": "object"
+      },
+      "name": "find_people",
+      "title": "Find people"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Search a workspace"
+      },
+      "description": "Search what the cards, pages and units of the workspace say, by words that a hit's title and body hold together (#12 finds card number 12). Each hit names its container and kind, with a snippet.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A search of what a workspace says.",
+        "properties": {
+          "containerId": {
+            "description": "Only what is in this board, wiki or course: the `limit` is of its hits.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "Only what is of this kind.",
+            "oneOf": [
+              {
+                "description": "What a search finds.",
+                "enum": [
+                  "card",
+                  "page",
+                  "unit"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "description": "How many hits at most, 1 to 50; 20 if left out.",
+            "format": "int32",
+            "maximum": 50,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "q": {
+            "description": "The words, every one of which a hit's title and body hold together; `#12` finds\nthe cards numbered 12. At most 200 characters.",
+            "type": "string"
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "q"
+        ],
+        "type": "object"
+      },
+      "name": "search_workspace",
+      "title": "Search a workspace"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List cards"
+      },
+      "description": "One page of a board's cards in short (id, number, title, parent, property values, updatedAt), chosen by title text, parent, assignee, one property's value or a time of change. Property ids and option ids are in get_workspace_overview.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "The cards of a board to list.",
+        "properties": {
+          "assigneeId": {
+            "description": "Only the cards given to this person (`me` for the caller), by a property of\npeople.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boardId": {
+            "description": "The board, as `get_workspace_overview` names it.",
+            "type": "string"
+          },
+          "page": {
+            "description": "The page, from 1.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "parentId": {
+            "description": "Only the sub-cards of this card; `root` for the cards at the top.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "perPage": {
+            "description": "How many cards a page has, from 1 to 1000; 50 if left out.",
+            "format": "int32",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "propertyId": {
+            "description": "Only the cards whose value of this property is `propertyValue`; sent with it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "propertyValue": {
+            "description": "The value `propertyId` is to have: an option's identifier for a select, a\nperson's for people, the text for text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "q": {
+            "description": "Text a card's title holds.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sort": {
+            "description": "The order; the oldest first if left out.",
+            "oneOf": [
+              {
+                "description": "The order cards are listed in.",
+                "enum": [
+                  "created_asc",
+                  "updated_desc",
+                  "number_asc"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updatedSince": {
+            "description": "Only the cards changed at or after this time, in milliseconds since the Unix\nepoch.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "boardId"
+        ],
+        "type": "object"
+      },
+      "name": "list_cards",
+      "title": "List cards"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Read a card, page or unit"
+      },
+      "description": "A card, a page or a unit with its body in Markdown (bodyMarkdown), whether the body has blocks Markdown does not hold (hasComplexBlocks: then add to it with appendMarkdown rather than writing it whole), the items below it and the files it shows: of a card, the first 50 cards below it (hasMoreChildren: list_cards with parentId reads them all). A card by id, or by containerId and number; a page or unit by containerId and id.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "An item to read.",
+        "properties": {
+          "containerId": {
+            "description": "The board, wiki or course the item is in: needed for a page, a unit, and a card\nnamed by its number.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The item's identifier. A card is named by it, or by `containerId` and `number`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "What the item is: a card, a page or a unit.",
+            "enum": [
+              "card",
+              "page",
+              "unit"
+            ],
+            "type": "string"
+          },
+          "number": {
+            "description": "The card's number on its board, as `#12` names it.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "name": "get_item",
+      "title": "Read a card, page or unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Outline of a wiki or course"
+      },
+      "description": "The tree of a wiki's pages, or of a course's chapters and units with the caller's own progress (empty for an open course they have not joined), each with updatedAt, without bodies.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A wiki or a course whose outline to read.",
+        "properties": {
+          "containerId": {
+            "description": "The wiki or the course.",
+            "type": "string"
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "containerId"
+        ],
+        "type": "object"
+      },
+      "name": "get_outline",
+      "title": "Outline of a wiki or course"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List comments"
+      },
+      "description": "The comments on a card, page or unit, oldest first, each in Markdown with who wrote it and when; one an agent wrote names its token (agentTokenName).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "An item whose comments to list, or to comment on.",
+        "properties": {
+          "containerId": {
+            "description": "The board, wiki or course it is in.",
+            "type": "string"
+          },
+          "itemId": {
+            "description": "The card, page or unit.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What the item is: a card, a page or a unit.",
+            "enum": [
+              "card",
+              "page",
+              "unit"
+            ],
+            "type": "string"
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "kind",
+          "containerId",
+          "itemId"
+        ],
+        "type": "object"
+      },
+      "name": "list_comments",
+      "title": "List comments"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "List files"
+      },
+      "description": "The files uploaded to a board or wiki, or those one card shows: their ids (fvoci-file://<fileId> in Markdown), names, types and sizes.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "The files of a board or wiki, or of one card.",
+        "properties": {
+          "cardId": {
+            "description": "Only the files this card of the board shows: those its body names and those\nattached to it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "containerId": {
+            "description": "The board or wiki.",
+            "type": "string"
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "containerId"
+        ],
+        "type": "object"
+      },
+      "name": "list_files",
+      "title": "List files"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
+        "title": "Today"
+      },
+      "description": "The caller's day in the workspace: their cards due or overdue, units scheduled, reviews due and meetings coming.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A workspace whose overview or day to read.",
+        "properties": {
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId"
+        ],
+        "type": "object"
+      },
+      "name": "get_today",
+      "title": "Today"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save a card"
+      },
+      "description": "Make a card on boardId, or change cardId: title, icon, parent, property values, and the body, whole (bodyMarkdown, with readAt; refused while people type in it) or added to (appendMarkdown, which keeps what they type). Kept as a version by this token, and told to the card's people as the agent's.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A card to make or change.",
+        "properties": {
+          "appendMarkdown": {
+            "description": "Markdown to add after the last of the body, written as one more editor writes:\nwhoever types in the body meanwhile keeps what they typed. Added after the\nother changes. Not with `bodyMarkdown`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boardId": {
+            "description": "The board to make the card on; left out when `cardId` names one to change.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bodyMarkdown": {
+            "description": "The whole body in Markdown, written over the body there is: refused while\npeople may type in it (`room_has_active_editors`), and while it has blocks its\nMarkdown does not hold (`complex_blocks_use_append`). To change a card's body,\nsent with `readAt`. Not with `appendMarkdown`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cardId": {
+            "description": "The card to change; left out, a card is made.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deletedProperties": {
+            "description": "Properties whose value the card is to lose.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "icon": {
+            "description": "The icon: one emoji, or empty for none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parentId": {
+            "description": "The card it is a sub-card of, on the same board; empty for the top of the board.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "properties": {
+            "description": "Values to set, by property identifier (`cardProperties` of the board in\n`get_workspace_overview`): an option's identifier for a select, a list of them\nfor a multi-select, a list of person identifiers for people, `YYYY-MM-DD` for a\ndate, text for text, a number for a number, `true` or `false` for a checkbox.\nThe card's other values stay.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "readAt": {
+            "description": "The `updatedAt` of the card as it was read: the change is refused (409) if the\ncard changed since. Sent with what is written whole; `appendMarkdown` alone keeps\nwhat changed since and takes none.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "The title to give it; left out, a card that is changed keeps its own.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId"
+        ],
+        "type": "object"
+      },
+      "name": "save_card",
+      "title": "Save a card"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Save a page or unit"
+      },
+      "description": "Make a page of a wiki or a unit (or chapter) of a course, or change one: title, icon, place, and the body, whole (bodyMarkdown, with readAt; refused while people type in it) or added to (appendMarkdown). With progress, records the caller's own progress on a unit: only in a course they joined (403 otherwise).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A page or a unit to make or change, or progress on a unit to record.",
+        "properties": {
+          "after": {
+            "description": "Among those of its parent, right after this one; last if left out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "appendMarkdown": {
+            "description": "Markdown to add after the last of the body, as one more editor writes: whoever\ntypes in it meanwhile keeps what they typed. Not with `bodyMarkdown`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bodyMarkdown": {
+            "description": "The whole body in Markdown, written over the body there is: refused while\npeople may type in it (`room_has_active_editors`), and while it has blocks its\nMarkdown does not hold (`complex_blocks_use_append`). To change one's body, sent\nwith `readAt`. Not with `appendMarkdown`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "containerId": {
+            "description": "The wiki or the course.",
+            "type": "string"
+          },
+          "icon": {
+            "description": "A page's icon: one emoji, or empty for none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The page or unit to change; left out, one is made.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "Whether it is a page of a wiki or a unit of a course.",
+            "enum": [
+              "page",
+              "unit"
+            ],
+            "type": "string"
+          },
+          "parentId": {
+            "description": "Where a new one goes: below this page, or this chapter of the course; at the top\nif left out. Not for one that is changed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "progress": {
+            "description": "The caller's own progress on the unit, recorded after the rest: only in a\ncourse they joined (403 otherwise).",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "The caller's own progress on a unit.",
+                "properties": {
+                  "completed": {
+                    "description": "Whether they finished it.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "lastPosition": {
+                    "description": "Where they are in it, in their own words.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "readAt": {
+            "description": "The `updatedAt` of the page or unit as it was read: the change is refused (409)\nif it changed since. Sent with what is written whole; `appendMarkdown` alone\nkeeps what changed since and takes none.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "The title; a new one made without it has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unitKind": {
+            "description": "What a new entry of a course is; a unit if left out.",
+            "oneOf": [
+              {
+                "description": "What a new entry of a course's outline is.",
+                "enum": [
+                  "unit",
+                  "chapter"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "kind",
+          "containerId"
+        ],
+        "type": "object"
+      },
+      "name": "save_page_or_unit",
+      "title": "Save a page or unit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Post a comment"
+      },
+      "description": "Comment on a card, page or unit, in Markdown, as the caller by this token: the comment names the token, and whoever follows the item is told.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A comment to write.",
+        "properties": {
+          "containerId": {
+            "description": "The board, wiki or course it is in.",
+            "type": "string"
+          },
+          "itemId": {
+            "description": "The card, page or unit.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What the item is: a card, a page or a unit.",
+            "enum": [
+              "card",
+              "page",
+              "unit"
+            ],
+            "type": "string"
+          },
+          "markdown": {
+            "description": "The comment in Markdown. A person is mentioned as `@[name](fvoci-user://<id>)`\n(`find_people` gives the identifier).",
+            "type": "string"
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "kind",
+          "containerId",
+          "itemId",
+          "markdown"
+        ],
+        "type": "object"
+      },
+      "name": "post_comment",
+      "title": "Post a comment"
+    }
+  ]
+}

@@ -1,0 +1,796 @@
+{
+  "key": "study-notes",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "a539d7df-4aaf-58af-ac3b-e4d7b7fcfc8c",
+    "title": "Study notes",
+    "description": "One card for each thing you learn. Formulas, code and diagrams go straight into the body, and the calendar shows what to go over again, and when.",
+    "icon": "📚",
+    "showDescription": true,
+    "dueDatePropertyId": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+    "doneWhen": {
+      "propertyId": "b6e28f90-d456-52b0-a448-8df9cc0baf4e"
+    },
+    "cardProperties": [
+      {
+        "id": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+        "name": "Subject",
+        "type": "select",
+        "options": [
+          {
+            "id": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+            "label": "Algorithms",
+            "color": "blue"
+          },
+          {
+            "id": "460518d8-9623-5542-9c4d-fc7b09aea48d",
+            "label": "Statistics",
+            "color": "green"
+          },
+          {
+            "id": "e7efe65c-9889-52d3-84d7-659723d95602",
+            "label": "Databases",
+            "color": "orange"
+          }
+        ]
+      },
+      {
+        "id": "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9",
+        "name": "Tags",
+        "type": "multiSelect",
+        "options": [
+          {
+            "id": "76becd23-173b-5eca-904f-db235ae038ce",
+            "label": "On the exam",
+            "color": "red"
+          },
+          {
+            "id": "ae07b99f-4e99-5e9c-810d-c99b6f2af3c0",
+            "label": "Proof",
+            "color": "purple"
+          },
+          {
+            "id": "71f4bc57-1be4-551a-849f-02ced414a6f6",
+            "label": "Practice",
+            "color": "yellow"
+          }
+        ]
+      },
+      {
+        "id": "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+        "name": "Grasp",
+        "type": "select",
+        "options": [
+          {
+            "id": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+            "label": "New to me",
+            "color": "gray"
+          },
+          {
+            "id": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+            "label": "Shaky",
+            "color": "yellow"
+          },
+          {
+            "id": "a2ffcd87-ae02-59e5-9193-cb1c8e8d4a86",
+            "label": "Solid",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+        "name": "Review on",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "b6e28f90-d456-52b0-a448-8df9cc0baf4e",
+        "name": "Reviewed",
+        "type": "checkbox",
+        "options": []
+      },
+      {
+        "id": "50f6befe-52bc-5ce3-b2e2-eb8782121e6e",
+        "name": "Builds on",
+        "type": "relation",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "4533cbe0-bdd8-568a-be35-afad7f035c5c",
+      "type": "view",
+      "title": "By subject",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "e7efe65c-9889-52d3-84d7-659723d95602"
+        ],
+        "shownProperties": [
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9"
+        ],
+        "groupBy": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9"
+      }
+    },
+    {
+      "id": "a3b51e6a-ed24-5c2c-a6df-b953cde37e3e",
+      "type": "view",
+      "title": "Gallery",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gallery",
+        "visibleGroups": [],
+        "shownProperties": [
+          "__title",
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2"
+        ]
+      }
+    },
+    {
+      "id": "cddbd4a8-e49b-519a-acaa-cc4cba24e833",
+      "type": "view",
+      "title": "Review calendar",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "d8764a1f-e16d-59ad-b5b2-439794c042c7"
+      }
+    },
+    {
+      "id": "2f865728-b59e-5ef7-b240-d32e22e9817b",
+      "type": "view",
+      "title": "Still to review",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "countValue",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": "earliest"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "b6e28f90-d456-52b0-a448-8df9cc0baf4e",
+              "condition": "isNotSet",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9",
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e"
+        ]
+      }
+    },
+    {
+      "id": "008a6275-6a97-5cc4-bc98-372333055aac",
+      "type": "view",
+      "title": "Order to learn in",
+      "fields": {
+        "cardOrder": [
+          "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+          "a8f9fa11-b621-522e-bc46-343ed3f45095",
+          "c72483ee-449e-50fe-9769-cce4e76f01dc",
+          "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+          "64ef5921-7f17-5a7e-9be9-4008c25ac993"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gantt",
+        "visibleGroups": [
+          "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "e7efe65c-9889-52d3-84d7-659723d95602"
+        ],
+        "shownProperties": ["2091a798-e74c-5ebf-a4a6-89d7e83f99a2"],
+        "groupBy": "bc2818c7-6d46-5486-b092-a8ea1f2de1e9",
+        "dateProperty": "d8764a1f-e16d-59ad-b5b2-439794c042c7",
+        "dependencyPropertyId": "50f6befe-52bc-5ce3-b2e2-eb8782121e6e",
+        "ganttZoom": "day"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+      "type": "card",
+      "title": "Big O notation",
+      "fields": {
+        "icon": "📈",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["76becd23-173b-5eca-904f-db235ae038ce"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "a2ffcd87-ae02-59e5-9193-cb1c8e8d4a86",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-02"
+          },
+          "b6e28f90-d456-52b0-a448-8df9cc0baf4e": "true"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A way to write how fast the time grows with the input. Looking at each of "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "n"
+                }
+              },
+              {
+                "type": "text",
+                "text": " items once is "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(n)"
+                }
+              },
+              {
+                "type": "text",
+                "text": "; looking at every pair is "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(n^2)"
+                }
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "chart.png",
+              "alt": "Six bars that grow taller"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Definition"
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "f(n) = O(g(n)) \\iff \\exists\\, c > 0,\\ n_0 : \\forall n \\ge n_0,\\ f(n) \\le c \\cdot g(n)"
+            }
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Constants and lower orders are dropped."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Always say whether it is the "
+                      },
+                      {
+                        "type": "text",
+                        "text": "worst case",
+                        "marks": [
+                          {
+                            "type": "italic"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " or the "
+                      },
+                      {
+                        "type": "text",
+                        "text": "average",
+                        "marks": [
+                          {
+                            "type": "italic"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "a8f9fa11-b621-522e-bc46-343ed3f45095",
+      "type": "card",
+      "title": "Binary search",
+      "fields": {
+        "icon": "🔎",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "ebedfa40-68d0-568e-9e1a-104287dbdea9",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": [
+            "76becd23-173b-5eca-904f-db235ae038ce",
+            "71f4bc57-1be4-551a-849f-02ced414a6f6"
+          ],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-04"
+          },
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e": [
+            {
+              "card": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Finds an item of a sorted list by throwing half away each time, in "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "O(\\log n)"
+                }
+              },
+              {
+                "type": "text",
+                "text": ". The notation is on "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "5c02c3e0-b23c-50b6-b235-cf3ad46b45d9"
+                }
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "python"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "def search(items, target):\n    low, high = 0, len(items) - 1\n    while low <= high:\n        middle = (low + high) // 2\n        if items[middle] == target:\n            return middle\n        if items[middle] < target:\n            low = middle + 1\n        else:\n            high = middle - 1\n    return None"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Where it goes wrong"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The loop runs while "
+                      },
+                      {
+                        "type": "text",
+                        "text": "low <= high",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Try it on an empty list"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c72483ee-449e-50fe-9769-cce4e76f01dc",
+      "type": "card",
+      "title": "Mean and variance",
+      "fields": {
+        "icon": "🎲",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "460518d8-9623-5542-9c4d-fc7b09aea48d",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": [
+            "76becd23-173b-5eca-904f-db235ae038ce",
+            "ae07b99f-4e99-5e9c-810d-c99b6f2af3c0"
+          ],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "839fa6a7-39f8-5487-90d4-d074af5da0ba",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-08"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\mu = \\frac{1}{n} \\sum_{i=1}^{n} x_i \\qquad \\sigma^2 = \\frac{1}{n} \\sum_{i=1}^{n} (x_i - \\mu)^2"
+            }
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The variance is the mean of the squares less the square of the mean."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "That is, "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "\\sigma^2 = E[X^2] - (E[X])^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": ". Show it by expanding the square."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+      "type": "card",
+      "title": "Kinds of join",
+      "fields": {
+        "icon": "🔗",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "e7efe65c-9889-52d3-84d7-659723d95602",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["71f4bc57-1be4-551a-849f-02ced414a6f6"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-11"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "sql"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "SELECT c.name, o.total\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id;"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "INNER",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the rows that are on both sides"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "LEFT",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": every row of the left, and the right where there is one"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "erDiagram\n  CUSTOMERS ||--o{ ORDERS : places\n  ORDERS ||--|{ LINES : holds"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "64ef5921-7f17-5a7e-9be9-4008c25ac993",
+      "type": "card",
+      "title": "Why an index is fast",
+      "fields": {
+        "icon": "🗃️",
+        "isTemplate": false,
+        "properties": {
+          "bc2818c7-6d46-5486-b092-a8ea1f2de1e9": "e7efe65c-9889-52d3-84d7-659723d95602",
+          "2b9e4c31-8d7d-532d-9ea2-c917d8f0a4f9": ["76becd23-173b-5eca-904f-db235ae038ce"],
+          "2091a798-e74c-5ebf-a4a6-89d7e83f99a2": "e847feb0-bb42-5225-8a22-9bcd6d23ebea",
+          "d8764a1f-e16d-59ad-b5b2-439794c042c7": {
+            "from": "2026-12-15"
+          },
+          "50f6befe-52bc-5ce3-b2e2-eb8782121e6e": [
+            {
+              "card": "a8f9fa11-b621-522e-bc46-343ed3f45095",
+              "kind": "fs",
+              "lagDays": 0
+            },
+            {
+              "card": "8c3e09d6-6df0-5754-a8eb-aa6d16f5feaa",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Looking a value up in a sorted column is the idea of "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "a8f9fa11-b621-522e-bc46-343ed3f45095"
+                }
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart TD\n  R[Root] --> A[1–50]\n  R --> B[51–100]\n  A --> A1[1–25]\n  A --> A2[26–50]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "chart.png",
+      "name": "chart.png"
+    }
+  ]
+}

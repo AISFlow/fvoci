@@ -1,0 +1,220 @@
+[
+  {
+    "name": "create board Subscribed board",
+    "request": "POST /api/v1/w/<id:1>/boards as subs-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Subscribed board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "insert blocks",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards as subs-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:3>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "",
+      "id": "<id:4>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Watched card",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "list: the card its writer wrote",
+    "request": "GET /api/v1/w/<id:1>/subscriptions/<id:2> as subs-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "blockId": "<id:4>",
+        "blockType": "card",
+        "createdAt": "<ts>",
+        "notifiedAt": "<ts>",
+        "userId": "<id:2>"
+      }
+    ]
+  },
+  {
+    "name": "create",
+    "request": "POST /api/v1/w/<id:1>/subscriptions as subs-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "blockId": "<id:4>",
+      "blockType": "card",
+      "createdAt": "<ts>",
+      "notifiedAt": "<ts>",
+      "userId": "<id:2>"
+    }
+  },
+  {
+    "name": "create: again",
+    "request": "POST /api/v1/w/<id:1>/subscriptions as subs-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "blockId": "<id:4>",
+      "blockType": "card",
+      "createdAt": "<ts>",
+      "notifiedAt": "<ts>",
+      "userId": "<id:2>"
+    }
+  },
+  {
+    "name": "create: for another user",
+    "request": "POST /api/v1/w/<id:1>/subscriptions as subs-alice",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "a user subscribes for themselves only",
+      "errors": [
+        {
+          "detail": "a user subscribes for themselves only",
+          "pointer": "/userId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "create: no block",
+    "request": "POST /api/v1/w/<id:1>/subscriptions as subs-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "missing block id",
+      "errors": [
+        {
+          "detail": "missing block id",
+          "pointer": "/blockId",
+          "reason": "required"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: malformed body",
+    "request": "POST /api/v1/w/<id:1>/subscriptions as subs-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing an object at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "list",
+    "request": "GET /api/v1/w/<id:1>/subscriptions/<id:2> as subs-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "blockId": "<id:4>",
+        "blockType": "card",
+        "createdAt": "<ts>",
+        "notifiedAt": "<ts>",
+        "userId": "<id:2>"
+      }
+    ]
+  },
+  {
+    "name": "list: another user's",
+    "request": "GET /api/v1/w/<id:1>/subscriptions/<id:2> as subs-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "user not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete: another user's",
+    "request": "DELETE /api/v1/w/<id:1>/subscriptions/<id:4>/<id:2> as subs-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "subscription not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete",
+    "request": "DELETE /api/v1/w/<id:1>/subscriptions/<id:4>/<id:2> as subs-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "delete: again",
+    "request": "DELETE /api/v1/w/<id:1>/subscriptions/<id:4>/<id:2> as subs-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "subscription not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list at the end",
+    "request": "GET /api/v1/w/<id:1>/subscriptions/<id:2> as subs-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": []
+  }
+]

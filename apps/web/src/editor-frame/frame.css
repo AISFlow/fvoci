@@ -1,0 +1,34 @@
+/*
+  The editor's frame around the editor's own style sheet (rhwp-studio's,
+  loaded with it): the whole frame is the editor's, with no margin of the
+  page around it.
+
+  Two of the editor's own values are replaced, which is why they are marked
+  important (its sheet comes later):
+
+  - its controls are written in the app's family, the one Korean family the
+    frame carries, ahead of whatever the system has;
+  - the sheet of pictures its toolbar's icons are cut from is not in the
+    repository (rhwp states no origin or licence for it), so none is asked
+    for: the buttons keep their words.
+*/
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+:root,
+:root[data-theme] {
+  --font-family-ui: 'Noto Sans KR', sans-serif !important;
+  --ui-icon-sprite-url: none !important;
+}
+
+/* The browser's own controls take the family too: they do not inherit it by themselves. */
+select,
+option,
+input,
+button,
+textarea {
+  font-family: var(--font-family-ui);
+}

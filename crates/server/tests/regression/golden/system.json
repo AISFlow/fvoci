@@ -1,0 +1,203 @@
+[
+  {
+    "name": "hello",
+    "request": "GET /hello as anonymous",
+    "status": 200,
+    "content_type": "text/html",
+    "body": "<html>"
+  },
+  {
+    "name": "ping: at the root",
+    "request": "GET /ping as anonymous",
+    "status": 200,
+    "content_type": "text/html",
+    "body": "<html>"
+  },
+  {
+    "name": "hello: under the prefix",
+    "request": "GET /api/v1/hello as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "ping members",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      "buildDate",
+      "commit",
+      "dbType",
+      "dbVersion",
+      "version"
+    ]
+  },
+  {
+    "name": "ping version",
+    "request": "(observation)",
+    "status": 0,
+    "body": [
+      "<version>",
+      "<db>"
+    ]
+  },
+  {
+    "name": "client config",
+    "request": "GET /api/v1/client-config as anonymous",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "allowPublicLinks": true,
+      "featureFlags": {},
+      "maxFileBytes": 104857600,
+      "maxImportBytes": 268435456,
+      "nameDisplay": "username",
+      "searchEnabled": true,
+      "trashRetentionDays": 30
+    }
+  },
+  {
+    "name": "client config without csrf header",
+    "request": "GET /api/v1/client-config as anonymous",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "allowPublicLinks": true,
+      "featureFlags": {},
+      "maxFileBytes": 104857600,
+      "maxImportBytes": 268435456,
+      "nameDisplay": "username",
+      "searchEnabled": true,
+      "trashRetentionDays": 30
+    }
+  },
+  {
+    "name": "unknown api path",
+    "request": "GET /api/v1/no-such-route as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "wrong method on a known path",
+    "request": "DELETE /api/v1/client-config as anonymous",
+    "status": 405,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "method not allowed",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 405,
+      "title": "Method not allowed",
+      "type": "/problems/method-not-allowed"
+    }
+  },
+  {
+    "name": "old path: client config",
+    "request": "GET /api/v1/clientConfig as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old prefix: client config",
+    "request": "GET /api/v2/clientConfig as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old prefix: login",
+    "request": "POST /api/v2/login as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "old prefix: the prefix itself",
+    "request": "GET /api/v2 as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "the api root",
+    "request": "GET /api as anonymous",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "index for an app route",
+    "request": "GET /board/abc as anonymous",
+    "status": 200,
+    "content_type": "text/html",
+    "headers": {
+      "Content-Type": "text/html; charset=utf-8"
+    },
+    "body": "<html>"
+  },
+  {
+    "name": "static without slash",
+    "request": "GET /static as anonymous",
+    "status": 404,
+    "content_type": "text/plain",
+    "body": "not found\n"
+  },
+  {
+    "name": "missing static file",
+    "request": "GET /static/nope.js as anonymous",
+    "status": 404,
+    "content_type": "text/plain",
+    "body": "not found\n"
+  }
+]

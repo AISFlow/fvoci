@@ -1,0 +1,644 @@
+[
+  {
+    "name": "create board Workspace board",
+    "request": "POST /api/v1/w/<id:1>/boards as members-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Workspace board",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create board Open board",
+    "request": "POST /api/v1/w/<id:1>/boards as members-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Open board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "list",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:3>",
+        "role": "admin",
+        "userId": "<id:2>"
+      }
+    ]
+  },
+  {
+    "name": "list: non-member",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/members as members-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "add: non-member adds",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "add editor",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "editor",
+      "userId": "<id:5>"
+    }
+  },
+  {
+    "name": "add: no user",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "empty userId",
+      "errors": [
+        {
+          "detail": "empty userId",
+          "pointer": "/userId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "add: unknown user",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no such user",
+      "errors": [
+        {
+          "detail": "no such user",
+          "pointer": "/userId",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "add: editor adds",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to modify board members",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "add viewer",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "viewer",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "add: already a member",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "viewer",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "list after adding",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/members as members-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:3>",
+        "role": "admin",
+        "userId": "<id:2>"
+      },
+      {
+        "containerId": "<id:3>",
+        "role": "editor",
+        "userId": "<id:5>"
+      },
+      {
+        "containerId": "<id:3>",
+        "role": "viewer",
+        "userId": "<id:6>"
+      }
+    ]
+  },
+  {
+    "name": "memberships of the editor",
+    "request": "GET /api/v1/users/me/memberships as members-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:7>",
+        "role": "admin",
+        "userId": "<id:5>"
+      },
+      {
+        "containerId": "<id:3>",
+        "role": "editor",
+        "userId": "<id:5>"
+      }
+    ]
+  },
+  {
+    "name": "update: to commenter",
+    "request": "PUT /api/v1/w/<id:1>/containers/<id:3>/members/<id:6> as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:3>",
+      "role": "commenter",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "update: by editor",
+    "request": "PUT /api/v1/w/<id:1>/containers/<id:3>/members/<id:6> as members-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to modify board members",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "update: demote the last admin",
+    "request": "PUT /api/v1/w/<id:1>/containers/<id:3>/members/<id:2> as members-alice",
+    "status": 409,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "cannot leave a board with no admins",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "last_admin",
+      "requestId": "<request-id>",
+      "status": 409,
+      "title": "Last administrator",
+      "type": "/problems/last-admin"
+    }
+  },
+  {
+    "name": "update: unknown member",
+    "request": "PUT /api/v1/w/<id:1>/containers/<id:3>/members/unknown-user as members-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "member not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete: by editor",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:3>/members/<id:6> as members-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to modify board members",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "delete: the last admin",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:3>/members/<id:2> as members-alice",
+    "status": 409,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "cannot leave a board with no admins",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "last_admin",
+      "requestId": "<request-id>",
+      "status": 409,
+      "title": "Last administrator",
+      "type": "/problems/last-admin"
+    }
+  },
+  {
+    "name": "delete",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:3>/members/<id:6> as members-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "delete: not a member",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:3>/members/<id:6> as members-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "join: private board",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:3>/join as members-carol",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "join: open board",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/join as members-carol",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:4>",
+      "role": "editor",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "join: again",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/join as members-carol",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:4>",
+      "role": "editor",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "join: unknown board",
+    "request": "POST /api/v1/w/<id:1>/containers/unknown-board/join as members-carol",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "leave",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/leave as members-carol",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "leave: not a member",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/leave as members-carol",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "leave: the last admin",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/leave as members-alice",
+    "status": 409,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "cannot leave a board with no admins",
+      "instance": "urn:uuid:<request-id>",
+      "reason": "last_admin",
+      "requestId": "<request-id>",
+      "status": 409,
+      "title": "Last administrator",
+      "type": "/problems/last-admin"
+    }
+  },
+  {
+    "name": "members at the end",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:3>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:3>",
+        "role": "admin",
+        "userId": "<id:2>"
+      },
+      {
+        "containerId": "<id:3>",
+        "role": "editor",
+        "userId": "<id:5>"
+      }
+    ]
+  },
+  {
+    "name": "create board Role board",
+    "request": "POST /api/v1/w/<id:1>/boards as members-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:8>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Role board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "minimum role: none",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:8> as members-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+      "errors": [
+        {
+          "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+          "pointer": "/minimumRole",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "minimum role: admin",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:8> as members-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+      "errors": [
+        {
+          "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+          "pointer": "/minimumRole",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create a board with no minimum role",
+    "request": "POST /api/v1/w/<id:1>/boards as members-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+      "errors": [
+        {
+          "detail": "the minimum role of a board is `viewer`, `commenter` or `editor`",
+          "pointer": "/minimumRole",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "minimum role: commenter",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:8> as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:8>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "commenter",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Role board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "add below the minimum role: admin adds a viewer",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "viewer",
+      "userId": "<id:5>"
+    }
+  },
+  {
+    "name": "a viewer on the board cannot comment",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:8>/blocks as members-bob",
+    "status": 403,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "access denied to post card comments",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 403,
+      "title": "Forbidden",
+      "type": "/problems/forbidden"
+    }
+  },
+  {
+    "name": "join again: raised to the minimum role",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/join as members-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "commenter",
+      "userId": "<id:5>"
+    }
+  },
+  {
+    "name": "join once more: nothing changes",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/join as members-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "commenter",
+      "userId": "<id:5>"
+    }
+  },
+  {
+    "name": "join: a new member gets the minimum role",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/join as members-carol",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "commenter",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "make an editor",
+    "request": "PUT /api/v1/w/<id:1>/containers/<id:8>/members/<id:6> as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "editor",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "join above the minimum role: not lowered",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/join as members-carol",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "editor",
+      "userId": "<id:6>"
+    }
+  },
+  {
+    "name": "join: the admin stays the admin",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:8>/join as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "containerId": "<id:8>",
+      "role": "admin",
+      "userId": "<id:2>"
+    }
+  },
+  {
+    "name": "members of the role board",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:8>/members as members-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "containerId": "<id:8>",
+        "role": "admin",
+        "userId": "<id:2>"
+      },
+      {
+        "containerId": "<id:8>",
+        "role": "commenter",
+        "userId": "<id:5>"
+      },
+      {
+        "containerId": "<id:8>",
+        "role": "editor",
+        "userId": "<id:6>"
+      }
+    ]
+  }
+]

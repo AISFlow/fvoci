@@ -1,0 +1,662 @@
+{
+  "key": "course-study-plan",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "c8000000-0000-4000-8000-000000000001",
+    "kind": "course",
+    "title": "2주 집중 학습 계획",
+    "description": "개념 정리부터 실전 문제 풀이와 오답 점검까지 2주 일정으로 나누어 공부하는 기본 학습 템플릿입니다.",
+    "icon": "🎓",
+    "showDescription": true,
+    "cardProperties": []
+  },
+  "schedule": {
+    "startDate": "2026-12-01",
+    "targetDate": "2026-12-14",
+    "studyDays": 31
+  },
+  "views": [],
+  "cards": [],
+  "chapters": [
+    {
+      "id": "c8000001-0000-4000-8000-000000000001",
+      "type": "chapter",
+      "parentId": "",
+      "title": "1장. 학습 준비와 핵심 개념",
+      "fields": {
+        "order": "V"
+      }
+    },
+    {
+      "id": "c8000001-0000-4000-8000-000000000002",
+      "type": "chapter",
+      "parentId": "",
+      "title": "2장. 실전 연습과 복습",
+      "fields": {
+        "order": "W"
+      }
+    }
+  ],
+  "units": [
+    {
+      "id": "c8000002-0000-4000-8000-000000000001",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "학습 목표와 범위 정하기",
+      "fields": {
+        "order": "V",
+        "amount": 30,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-01"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "시작 전 점검 목록"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "2주 동안 끝낼 범위와 하루 학습 시간을 미리 정해 두면 일정이 밀려도 다시 조정하기 쉽습니다."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "이번 과정에서 꼭 익힐 핵심 목표 3가지 적기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "교재나 강의 자료의 전체 목차 확인하기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "공통 일정과 학습 요일이 내 생활 패턴과 맞는지 확인하기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000002",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "핵심 개념 정리",
+      "fields": {
+        "order": "W",
+        "amount": 20,
+        "amountUnit": "pages",
+        "scheduledDate": "2026-12-03"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "개념 비교 표"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "헷갈리기 쉬운 용어와 원리를 한 표에 정리해 두면 복습할 때 빠르게 다시 찾을 수 있습니다."
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "개념"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "핵심 요약"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "자주 틀리는 점"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "기본 원리"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "정의와 성립 조건을 한 문장으로 적습니다"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "예외 조건을 빼먹지 않도록 표시합니다"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "응용 패턴"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "실제 문제에 적용하는 순서를 적습니다"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "비슷한 패턴과 구분하는 기준을 남깁니다"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000003",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000001",
+      "title": "대표 예제 따라 풀기",
+      "fields": {
+        "order": "X",
+        "amount": 45,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-07"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "풀이 흐름 메모"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "정답을 바로 보지 않고 단계별로 직접 풀어 본 뒤, 막힌 지점을 표시합니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "문제 조건에서 주어진 값과 구해야 할 값을 먼저 분리합니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "중간 계산이나 근거를 생략하지 않고 차례로 적습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "풀이를 마친 뒤 다른 접근법이 있는지 한 줄로 비교합니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000004",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000002",
+      "title": "실전 연습 문제 풀기",
+      "fields": {
+        "order": "V",
+        "amount": 15,
+        "amountUnit": "problems",
+        "scheduledDate": "2026-12-10"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "연습 문제 진행 방법"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "개념이 헷갈릴 때는 먼저 정리한 "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "c8000002-0000-4000-8000-000000000002"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 단원을 다시 열어 확인하고, 틀린 문항 번호를 아래 목록에 남깁니다."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "기초 문항 5개 시간 재며 풀기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "응용 문항 10개 풀고 채점하기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c8000002-0000-4000-8000-000000000005",
+      "type": "unit",
+      "parentId": "c8000001-0000-4000-8000-000000000002",
+      "title": "오답 정리와 최종 점검",
+      "fields": {
+        "order": "W",
+        "amount": 30,
+        "amountUnit": "minutes",
+        "scheduledDate": "2026-12-14"
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "오답 원인 기록 표"
+              }
+            ]
+          },
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "문항"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "틀린 까닭"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableHeader",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "다시 풀기 기준"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "예시 문항"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "조건 하나를 빠뜨리고 계산함"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "해설 없이 처음부터 끝까지 설명 가능할 것"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "틀린 문항을 하루 뒤 다시 풀어 보기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "가장 어려웠던 개념을 자기 말로 세 줄 요약하기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

@@ -1,0 +1,3329 @@
+{
+  "description": "Additional normal-body vectors from review_binding.mjs using the locked yjs and y-tiptap versions; no editor rendering or repair oracle.",
+  "versions": {
+    "yjs": "13.6.33",
+    "@tiptap/y-tiptap": "3.3.1",
+    "@tiptap/pm": "3.35.0"
+  },
+  "cases": [
+    {
+      "name": "Unicode mark set 0",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQYBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAT5wbGFpbvCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYcBAQMJaGFyZEJyZWFrhwEhBgQAASIDZW5kAA=="
+    },
+    {
+      "name": "Unicode mark set 1",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hAEHOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIQRsaW5rBG51bGyHAQEDCWhhcmRCcmVha4cBIwYGAAEkBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS/wn5iAZcyBIn2EASUDZW5khgEoBGxpbmsEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 2",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hAEHOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIQRib2xkBG51bGyHAQEDCWhhcmRCcmVha4cBIwYGAAEkBGJvbGQCe32EASUDZW5khgEoBGJvbGQEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 3",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32EAQg58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEiBGxpbmsEbnVsbIYBIwRib2xkBG51bGyHAQEDCWhhcmRCcmVha4cBJQYGAAEmBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS/wn5iAZcyBIn2GAScEYm9sZAJ7fYQBKANlbmSGASsEbGluawRudWxshgEsBGJvbGQEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 4",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZpdGFsaWMCe32EAQc58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEhBml0YWxpYwRudWxshwEBAwloYXJkQnJlYWuHASMGBgABJAZpdGFsaWMCe32EASUDZW5khgEoBml0YWxpYwRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 5",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBml0YWxpYwJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIEbGluawRudWxshgEjBml0YWxpYwRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEnBml0YWxpYwJ7fYQBKANlbmSGASsEbGluawRudWxshgEsBml0YWxpYwRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 6",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBml0YWxpYwJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIEYm9sZARudWxshgEjBml0YWxpYwRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgRib2xkAnt9hgEnBml0YWxpYwJ7fYQBKANlbmSGASsEYm9sZARudWxshgEsBml0YWxpYwRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 7",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGaXRhbGljAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRsaW5rBG51bGyGASQEYm9sZARudWxshgElBml0YWxpYwRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEpBGJvbGQCe32GASoGaXRhbGljAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8EYm9sZARudWxshgEwBml0YWxpYwRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 8",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZzdHJpa2UCe32EAQc58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEhBnN0cmlrZQRudWxshwEBAwloYXJkQnJlYWuHASMGBgABJAZzdHJpa2UCe32EASUDZW5khgEoBnN0cmlrZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 9",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBnN0cmlrZQJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIEbGluawRudWxshgEjBnN0cmlrZQRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEnBnN0cmlrZQJ7fYQBKANlbmSGASsEbGluawRudWxshgEsBnN0cmlrZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 10",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBnN0cmlrZQJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIEYm9sZARudWxshgEjBnN0cmlrZQRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgRib2xkAnt9hgEnBnN0cmlrZQJ7fYQBKANlbmSGASsEYm9sZARudWxshgEsBnN0cmlrZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 11",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGc3RyaWtlAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRsaW5rBG51bGyGASQEYm9sZARudWxshgElBnN0cmlrZQRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEpBGJvbGQCe32GASoGc3RyaWtlAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8EYm9sZARudWxshgEwBnN0cmlrZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 12",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZpdGFsaWMCe32GAQcGc3RyaWtlAnt9hAEIOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIgZpdGFsaWMEbnVsbIYBIwZzdHJpa2UEbnVsbIcBAQMJaGFyZEJyZWFrhwElBgYAASYGaXRhbGljAnt9hgEnBnN0cmlrZQJ7fYQBKANlbmSGASsGaXRhbGljBG51bGyGASwGc3RyaWtlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 13",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBml0YWxpYwJ7fYYBCAZzdHJpa2UCe32EAQk58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEjBGxpbmsEbnVsbIYBJAZpdGFsaWMEbnVsbIYBJQZzdHJpa2UEbnVsbIcBAQMJaGFyZEJyZWFrhwEnBgYAASgEbGluayZ7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL/CfmIBlzIEifYYBKQZpdGFsaWMCe32GASoGc3RyaWtlAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8GaXRhbGljBG51bGyGATAGc3RyaWtlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 14",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBml0YWxpYwJ7fYYBCAZzdHJpa2UCe32EAQk58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEjBGJvbGQEbnVsbIYBJAZpdGFsaWMEbnVsbIYBJQZzdHJpa2UEbnVsbIcBAQMJaGFyZEJyZWFrhwEnBgYAASgEYm9sZAJ7fYYBKQZpdGFsaWMCe32GASoGc3RyaWtlAnt9hAErA2VuZIYBLgRib2xkBG51bGyGAS8GaXRhbGljBG51bGyGATAGc3RyaWtlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 15",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGaXRhbGljAnt9hgEJBnN0cmlrZQJ7fYQBCjnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASQEbGluawRudWxshgElBGJvbGQEbnVsbIYBJgZpdGFsaWMEbnVsbIYBJwZzdHJpa2UEbnVsbIcBAQMJaGFyZEJyZWFrhwEpBgYAASoEbGluayZ7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL/CfmIBlzIEifYYBKwRib2xkAnt9hgEsBml0YWxpYwJ7fYYBLQZzdHJpa2UCe32EAS4DZW5khgExBGxpbmsEbnVsbIYBMgRib2xkBG51bGyGATMGaXRhbGljBG51bGyGATQGc3RyaWtlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 16",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRjb2RlAnt9hAEHOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIQRjb2RlBG51bGyHAQEDCWhhcmRCcmVha4cBIwYGAAEkBGNvZGUCe32EASUDZW5khgEoBGNvZGUEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 17",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGNvZGUCe32EAQg58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEiBGxpbmsEbnVsbIYBIwRjb2RlBG51bGyHAQEDCWhhcmRCcmVha4cBJQYGAAEmBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS/wn5iAZcyBIn2GAScEY29kZQJ7fYQBKANlbmSGASsEbGluawRudWxshgEsBGNvZGUEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 18",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBGNvZGUCe32EAQg58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEiBGJvbGQEbnVsbIYBIwRjb2RlBG51bGyHAQEDCWhhcmRCcmVha4cBJQYGAAEmBGJvbGQCe32GAScEY29kZQJ7fYQBKANlbmSGASsEYm9sZARudWxshgEsBGNvZGUEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 19",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgEY29kZQJ7fYQBCTnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASMEbGluawRudWxshgEkBGJvbGQEbnVsbIYBJQRjb2RlBG51bGyHAQEDCWhhcmRCcmVha4cBJwYGAAEoBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS/wn5iAZcyBIn2GASkEYm9sZAJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8EYm9sZARudWxshgEwBGNvZGUEbnVsbAA="
+    },
+    {
+      "name": "Unicode mark set 20",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZpdGFsaWMCe32GAQcEY29kZQJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIGaXRhbGljBG51bGyGASMEY29kZQRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgZpdGFsaWMCe32GAScEY29kZQJ7fYQBKANlbmSGASsGaXRhbGljBG51bGyGASwEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 21",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBml0YWxpYwJ7fYYBCARjb2RlAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRsaW5rBG51bGyGASQGaXRhbGljBG51bGyGASUEY29kZQRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEpBml0YWxpYwJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8GaXRhbGljBG51bGyGATAEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 22",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBml0YWxpYwJ7fYYBCARjb2RlAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRib2xkBG51bGyGASQGaXRhbGljBG51bGyGASUEY29kZQRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARib2xkAnt9hgEpBml0YWxpYwJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgRib2xkBG51bGyGAS8GaXRhbGljBG51bGyGATAEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 23",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGaXRhbGljAnt9hgEJBGNvZGUCe32EAQo58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEkBGxpbmsEbnVsbIYBJQRib2xkBG51bGyGASYGaXRhbGljBG51bGyGAScEY29kZQRudWxshwEBAwloYXJkQnJlYWuHASkGBgABKgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgErBGJvbGQCe32GASwGaXRhbGljAnt9hgEtBGNvZGUCe32EAS4DZW5khgExBGxpbmsEbnVsbIYBMgRib2xkBG51bGyGATMGaXRhbGljBG51bGyGATQEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 24",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZzdHJpa2UCe32GAQcEY29kZQJ7fYQBCDnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASIGc3RyaWtlBG51bGyGASMEY29kZQRudWxshwEBAwloYXJkQnJlYWuHASUGBgABJgZzdHJpa2UCe32GAScEY29kZQJ7fYQBKANlbmSGASsGc3RyaWtlBG51bGyGASwEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 25",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBnN0cmlrZQJ7fYYBCARjb2RlAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRsaW5rBG51bGyGASQGc3RyaWtlBG51bGyGASUEY29kZQRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEpBnN0cmlrZQJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgRsaW5rBG51bGyGAS8Gc3RyaWtlBG51bGyGATAEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 26",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBnN0cmlrZQJ7fYYBCARjb2RlAnt9hAEJOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBIwRib2xkBG51bGyGASQGc3RyaWtlBG51bGyGASUEY29kZQRudWxshwEBAwloYXJkQnJlYWuHAScGBgABKARib2xkAnt9hgEpBnN0cmlrZQJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgRib2xkBG51bGyGAS8Gc3RyaWtlBG51bGyGATAEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 27",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGc3RyaWtlAnt9hgEJBGNvZGUCe32EAQo58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEkBGxpbmsEbnVsbIYBJQRib2xkBG51bGyGASYGc3RyaWtlBG51bGyGAScEY29kZQRudWxshwEBAwloYXJkQnJlYWuHASkGBgABKgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgErBGJvbGQCe32GASwGc3RyaWtlAnt9hgEtBGNvZGUCe32EAS4DZW5khgExBGxpbmsEbnVsbIYBMgRib2xkBG51bGyGATMGc3RyaWtlBG51bGyGATQEY29kZQRudWxsAA=="
+    },
+    {
+      "name": "Unicode mark set 28",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARMBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgZpdGFsaWMCe32GAQcGc3RyaWtlAnt9hgEIBGNvZGUCe32EAQk58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCphgEjBml0YWxpYwRudWxshgEkBnN0cmlrZQRudWxshgElBGNvZGUEbnVsbIcBAQMJaGFyZEJyZWFrhwEnBgYAASgGaXRhbGljAnt9hgEpBnN0cmlrZQJ7fYYBKgRjb2RlAnt9hAErA2VuZIYBLgZpdGFsaWMEbnVsbIYBLwZzdHJpa2UEbnVsbIYBMARjb2RlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 29",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBml0YWxpYwJ7fYYBCAZzdHJpa2UCe32GAQkEY29kZQJ7fYQBCjnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASQEbGluawRudWxshgElBml0YWxpYwRudWxshgEmBnN0cmlrZQRudWxshgEnBGNvZGUEbnVsbIcBAQMJaGFyZEJyZWFrhwEpBgYAASoEbGluayZ7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL/CfmIBlzIEifYYBKwZpdGFsaWMCe32GASwGc3RyaWtlAnt9hgEtBGNvZGUCe32EAS4DZW5khgExBGxpbmsEbnVsbIYBMgZpdGFsaWMEbnVsbIYBMwZzdHJpa2UEbnVsbIYBNARjb2RlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 30",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRib2xkAnt9hgEHBml0YWxpYwJ7fYYBCAZzdHJpa2UCe32GAQkEY29kZQJ7fYQBCjnwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmGASQEYm9sZARudWxshgElBml0YWxpYwRudWxshgEmBnN0cmlrZQRudWxshgEnBGNvZGUEbnVsbIcBAQMJaGFyZEJyZWFrhwEpBgYAASoEYm9sZAJ7fYYBKwZpdGFsaWMCe32GASwGc3RyaWtlAnt9hgEtBGNvZGUCe32EAS4DZW5khgExBGJvbGQEbnVsbIYBMgZpdGFsaWMEbnVsbIYBMwZzdHJpa2UEbnVsbIYBNARjb2RlBG51bGwA"
+    },
+    {
+      "name": "Unicode mark set 31",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  ",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "end",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "plain"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.com/😀é"
+                    }
+                  },
+                  {
+                    "type": "bold"
+                  },
+                  {
+                    "type": "italic"
+                  },
+                  {
+                    "type": "strike"
+                  },
+                  {
+                    "type": "code"
+                  }
+                ],
+                "text": "end"
+              }
+            ]
+          }
+        ]
+      },
+      "update": "ARsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVwbGFpboYBBgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20v8J+YgGXMgSJ9hgEHBGJvbGQCe32GAQgGaXRhbGljAnt9hgEJBnN0cmlrZQJ7fYYBCgRjb2RlAnt9hAELOfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYYBJQRsaW5rBG51bGyGASYEYm9sZARudWxshgEnBml0YWxpYwRudWxshgEoBnN0cmlrZQRudWxshgEpBGNvZGUEbnVsbIcBAQMJaGFyZEJyZWFrhwErBgYAASwEbGluayZ7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL/CfmIBlzIEifYYBLQRib2xkAnt9hgEuBml0YWxpYwJ7fYYBLwZzdHJpa2UCe32GATAEY29kZQJ7fYQBMQNlbmSGATQEbGluawRudWxshgE1BGJvbGQEbnVsbIYBNgZpdGFsaWMEbnVsbIYBNwZzdHJpa2UEbnVsbIYBOARjb2RlBG51bGwA"
+    },
+    {
+      "name": "Unicode in attributes, empty optional strings, defaults and Mermaid",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+                }
+              },
+              {
+                "type": "mention",
+                "attrs": {
+                  "userId": "01930000-0000-7000-8000-00000000c002"
+                }
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01930000-0000-7000-8000-00000000b002"
+                }
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+            }
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "unicode-image.png",
+              "alt": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+            }
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "empty-alt.png",
+              "alt": ""
+            }
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "unicode-doc.pdf"
+            }
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "graph TD\n A[\"😀é\"]-->B[\"한글\"]"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock"
+          },
+          {
+            "type": "orderedList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+                }
+              },
+              {
+                "type": "mention",
+                "attrs": {
+                  "userId": "01930000-0000-7000-8000-00000000c002"
+                }
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "01930000-0000-7000-8000-00000000b002"
+                }
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+            }
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "unicode-image.png",
+              "alt": "😀é한글𝒳👩‍👩‍👧‍👦\r\n\t  "
+            }
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "empty-alt.png",
+              "alt": ""
+            }
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "unicode-doc.pdf"
+            }
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "graph TD\n A[\"😀é\"]-->B[\"한글\"]"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock"
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "update": "AR4BAAcBB2RlZmF1bHQDB2hlYWRpbmcHAAEABgQAAQE58J+YgGXMgeGEkuGFoeGGq+q4gPCdkrPwn5Gp4oCN8J+RqeKAjfCfkafigI3wn5GmDQoJ4oCo4oCpKAABAAVsZXZlbAF9A4cBAAMJcGFyYWdyYXBoBwABHQMKaW5saW5lTWF0aCgAAR4FbGF0ZXgBdznwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmHAR4DB21lbnRpb24oAAEgBnVzZXJJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwMocBIAMJcmVmZXJlbmNlKAABIgJpZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYjAwMocBHQMJYmxvY2tNYXRoKAABJAVsYXRleAF3OfCfmIBlzIHhhJLhhaHhhqvquIDwnZKz8J+RqeKAjfCfkanigI3wn5Gn4oCN8J+Rpg0KCeKAqOKAqYcBJAMFaW1hZ2UoAAEmBmZpbGVJZAF3EXVuaWNvZGUtaW1hZ2UucG5nKAABJgNhbHQBdznwn5iAZcyB4YSS4YWh4Yar6riA8J2Ss/CfkanigI3wn5Gp4oCN8J+Rp+KAjfCfkaYNCgnigKjigKmHASYDBWltYWdlKAABKQZmaWxlSWQBdw1lbXB0eS1hbHQucG5nKAABKQNhbHQBdwCHASkDBGZpbGUoAAEsBmZpbGVJZAF3D3VuaWNvZGUtZG9jLnBkZocBLAMJY29kZUJsb2NrBwABLgYEAAEvJGdyYXBoIFRECiBBWyLwn5iAZcyBIl0tLT5CWyLtlZzquIAiXSgAAS4IbGFuZ3VhZ2UBdwdtZXJtYWlkhwEuAwljb2RlQmxvY2uHAU4DC29yZGVyZWRMaXN0BwABTwMIbGlzdEl0ZW0HAAFQAwlwYXJhZ3JhcGgoAAFPBXN0YXJ0AX0BAA=="
+    }
+  ]
+}

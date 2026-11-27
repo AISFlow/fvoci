@@ -1,0 +1,1413 @@
+[
+  {
+    "name": "create: no visibility",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the visibility of a board is `open` or `private`",
+      "errors": [
+        {
+          "detail": "the visibility of a board is `open` or `private`",
+          "pointer": "/visibility",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: bad visibility",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the visibility of a board is `open` or `private`",
+      "errors": [
+        {
+          "detail": "the visibility of a board is `open` or `private`",
+          "pointer": "/visibility",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create: no workspace",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:3>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "x",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create: without session",
+    "request": "POST /api/v1/w/<id:1>/boards as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "create: malformed body",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "key must be a string at line 1 column 2",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "create board Roadmap",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop1",
+          "name": "Status",
+          "options": [],
+          "type": "select"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "plans",
+      "icon": "🎯",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "blue"
+      },
+      "showDescription": true,
+      "templateVersion": 0,
+      "title": "Roadmap",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "create board Open board",
+    "request": "POST /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:5>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Open board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "get",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop1",
+          "name": "Status",
+          "options": [],
+          "type": "select"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "plans",
+      "icon": "🎯",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "blue"
+      },
+      "showDescription": true,
+      "templateVersion": 0,
+      "title": "Roadmap",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "get: non-member, private",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as boards-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "get: non-member, open",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:5> as boards-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:5>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Open board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "get: anonymous",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as anonymous",
+    "status": 401,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "no session token",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 401,
+      "title": "No valid session",
+      "type": "/problems/unauthorized"
+    }
+  },
+  {
+    "name": "get: unknown board",
+    "request": "GET /api/v1/w/<id:1>/containers/unknown-board as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "list: member",
+    "request": "GET /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "cardProperties": [
+          {
+            "id": "<id:6>",
+            "name": "Progress",
+            "options": [
+              {
+                "color": "gray",
+                "id": "<id:7>",
+                "label": "To read"
+              },
+              {
+                "color": "blue",
+                "id": "<id:8>",
+                "label": "Trying it"
+              },
+              {
+                "color": "green",
+                "id": "<id:9>",
+                "label": "Done it"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:10>",
+            "name": "Topic",
+            "options": [
+              {
+                "color": "blue",
+                "id": "<id:11>",
+                "label": "Boards"
+              },
+              {
+                "color": "purple",
+                "id": "<id:12>",
+                "label": "Writing"
+              },
+              {
+                "color": "orange",
+                "id": "<id:13>",
+                "label": "Files"
+              },
+              {
+                "color": "green",
+                "id": "<id:14>",
+                "label": "Wiki"
+              },
+              {
+                "color": "pink",
+                "id": "<id:15>",
+                "label": "Together"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:16>",
+            "name": "Day",
+            "options": [],
+            "type": "date"
+          },
+          {
+            "id": "<id:17>",
+            "name": "Minutes",
+            "options": [],
+            "type": "number"
+          },
+          {
+            "id": "<id:18>",
+            "name": "Read first",
+            "options": [],
+            "type": "relation"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+        "doneWhen": {
+          "optionIds": [
+            "<id:9>"
+          ],
+          "propertyId": "<id:6>"
+        },
+        "dueDatePropertyId": "<id:16>",
+        "icon": "👋",
+        "id": "<id:19>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": true,
+        "templateVersion": 13,
+        "title": "Getting started with fvoci",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "",
+        "icon": "",
+        "id": "<id:3>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "x",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [
+          {
+            "id": "prop1",
+            "name": "Status",
+            "options": [],
+            "type": "select"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "plans",
+        "icon": "🎯",
+        "id": "<id:4>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {
+          "color": "blue"
+        },
+        "showDescription": true,
+        "templateVersion": 0,
+        "title": "Roadmap",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "",
+        "icon": "",
+        "id": "<id:5>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Open board",
+        "updatedAt": "<ts>",
+        "visibility": "open",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "list: other user",
+    "request": "GET /api/v1/w/<id:1>/boards as boards-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "cardProperties": [
+          {
+            "id": "<id:6>",
+            "name": "Progress",
+            "options": [
+              {
+                "color": "gray",
+                "id": "<id:7>",
+                "label": "To read"
+              },
+              {
+                "color": "blue",
+                "id": "<id:8>",
+                "label": "Trying it"
+              },
+              {
+                "color": "green",
+                "id": "<id:9>",
+                "label": "Done it"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:10>",
+            "name": "Topic",
+            "options": [
+              {
+                "color": "blue",
+                "id": "<id:11>",
+                "label": "Boards"
+              },
+              {
+                "color": "purple",
+                "id": "<id:12>",
+                "label": "Writing"
+              },
+              {
+                "color": "orange",
+                "id": "<id:13>",
+                "label": "Files"
+              },
+              {
+                "color": "green",
+                "id": "<id:14>",
+                "label": "Wiki"
+              },
+              {
+                "color": "pink",
+                "id": "<id:15>",
+                "label": "Together"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:16>",
+            "name": "Day",
+            "options": [],
+            "type": "date"
+          },
+          {
+            "id": "<id:17>",
+            "name": "Minutes",
+            "options": [],
+            "type": "number"
+          },
+          {
+            "id": "<id:18>",
+            "name": "Read first",
+            "options": [],
+            "type": "relation"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:20>",
+        "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+        "doneWhen": {
+          "optionIds": [
+            "<id:9>"
+          ],
+          "propertyId": "<id:6>"
+        },
+        "dueDatePropertyId": "<id:16>",
+        "icon": "👋",
+        "id": "<id:21>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:20>",
+        "properties": {},
+        "showDescription": true,
+        "templateVersion": 13,
+        "title": "Getting started with fvoci",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "",
+        "icon": "",
+        "id": "<id:5>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Open board",
+        "updatedAt": "<ts>",
+        "visibility": "open",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  },
+  {
+    "name": "metadata",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4>/metadata as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "route not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "patch",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop1",
+          "name": "Status",
+          "options": [],
+          "type": "select"
+        },
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red",
+        "size": 3
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "patch: delete properties",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "patch: non-member",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "patch: bad visibility",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "the visibility of a board is `open` or `private`",
+      "errors": [
+        {
+          "detail": "the visibility of a board is `open` or `private`",
+          "pointer": "/visibility",
+          "reason": "invalid"
+        }
+      ],
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "patch: to open",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "patch: back to private",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "patch: minimum role",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:5> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "",
+      "icon": "",
+      "id": "<id:5>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {},
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Open board",
+      "updatedAt": "<ts>",
+      "visibility": "open",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "patch: unknown board",
+    "request": "PATCH /api/v1/w/<id:1>/containers/unknown-board as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "patch: malformed body",
+    "request": "PATCH /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 400,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "EOF while parsing a list at line 1 column 1",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 400,
+      "title": "Bad request",
+      "type": "/problems/bad-request"
+    }
+  },
+  {
+    "name": "get after patches",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "insert a card",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:4>/cards as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:4>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "x",
+      "id": "<id:22>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "A card",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "duplicate",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/duplicate as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "blocks": [
+        {
+          "body": null,
+          "containerId": "<id:23>",
+          "createdAt": "<ts>",
+          "createdBy": "<id:2>",
+          "fields": {
+            "icon": "x",
+            "isTemplate": false,
+            "properties": {}
+          },
+          "id": "<id:24>",
+          "modifiedBy": "<id:2>",
+          "number": 1,
+          "parentId": "",
+          "title": "A card",
+          "type": "card",
+          "updatedAt": "<ts>"
+        }
+      ],
+      "containers": [
+        {
+          "cardProperties": [
+            {
+              "id": "prop2",
+              "name": "Owner",
+              "options": [],
+              "type": "person"
+            }
+          ],
+          "createdAt": "<ts>",
+          "createdBy": "<id:2>",
+          "description": "new plans",
+          "icon": "🚀",
+          "id": "<id:23>",
+          "isBuiltin": false,
+          "isTemplate": false,
+          "kind": "board",
+          "minimumRole": "editor",
+          "modifiedBy": "<id:2>",
+          "properties": {
+            "color": "red"
+          },
+          "showDescription": false,
+          "templateVersion": 0,
+          "title": "Roadmap 2 copy",
+          "updatedAt": "<ts>",
+          "visibility": "private",
+          "workspaceId": "<id:1>"
+        }
+      ]
+    }
+  },
+  {
+    "name": "duplicate as template",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/duplicate?asTemplate=true as boards-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "blocks": [
+        {
+          "body": null,
+          "containerId": "<id:25>",
+          "createdAt": "<ts>",
+          "createdBy": "<id:2>",
+          "fields": {
+            "icon": "x",
+            "isTemplate": false,
+            "properties": {}
+          },
+          "id": "<id:26>",
+          "modifiedBy": "<id:2>",
+          "number": 1,
+          "parentId": "",
+          "title": "A card",
+          "type": "card",
+          "updatedAt": "<ts>"
+        }
+      ],
+      "containers": [
+        {
+          "cardProperties": [
+            {
+              "id": "prop2",
+              "name": "Owner",
+              "options": [],
+              "type": "person"
+            }
+          ],
+          "createdAt": "<ts>",
+          "createdBy": "<id:2>",
+          "description": "new plans",
+          "icon": "🚀",
+          "id": "<id:25>",
+          "isBuiltin": false,
+          "isTemplate": true,
+          "kind": "board",
+          "minimumRole": "editor",
+          "modifiedBy": "<id:2>",
+          "properties": {
+            "color": "red"
+          },
+          "showDescription": false,
+          "templateVersion": 0,
+          "title": "New board template",
+          "updatedAt": "<ts>",
+          "visibility": "private",
+          "workspaceId": "<id:1>"
+        }
+      ]
+    }
+  },
+  {
+    "name": "duplicate: non-member",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/duplicate as boards-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "duplicate: unknown board",
+    "request": "POST /api/v1/w/<id:1>/containers/unknown-board/duplicate as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "blocks of the copy",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:23>/blocks as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:23>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "icon": "x",
+          "isTemplate": false,
+          "properties": {}
+        },
+        "id": "<id:24>",
+        "modifiedBy": "<id:2>",
+        "number": 1,
+        "parentId": "",
+        "title": "A card",
+        "type": "card",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "delete: non-member",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:4> as boards-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 204,
+    "body": "<0 bytes>"
+  },
+  {
+    "name": "get deleted",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "delete again",
+    "request": "DELETE /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "undelete: other user",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/restore as boards-bob",
+    "status": 404,
+    "content_type": "application/problem+json",
+    "body": {
+      "detail": "board not found",
+      "instance": "urn:uuid:<request-id>",
+      "requestId": "<request-id>",
+      "status": 404,
+      "title": "Not found",
+      "type": "/problems/not-found"
+    }
+  },
+  {
+    "name": "undelete",
+    "request": "POST /api/v1/w/<id:1>/containers/<id:4>/restore as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "get undeleted",
+    "request": "GET /api/v1/w/<id:1>/containers/<id:4> as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "cardProperties": [
+        {
+          "id": "prop2",
+          "name": "Owner",
+          "options": [],
+          "type": "person"
+        }
+      ],
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "description": "new plans",
+      "icon": "🚀",
+      "id": "<id:4>",
+      "isBuiltin": false,
+      "isTemplate": false,
+      "kind": "board",
+      "minimumRole": "editor",
+      "modifiedBy": "<id:2>",
+      "properties": {
+        "color": "red"
+      },
+      "showDescription": false,
+      "templateVersion": 0,
+      "title": "Roadmap 2",
+      "updatedAt": "<ts>",
+      "visibility": "private",
+      "workspaceId": "<id:1>"
+    }
+  },
+  {
+    "name": "blocks after undelete",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:4>/blocks as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": null,
+        "containerId": "<id:4>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "fields": {
+          "icon": "x",
+          "isTemplate": false,
+          "properties": {}
+        },
+        "id": "<id:22>",
+        "modifiedBy": "<id:2>",
+        "number": 1,
+        "parentId": "",
+        "title": "A card",
+        "type": "card",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "list at the end",
+    "request": "GET /api/v1/w/<id:1>/boards as boards-alice",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "cardProperties": [
+          {
+            "id": "<id:6>",
+            "name": "Progress",
+            "options": [
+              {
+                "color": "gray",
+                "id": "<id:7>",
+                "label": "To read"
+              },
+              {
+                "color": "blue",
+                "id": "<id:8>",
+                "label": "Trying it"
+              },
+              {
+                "color": "green",
+                "id": "<id:9>",
+                "label": "Done it"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:10>",
+            "name": "Topic",
+            "options": [
+              {
+                "color": "blue",
+                "id": "<id:11>",
+                "label": "Boards"
+              },
+              {
+                "color": "purple",
+                "id": "<id:12>",
+                "label": "Writing"
+              },
+              {
+                "color": "orange",
+                "id": "<id:13>",
+                "label": "Files"
+              },
+              {
+                "color": "green",
+                "id": "<id:14>",
+                "label": "Wiki"
+              },
+              {
+                "color": "pink",
+                "id": "<id:15>",
+                "label": "Together"
+              }
+            ],
+            "type": "select"
+          },
+          {
+            "id": "<id:16>",
+            "name": "Day",
+            "options": [],
+            "type": "date"
+          },
+          {
+            "id": "<id:17>",
+            "name": "Minutes",
+            "options": [],
+            "type": "number"
+          },
+          {
+            "id": "<id:18>",
+            "name": "Read first",
+            "options": [],
+            "type": "relation"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+        "doneWhen": {
+          "optionIds": [
+            "<id:9>"
+          ],
+          "propertyId": "<id:6>"
+        },
+        "dueDatePropertyId": "<id:16>",
+        "icon": "👋",
+        "id": "<id:19>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": true,
+        "templateVersion": 13,
+        "title": "Getting started with fvoci",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "",
+        "icon": "",
+        "id": "<id:3>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "x",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [
+          {
+            "id": "prop2",
+            "name": "Owner",
+            "options": [],
+            "type": "person"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "new plans",
+        "icon": "🚀",
+        "id": "<id:4>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {
+          "color": "red"
+        },
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Roadmap 2",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "",
+        "icon": "",
+        "id": "<id:5>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {},
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Open board",
+        "updatedAt": "<ts>",
+        "visibility": "open",
+        "workspaceId": "<id:1>"
+      },
+      {
+        "cardProperties": [
+          {
+            "id": "prop2",
+            "name": "Owner",
+            "options": [],
+            "type": "person"
+          }
+        ],
+        "createdAt": "<ts>",
+        "createdBy": "<id:2>",
+        "description": "new plans",
+        "icon": "🚀",
+        "id": "<id:23>",
+        "isBuiltin": false,
+        "isTemplate": false,
+        "kind": "board",
+        "minimumRole": "editor",
+        "modifiedBy": "<id:2>",
+        "properties": {
+          "color": "red"
+        },
+        "showDescription": false,
+        "templateVersion": 0,
+        "title": "Roadmap 2 copy",
+        "updatedAt": "<ts>",
+        "visibility": "private",
+        "workspaceId": "<id:1>"
+      }
+    ]
+  }
+]

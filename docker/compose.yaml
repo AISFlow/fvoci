@@ -1,0 +1,432 @@
+# fvoci on one machine: the server with its web app, PostgreSQL, and the search server.
+#
+#   cp docker/.env.example docker/.env      # then fill in every secret
+#   docker compose -f docker/compose.yaml up -d --build --wait
+#   (an image built so does not know its commit: ping's commit is empty; build it as
+#   docker/fvoci/Dockerfile says, or with `cargo xtask docker`, to have it)
+#   docker compose -f docker/compose.yaml --profile s3 --profile mail up -d ...
+#   docker compose -f docker/compose.yaml --profile tunnel up -d --wait
+#
+# Only fvoci is reachable from outside, on FVOCI_BIND:FVOCI_HOST_PORT (127.0.0.1:8080
+# unless .env says otherwise): put the reverse proxy that ends TLS in front of it and
+# set FVOCI_SERVER_URL to the address people use. PostgreSQL, the search server and the
+# profiles' services are on the network `backend`, which has no way out and no
+# published port; fvoci is on `edge` too, for its port and what it asks outside.
+#
+# Secrets come from .env (never committed; .env.example lists them) as Docker secrets:
+# files under /run/secrets, not variables of the containers. compose refuses to start
+# while one is not set, naming it; an empty one stops the service that needs it, which
+# names its file. fvoci's entry (docker/fvoci/entrypoint.sh) reads them into the
+# variables the server reads. A container holds the secrets it was made with: after
+# changing one, `up -d --force-recreate fvoci search` (roles and migrate run anyway).
+#
+# PostgreSQL, database fvoci. Its superuser postgres (POSTGRES_PASSWORD, set when the
+# volume is new) owns the tables. At every `up` the one-shot service `roles`
+# (postgres/fvoci-role.sh) makes the role fvoci what it must be, with FVOCI_DB_PASSWORD
+# (a changed one: recreate fvoci too, above):
+# it owns nothing and may only use the tables. Then `migrate` brings the schema up to
+# date as postgres (fvoci-server --migrate), and fvoci starts once both have succeeded.
+# A server that is broken into cannot turn the row-level security between
+# organizations off. The server holds a session advisory lock on a connection of its
+# own: nothing between it and PostgreSQL may share sessions (no pooler in transaction
+# mode). An `up` that brings a new image whose schema changes waits for that lock: stop
+# fvoci first (`docker compose stop fvoci`, then `up -d`).
+#
+# PostgreSQL runs on its image's defaults (shared_buffers=128MB, work_mem=4MB,
+# wal_compression=off, jit=on) and Docker's /dev/shm of 64 MiB, which holds what a
+# parallel query's workers share: enough to try fvoci, too little to serve with. On a
+# server, size it to the machine in a file of your own given after this one, to compose
+# and to the scripts below alike (-f docker/compose.yaml -f override.yaml), as
+# docs/configuration.md says, with the values for 4 CPUs and 24 GiB and why:
+#   services:
+#     postgres:
+#       shm_size: "2g"
+#       command: ["postgres", "-c", "shared_buffers=4GB", "-c", "work_mem=32MB", ...]
+# A changed value recreates postgres at `up`: stop fvoci first, as above.
+#
+# The search server is OpenSearch with nori and its security plugin; fvoci reaches it as
+# https://search:9200 and trusts the authority it made (volume search-ca) beside the
+# system's. Its certificates are made when the volume search-tls is new; its user fvoci,
+# the user's role and password are set at every start of the service (a changed
+# password: recreate search and fvoci, above).
+#
+# Profiles: `s3` keeps files in SeaweedFS instead of the volume fvoci-data (set
+# FVOCI_FILE_STORAGE=s3 and the S3 lines of .env); `mail` is Mailpit, a mail relay
+# that keeps what it gets (set FVOCI_SMTP_HOST=mailpit and the mail lines of .env), read
+# with `docker compose exec mailpit wget -qO- localhost:8025/api/v1/messages`.
+#
+# Profile `tunnel` is cloudflared, a Cloudflare Tunnel that dials out to Cloudflare from
+# the network `edge` and brings people's requests to fvoci: nothing of the host need be
+# reachable from outside, and fvoci's port can stay on 127.0.0.1 beside it. Make the
+# tunnel in Cloudflare's dashboard, give its public hostname the service
+# http://fvoci:8000 (a tunnel run by its token takes its routes from there), put the
+# token in FVOCI_TUNNEL_TOKEN (an empty one stops cloudflared, which then asks for "the
+# ID or name of the tunnel"), and set FVOCI_SERVER_URL to https://<that hostname>.
+# cloudflared adds the client's address to X-Forwarded-For, which fvoci believes only
+# from FVOCI_TRUSTED_PROXIES: set that to the range of `edge` once it exists (the
+# network is <project>_edge, fvoci_edge unless the project is named otherwise),
+#   docker network inspect fvoci_edge --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+# and `up -d` again; it stays the same until `down` removes the network. The range
+# holds the network's gateway, which is where every connection to the published port
+# comes from (Docker's proxy for the port): with it trusted, whatever reaches that port
+# chooses the address the limits on sign-up, login and reset count. So let nothing
+# reach the port but the host itself (FVOCI_BIND=127.0.0.1) or a reverse proxy that
+# adds the client's address to X-Forwarded-For. (Connections that Docker's proxy
+# carries, from the host itself, under Docker Desktop or rootless, come from the
+# gateway; whether others keep their own address depends on Docker's setup.) Without the profile nothing of it is
+# made or needed.
+#
+# So with the profile, keep FVOCI_BIND on the loopback, as it is unless .env says
+# otherwise. FVOCI_BIND=0.0.0.0 beside the tunnel opens the port to every network of
+# the host while edge's range is trusted: anyone who reaches it writes the
+# X-Forwarded-For fvoci believes, and is counted as whoever they name.
+#
+# Mail goes the way FVOCI_MAIL_TRANSPORT names: smtp (the FVOCI_SMTP_* lines), or the
+# HTTP API of cloudflare, ses or oci (their lines of .env); empty is SMTP when
+# FVOCI_SMTP_HOST is set and no mail otherwise. A provider's secret (Cloudflare's API
+# token, SES's secret key, OCI's private key in PEM) is a Docker secret like the
+# others, and its line must be in .env, empty when unused: an .env from before they
+# were added stops compose, which names the line. The server refuses to start on a key
+# of a way it was not told to use.
+# FVOCI_EMAIL_VERIFICATION=true needs a way of sending: without one fvoci stops as it
+# starts, and again at each restart (`docker compose logs fvoci` says
+# "email_verification is on, but this server sends no mail").
+#
+# Stopping waits for fvoci to finish its requests, its mail for 10 seconds more, and to
+# let go of its lock. Mail is kept in memory: what is still waiting then (a reset link,
+# an invitation, a confirmation of a sign-up) is not sent, and fvoci's last lines count
+# it.
+#
+# Backups and updates: the scripts beside this file take the project (-p; fvoci, or
+# COMPOSE_PROJECT_NAME), the compose files (-f, repeated for an override; this one
+# unless named), the .env (--env-file; the one beside the first file) and the profiles
+# (--profile, repeated; or COMPOSE_PROFILES in the .env, which plain compose commands
+# read too). They stop, changing nothing, when compose refuses the files and .env or
+# warns of them. The commonest warning is a `$` in a value, a variable to compose,
+# which gives the services the value without it: take it out to keep what they get,
+# or write `$$` or single quotes to give them the `$` (a secret key or a password
+# changed so no longer opens what it sealed). What compose said is shown without what
+# it quotes, which may be a secret pasted wrong: a line number and its words for what
+# they know, a count for the rest (`docker compose config -q` shows them). The
+# project's name and the images' (FVOCI_IMAGE, FVOCI_SEARCH_IMAGE) are names, shown as
+# they are (an image's that is not a name is refused, unshown): never put a secret on
+# their lines. update.sh refuses a running service that compose does not see (its
+# profile off, or gone from the new files); with cloudflared they warn when the range
+# of edge, which `down` may change, is not trusted.
+#   docker/backup.sh [--dir ~/fvoci-backups] [--keep-days 14]
+#     while fvoci runs or not: the database (pg_dump -Fc), the files of the volume (not
+#     S3's: the bucket is yours to back up, and it says so), copies of the .env and
+#     the compose files, in a folder <project>-<UTC time> that only its owner reads
+#     (700, files 600); then removes that project's backups older than the days given
+#     (0 keeps them all). The .env's copy holds every secret.
+#   docker/restore.sh [--key-not-checked] [--other-project] <backup folder>
+#     into new volumes only (docker compose down, then remove the project's volumes
+#     postgres-data and fvoci-data): a container of fvoci, a database with a table, a
+#     volume with a file, a backup whose <backup>/made names another project or file
+#     storage, or an .env whose FVOCI_SECRET_KEY is missing or not the backup's (each
+#     .env read as compose reads it, the shell's key winning over the one given) is
+#     refused, nothing changed. <backup folder> is trusted input. Then `up` (migrate
+#     brings an older backup's schema up), the search index made anew and the files
+#     compared with the records, on the admin socket.
+#   docker/update.sh [--no-pull] [--commit <sha>]
+#     once the new docker/ is in place and FVOCI_IMAGE in .env names the new image:
+#     checks the files and the .env first (a line the new version needs is named, and
+#     nothing is stopped), pulls (--no-pull: the images are here), asks the new image
+#     whether it can open the database (`--migrate --check`, nothing stopped), backs up,
+#     stops fvoci, `up`, and checks it is ready and runs the commit expected (--commit,
+#     or the image's label; unknown, not a failure, for an image built without it). It
+#     says how long fvoci was down, the schema's version before and after, the rows of
+#     users and blocks, and the log's ERROR and WARN lines. The image that ran before is
+#     tagged fvoci-server:before-update-<project>-<UTC time>. There are no migrations
+#     down: when it fails after the stop it says what is left, and going back from a
+#     schema that moved is restore.sh of the backup it made, with that image and the
+#     docker/ and .env that ran before. Over SSH, run it under tmux or nohup.
+
+name: fvoci
+
+services:
+  fvoci:
+    image: ${FVOCI_IMAGE:-fvoci-server:local}
+    build:
+      context: ..
+      dockerfile: docker/fvoci/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      search:
+        condition: service_healthy
+      # The profiles' services, when they run.
+      s3:
+        condition: service_healthy
+        required: false
+      mailpit:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    # An init as PID 1: a stop ends a server that is still starting.
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 40s
+    ports:
+      - "${FVOCI_BIND:-127.0.0.1}:${FVOCI_HOST_PORT:-8080}:8000"
+    networks: [edge, backend]
+    secrets:
+      - fvoci_db_password
+      - fvoci_secret_key
+      - fvoci_search_password
+      - fvoci_metrics_token
+      - s3_access_key_id
+      - s3_secret_access_key
+      - smtp_password
+      - cloudflare_api_token
+      - ses_secret_access_key
+      - oci_private_key
+    environment:
+      FVOCI_SERVER_URL: ${FVOCI_SERVER_URL:-http://localhost:8080}
+      FVOCI_DATABASE_KIND: postgres
+      FVOCI_DATABASE_CONNECTION: postgres://fvoci@postgres:5432/fvoci?sslmode=disable&application_name=fvoci
+      PGPASSWORD_FILE: /run/secrets/fvoci_db_password
+      FVOCI_ORG_CREATION: ${FVOCI_ORG_CREATION:-first_user_only}
+      FVOCI_SECRET_KEY_FILE: /run/secrets/fvoci_secret_key
+      FVOCI_TRUSTED_PROXIES: ${FVOCI_TRUSTED_PROXIES:-}
+      FVOCI_SEARCH_URL: https://search:9200
+      FVOCI_SEARCH_USERNAME: fvoci
+      FVOCI_SEARCH_PASSWORD_FILE: /run/secrets/fvoci_search_password
+      # Trusted for the search server alone, leaving OIDC, webhooks, S3 and mail on
+      # the system's roots.
+      FVOCI_SEARCH_CA_FILE: /opt/fvoci/search-ca/ca.pem
+      # Metrics on every network fvoci is on, published nowhere, behind the token.
+      FVOCI_METRICS_ADDRESS: "0.0.0.0:9092"
+      FVOCI_METRICS_TOKEN_FILE: /run/secrets/fvoci_metrics_token
+      FVOCI_FILE_STORAGE: ${FVOCI_FILE_STORAGE:-local}
+      FVOCI_FILE_STORAGE_S3_ENDPOINT: ${FVOCI_FILE_STORAGE_S3_ENDPOINT:-}
+      FVOCI_FILE_STORAGE_S3_BUCKET: ${FVOCI_FILE_STORAGE_S3_BUCKET:-}
+      FVOCI_FILE_STORAGE_S3_REGION: ${FVOCI_FILE_STORAGE_S3_REGION:-}
+      FVOCI_FILE_STORAGE_S3_HTTPS: ${FVOCI_FILE_STORAGE_S3_HTTPS:-false}
+      # An empty secret is not mounted, and an empty *_FILE is passed over.
+      AWS_ACCESS_KEY_ID_FILE: ${FVOCI_S3_ACCESS_KEY_ID:+/run/secrets/s3_access_key_id}
+      AWS_SECRET_ACCESS_KEY_FILE: ${FVOCI_S3_SECRET_ACCESS_KEY:+/run/secrets/s3_secret_access_key}
+      FVOCI_SMTP_HOST: ${FVOCI_SMTP_HOST:-}
+      FVOCI_SMTP_PORT: ${FVOCI_SMTP_PORT:-587}
+      FVOCI_SMTP_TLS: ${FVOCI_SMTP_TLS:-starttls}
+      FVOCI_SMTP_USER: ${FVOCI_SMTP_USER:-}
+      FVOCI_SMTP_PASSWORD_FILE: ${FVOCI_SMTP_PASSWORD:+/run/secrets/smtp_password}
+      FVOCI_MAIL_FROM: ${FVOCI_MAIL_FROM:-}
+      # Without a value: passed only when .env (or the shell) sets it, so that a
+      # mounted config.json keeps what it says otherwise.
+      FVOCI_EMAIL_VERIFICATION:
+      FVOCI_MAIL_TRANSPORT:
+      FVOCI_MAIL_API_ENDPOINT:
+      FVOCI_MAIL_PER_SECOND:
+      FVOCI_MAIL_RESET_QUEUE:
+      FVOCI_MAIL_RESET_PER_ACCOUNT_HOUR:
+      FVOCI_MAIL_INVITATION_QUEUE:
+      FVOCI_INVITATION_MAIL_RECIPIENTS:
+      FVOCI_INVITATION_MAIL_PER_HOUR:
+      FVOCI_INVITATION_MAIL_PER_ORG_HOUR:
+      FVOCI_CLOUDFLARE_ACCOUNT_ID:
+      FVOCI_CLOUDFLARE_API_TOKEN_FILE: ${FVOCI_CLOUDFLARE_API_TOKEN:+/run/secrets/cloudflare_api_token}
+      FVOCI_SES_REGION:
+      FVOCI_SES_ACCESS_KEY_ID:
+      FVOCI_SES_SECRET_ACCESS_KEY_FILE: ${FVOCI_SES_SECRET_ACCESS_KEY:+/run/secrets/ses_secret_access_key}
+      FVOCI_OCI_REGION:
+      FVOCI_OCI_TENANCY:
+      FVOCI_OCI_USER:
+      FVOCI_OCI_FINGERPRINT:
+      FVOCI_OCI_COMPARTMENT:
+      # The server reads the key's file itself.
+      FVOCI_OCI_PRIVATE_KEY_FILE: ${FVOCI_OCI_PRIVATE_KEY:+/run/secrets/oci_private_key}
+      FVOCI_LOG_FORMAT: ${FVOCI_LOG_FORMAT:-}
+    volumes:
+      - fvoci-data:/data
+      - search-ca:/opt/fvoci/search-ca:ro
+
+  # Makes the role fvoci what it must be, as the superuser, and ends.
+  roles:
+    image: postgres:18
+    entrypoint: ["/fvoci-role.sh"]
+    user: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+    secrets: [postgres_password, fvoci_db_password]
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: fvoci
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      FVOCI_DB_PASSWORD_FILE: /run/secrets/fvoci_db_password
+    volumes:
+      - ./postgres/fvoci-role.sh:/fvoci-role.sh:ro
+    healthcheck:
+      disable: true
+
+  # Brings the schema up to date as the owner of the tables, and ends: at once when it
+  # is up to date already.
+  migrate:
+    image: ${FVOCI_IMAGE:-fvoci-server:local}
+    command: ["--migrate"]
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    restart: "no"
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [backend]
+    secrets: [postgres_password]
+    environment:
+      FVOCI_DATABASE_KIND: postgres
+      FVOCI_DATABASE_CONNECTION: postgres://postgres@postgres:5432/fvoci?sslmode=disable&application_name=fvoci-migrate
+      PGPASSWORD_FILE: /run/secrets/postgres_password
+      FVOCI_LOG_FORMAT: ${FVOCI_LOG_FORMAT:-}
+    # Nothing is served: no health check of its own.
+    healthcheck:
+      disable: true
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    networks: [backend]
+    secrets: [postgres_password]
+    environment:
+      POSTGRES_DB: fvoci
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # Over TCP: while the image sets the volume up, its server listens on its socket only.
+      test: ["CMD", "pg_isready", "--host=127.0.0.1", "--username=postgres", "--dbname=fvoci"]
+      interval: 5s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  search:
+    image: ${FVOCI_SEARCH_IMAGE:-fvoci-search:local}
+    build:
+      context: search
+    restart: unless-stopped
+    # An init as PID 1 reaps the entry's helper that sets the user once the node answers.
+    init: true
+    networks: [backend]
+    secrets: [fvoci_search_password]
+    environment:
+      FVOCI_SEARCH_PASSWORD_FILE: /run/secrets/fvoci_search_password
+      OPENSEARCH_JAVA_OPTS: ${FVOCI_SEARCH_HEAP:--Xms512m -Xmx512m}
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - search-data:/usr/share/opensearch/data
+      - search-tls:/usr/share/opensearch/config/tls
+      - search-ca:/usr/share/opensearch/ca-out
+
+  s3:
+    profiles: [s3]
+    image: chrislusf/seaweedfs:4.53
+    # The image's own user, who owns /data.
+    user: seaweed
+    restart: unless-stopped
+    init: true
+    networks: [backend]
+    secrets: [s3_access_key_id, s3_secret_access_key]
+    environment:
+      S3_BUCKET: ${FVOCI_FILE_STORAGE_S3_BUCKET:-fvoci}
+    # One identity, from the secrets, and the bucket, made once the server answers.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        rm -f /tmp/bucket-ready
+        for secret in s3_access_key_id s3_secret_access_key; do
+          [ -s /run/secrets/$$secret ] || { echo "s3: the secret $$secret is empty" >&2; exit 1; }
+        done
+        umask 077
+        printf '{"identities":[{"name":"fvoci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Tagging"]}]}' \
+          "$$(cat /run/secrets/s3_access_key_id)" "$$(cat /run/secrets/s3_secret_access_key)" > /tmp/s3.json
+        weed server -dir=/data -s3 -s3.port=8333 -s3.config=/tmp/s3.json &
+        trap 'kill $$!; wait' TERM INT
+        until echo "s3.bucket.list" | weed shell -master=localhost:9333 2>/dev/null | grep -qw "$$S3_BUCKET"; do
+          echo "s3.bucket.create -name $$S3_BUCKET" | weed shell -master=localhost:9333 >/dev/null 2>&1 || true
+          sleep 1
+        done
+        touch /tmp/bucket-ready
+        wait
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/bucket-ready"]
+      interval: 5s
+      start_period: 60s
+    volumes:
+      - s3-data:/data
+
+  mailpit:
+    profiles: [mail]
+    image: axllent/mailpit:v1.33.1
+    # It keeps the mails in memory and needs no user of its own.
+    user: "65534:65534"
+    restart: unless-stopped
+    networks: [backend]
+
+  cloudflared:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:2026.10.7
+    # Its metrics stay inside its container; it updates only with this file.
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --metrics
+      - 127.0.0.1:20241
+      - run
+      - --token-file
+      - /run/secrets/tunnel_token
+    depends_on:
+      fvoci:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [edge]
+    secrets: [tunnel_token]
+
+networks:
+  edge: {}
+  backend:
+    internal: true
+
+volumes:
+  fvoci-data:
+  postgres-data:
+  search-data:
+  search-tls:
+  search-ca:
+  s3-data:
+
+secrets:
+  postgres_password:
+    environment: POSTGRES_PASSWORD
+  fvoci_db_password:
+    environment: FVOCI_DB_PASSWORD
+  fvoci_secret_key:
+    environment: FVOCI_SECRET_KEY
+  fvoci_search_password:
+    environment: FVOCI_SEARCH_PASSWORD
+  fvoci_metrics_token:
+    environment: FVOCI_METRICS_TOKEN
+  s3_access_key_id:
+    environment: FVOCI_S3_ACCESS_KEY_ID
+  s3_secret_access_key:
+    environment: FVOCI_S3_SECRET_ACCESS_KEY
+  smtp_password:
+    environment: FVOCI_SMTP_PASSWORD
+  cloudflare_api_token:
+    environment: FVOCI_CLOUDFLARE_API_TOKEN
+  ses_secret_access_key:
+    environment: FVOCI_SES_SECRET_ACCESS_KEY
+  oci_private_key:
+    environment: FVOCI_OCI_PRIVATE_KEY
+  tunnel_token:
+    environment: FVOCI_TUNNEL_TOKEN

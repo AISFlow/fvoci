@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <command>`: the development tasks in xtask/.
+xtask = "run --quiet --package xtask --"

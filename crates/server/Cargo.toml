@@ -1,0 +1,83 @@
+[package]
+name = "fvoci-server"
+description = "The fvoci board server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "fvoci-server"
+
+[[bin]]
+name = "fvoci-server"
+path = "src/main.rs"
+
+# The collab worker of the tests (see the file): built with them, never otherwise.
+[[bin]]
+name = "fvoci-test-worker"
+path = "tests/bin/fvoci-test-worker.rs"
+required-features = ["test-util"]
+
+[dependencies]
+fvoci-collab.workspace = true
+fvoci-model.workspace = true
+fvoci-store.workspace = true
+
+anyhow.workspace = true
+argon2.workspace = true
+aws-lc-rs.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+csv.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+httpdate.workspace = true
+jiff.workspace = true
+jsonwebtoken.workspace = true
+lettre.workspace = true
+mail-builder.workspace = true
+object_store.workspace = true
+prometheus.workspace = true
+pulldown-cmark.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs", "io-util", "process"] }
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+uuid.workspace = true
+zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[features]
+# Test support for this crate's tests: a file storage that fails when a test asks it to.
+test-util = ["fvoci-store/test-util", "fvoci-collab/test-util"]
+
+[dev-dependencies]
+mail-parser.workspace = true
+brotli.workspace = true
+fvoci-collab = { workspace = true, features = ["test-util"] }
+fvoci-server = { path = ".", features = ["test-util"] }
+fvoci-store = { workspace = true, features = ["test-util"] }
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite.workspace = true
+zip.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true

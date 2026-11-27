@@ -1,0 +1,7 @@
+{
+  "assets/fonts/enclosed-pua-metrics.json": {
+    "about": "Where the box and the digit or letter inside it lie for the enclosed characters of HWP documents: bounding boxes in font units, measured by rhwp. No outline of any font is in it; it names the face the boxes were measured against.",
+    "origin": "rhwp's own data (assets/fonts/enclosed-pua-metrics.json), the same file rhwp builds into the WebAssembly of @rhwp/core.",
+    "license": "MIT"
+  }
+}

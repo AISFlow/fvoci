@@ -1,0 +1,131 @@
+{
+  "description": "Carets as awareness updates of y-protocols, written by apps/web/tools/ydoc/carets.ts with the editor's own libraries; the server's tests (crates/server/src/collab/caret.rs) and the web app's read it. Do not edit by hand. said is what a client sends and told what the server sends on for it, both in base64; state is the JSON the server tells, null for no caret.",
+  "cases": [
+    {
+      "name": "a selection in a line of text",
+      "said": "AbLyGQTVAXsidXNlciI6e30sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo1fSwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQ==",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 7,
+      "clock": 1,
+      "state": "{\"user\":{\"id\":\"u7k3mpq1x9fjzr5d2a8wbn4yhc\"},\"cursor\":{\"anchor\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":5},\"assoc\":0},\"head\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":9},\"assoc\":-1}}}",
+      "told": "AQcB3AF7InVzZXIiOnsiaWQiOiJ1N2szbXBxMXg5Zmp6cjVkMmE4d2JuNHloYyJ9LCJjdXJzb3IiOnsiYW5jaG9yIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo1fSwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo5fSwiYXNzb2MiOi0xfX19"
+    },
+    {
+      "name": "a caret that says whose it is: the server says whose",
+      "said": "AbLyGQSbAnsidXNlciI6eyJpZCI6InNvbWVib2R5LWVsc2UiLCJuYW1lIjoiTWFsbG9yeSIsImNvbG9yIjoiI2ZmMDAwMCJ9LCJjdXJzb3IiOnsiYW5jaG9yIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6NX0sImFzc29jIjowfSwiaGVhZCI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjl9LCJhc3NvYyI6LTF9fSwibW9yZSI6WzEsMiwzXX0=",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 300,
+      "clock": 129,
+      "state": "{\"user\":{\"id\":\"u7k3mpq1x9fjzr5d2a8wbn4yhc\"},\"cursor\":{\"anchor\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":5},\"assoc\":0},\"head\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":9},\"assoc\":-1}}}",
+      "told": "AawCgQHcAXsidXNlciI6eyJpZCI6InU3azNtcHExeDlmanpyNWQyYTh3Ym40eWhjIn0sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjV9LCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjl9LCJhc3NvYyI6LTF9fX0="
+    },
+    {
+      "name": "a caret at the start of a body",
+      "said": "AbLyGQSSAXsidXNlciI6e30sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6bnVsbCwidG5hbWUiOiJkZWZhdWx0IiwiaXRlbSI6bnVsbCwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOm51bGwsInRuYW1lIjoiZGVmYXVsdCIsIml0ZW0iOm51bGwsImFzc29jIjowfX19",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 8,
+      "clock": 2,
+      "state": "{\"user\":{\"id\":\"u7k3mpq1x9fjzr5d2a8wbn4yhc\"},\"cursor\":{\"anchor\":{\"tname\":\"default\",\"assoc\":0},\"head\":{\"tname\":\"default\",\"assoc\":0}}}",
+      "told": "AQgCgwF7InVzZXIiOnsiaWQiOiJ1N2szbXBxMXg5Zmp6cjVkMmE4d2JuNHloYyJ9LCJjdXJzb3IiOnsiYW5jaG9yIjp7InRuYW1lIjoiZGVmYXVsdCIsImFzc29jIjowfSwiaGVhZCI6eyJ0bmFtZSI6ImRlZmF1bHQiLCJhc3NvYyI6MH19fQ=="
+    },
+    {
+      "name": "a caret in an empty paragraph",
+      "said": "AbLyGQSuAXsidXNlciI6e30sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6MX0sInRuYW1lIjpudWxsLCJpdGVtIjpudWxsLCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6MX0sInRuYW1lIjpudWxsLCJpdGVtIjpudWxsLCJhc3NvYyI6MH19fQ==",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 9,
+      "clock": 3,
+      "state": "{\"user\":{\"id\":\"u7k3mpq1x9fjzr5d2a8wbn4yhc\"},\"cursor\":{\"anchor\":{\"type\":{\"client\":11,\"clock\":1},\"assoc\":0},\"head\":{\"type\":{\"client\":11,\"clock\":1},\"assoc\":0}}}",
+      "told": "AQkDnQF7InVzZXIiOnsiaWQiOiJ1N2szbXBxMXg5Zmp6cjVkMmE4d2JuNHloYyJ9LCJjdXJzb3IiOnsiYW5jaG9yIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjF9LCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6MX0sImFzc29jIjowfX19"
+    },
+    {
+      "name": "a caret beside what no reader would keep: half of a pair of surrogates in a name",
+      "said": "AbLyGQToAXsidXNlciI6eyJuYW1lIjoiY3V0IFx1ZDgzZCJ9LCJjdXJzb3IiOnsiYW5jaG9yIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6NX0sImFzc29jIjowfSwiaGVhZCI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjl9LCJhc3NvYyI6LTF9fX0=",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 4294967297,
+      "clock": 1,
+      "state": "{\"user\":{\"id\":\"u7k3mpq1x9fjzr5d2a8wbn4yhc\"},\"cursor\":{\"anchor\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":5},\"assoc\":0},\"head\":{\"type\":{\"client\":11,\"clock\":2},\"item\":{\"client\":11,\"clock\":9},\"assoc\":-1}}}",
+      "told": "AYGAgIAQAdwBeyJ1c2VyIjp7ImlkIjoidTdrM21wcTF4OWZqenI1ZDJhOHdibjR5aGMifSwiY3Vyc29yIjp7ImFuY2hvciI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6NX0sImFzc29jIjowfSwiaGVhZCI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQ=="
+    },
+    {
+      "name": "a state that names no caret",
+      "said": "AbLyGQRQeyJ1c2VyIjp7ImlkIjoic29tZWJvZHktZWxzZSIsIm5hbWUiOiJNYWxsb3J5IiwiY29sb3IiOiIjZmYwMDAwIn0sImN1cnNvciI6bnVsbH0=",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 7,
+      "clock": 2,
+      "state": null,
+      "told": "AQcCBG51bGw="
+    },
+    {
+      "name": "a state without a caret",
+      "said": "AbLyGQQLeyJ1c2VyIjp7fX0=",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 7,
+      "clock": 2,
+      "state": null,
+      "told": "AQcCBG51bGw="
+    },
+    {
+      "name": "a state that is gone",
+      "said": "AbLyGQQEbnVsbA==",
+      "userId": "u7k3mpq1x9fjzr5d2a8wbn4yhc",
+      "number": 16384,
+      "clock": 2097152,
+      "state": null,
+      "told": "AYCAAYCAgAEEbnVsbA=="
+    }
+  ],
+  "refused": [
+    {
+      "name": "two states in one update",
+      "said": "ArLyGQTLAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjV9LCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo5fSwiYXNzb2MiOi0xfX19BwTLAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjV9LCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo5fSwiYXNzb2MiOi0xfX19"
+    },
+    {
+      "name": "no state at all",
+      "said": "AA=="
+    },
+    {
+      "name": "a byte after the state",
+      "said": "AbLyGQTVAXsidXNlciI6e30sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo1fSwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQA="
+    },
+    {
+      "name": "a state cut short",
+      "said": "AbLyGQTVAXsidXNlciI6e30sImN1cnNvciI6eyJhbmNob3IiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo1fSwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMQ=="
+    },
+    {
+      "name": "a caret with one end",
+      "said": "AbLyGQRseyJjdXJzb3IiOnsiYW5jaG9yIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6NX0sImFzc29jIjowfX19"
+    },
+    {
+      "name": "a place with something no place has",
+      "said": "AbLyGQTJAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6NX0sImFzc29jIjowLCJuYW1lIjoieCJ9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQ=="
+    },
+    {
+      "name": "a place of a client no browser counts to",
+      "said": "AbLyGQTMAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwiaXRlbSI6eyJjbGllbnQiOjkwMDcxOTkyNTQ3NDA5OTIsImNsb2NrIjowfSwiYXNzb2MiOjB9LCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQ=="
+    },
+    {
+      "name": "a place that names nothing",
+      "said": "AbLyGQSAAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo5fSwiYXNzb2MiOi0xfX19"
+    },
+    {
+      "name": "a place in a root type that is not the body's",
+      "said": "AbLyGQSSAXsiY3Vyc29yIjp7ImFuY2hvciI6eyJ0bmFtZSI6ImFub3RoZXIiLCJhc3NvYyI6MH0sImhlYWQiOnsidHlwZSI6eyJjbGllbnQiOjExLCJjbG9jayI6Mn0sInRuYW1lIjpudWxsLCJpdGVtIjp7ImNsaWVudCI6MTEsImNsb2NrIjo5fSwiYXNzb2MiOi0xfX19"
+    },
+    {
+      "name": "a caret that is no two places",
+      "said": "AbLyGQQReyJjdXJzb3IiOiJoZXJlIn0="
+    },
+    {
+      "name": "a caret as a list of two places",
+      "said": "AbLyGQS7AXsiY3Vyc29yIjpbeyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjV9LCJhc3NvYyI6MH0seyJ0eXBlIjp7ImNsaWVudCI6MTEsImNsb2NrIjoyfSwidG5hbWUiOm51bGwsIml0ZW0iOnsiY2xpZW50IjoxMSwiY2xvY2siOjl9LCJhc3NvYyI6LTF9XX0="
+    },
+    {
+      "name": "a place as a list",
+      "said": "AbLyGQSHAXsiY3Vyc29yIjp7ImFuY2hvciI6W251bGwsbnVsbCxudWxsLDBdLCJoZWFkIjp7InR5cGUiOnsiY2xpZW50IjoxMSwiY2xvY2siOjJ9LCJ0bmFtZSI6bnVsbCwiaXRlbSI6eyJjbGllbnQiOjExLCJjbG9jayI6OX0sImFzc29jIjotMX19fQ=="
+    },
+    {
+      "name": "a state that is no object",
+      "said": "AbLyGQQFWzEsMl0="
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+    "server_url": "http://localhost:8000",
+    "port": 8000,
+    "database_kind": "sqlite",
+    "database_connection": "/data/fvoci.db",
+    "serve_https": false,
+    "web_app_path": "/opt/fvoci/web",
+    "file_storage": "local",
+    "file_storage_path": "/data/files",
+    "session_idle_days": 14,
+    "session_max_days": 90,
+    "listen_loopback_only": false,
+    "serve_admin_socket": true,
+    "admin_socket_path": "/var/tmp/fvoci_local.socket",
+    "metrics_address": "",
+    "metrics_token": ""
+}

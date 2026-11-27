@@ -1,0 +1,2026 @@
+/** WASM getDocumentInfo() 반환 타입 */
+export interface DocumentInfo {
+  version: string;
+  sectionCount: number;
+  pageCount: number;
+  encrypted: boolean;
+  hwp3Variant?: boolean;
+  fallbackFont: string;
+  fontsUsed: string[];  // 문서에서 사용하는 폰트 이름 목록
+  /** HWPX non-embedded substFont: [원본 face, 문서 선언 대체 face]. */
+  fontSubstitutions?: Array<[string, string]>;
+}
+
+/** WASM getPageInfo() 반환 타입 */
+export interface PageInfo {
+  pageIndex: number;
+  /** 문서가 매기는 쪽번호 (1-based, `쪽 > 새 번호로 시작` 반영).
+   *
+   * 물리 순번(pageIndex + 1)과 다를 수 있다 — 상태 표시줄이 보여야 할 숫자는 이쪽이다.
+   * 구 WASM 은 이 필드를 내보내지 않으므로 optional 이다 (#5749). */
+  pageNumber?: number;
+  width: number;
+  height: number;
+  /** 공통 Print paint가 발행한 종이 크기. 원본 편집 크기와 구분하며 구 WASM에는 없다. */
+  printSize?: { width: number; height: number };
+  sectionIndex: number;
+  /** 왼쪽 여백 (px) */
+  marginLeft: number;
+  /** 오른쪽 여백 (px) */
+  marginRight: number;
+  /** 위 여백 (px) */
+  marginTop: number;
+  /** 아래 여백 (px) */
+  marginBottom: number;
+  /** 머리말 여백 (px) */
+  marginHeader: number;
+  /** 꼬리말 여백 (px) */
+  marginFooter: number;
+  /** 렌더러가 사용하는 정확한 머리말/꼬리말 영역 (px, 페이지 좌표). */
+  headerArea?: { x: number; y: number; width: number; height: number };
+  footerArea?: { x: number; y: number; width: number; height: number };
+  /** 본문 상자의 왼쪽/오른쪽 (px, 페이지 좌표).
+   *
+   * marginLeft/marginRight 는 PageDef 원본이라 제본 여백이 빠져 있고 맞쪽 제본 짝수 쪽의
+   * 좌우 뒤바꿈도 반영되지 않는다. 그리기·히트테스트처럼 "본문이 실제로 어디부터인가"가
+   * 필요한 곳은 이 둘을 쓴다 (#4971). */
+  bodyLeft: number;
+  bodyRight: number;
+  /** 제본 여백 (px) — 본문 왼쪽 경계에 더해져 있다 */
+  marginGutter?: number;
+  /** 맞쪽 제본의 짝수 쪽인가 — 그 쪽은 좌우 여백이 뒤바뀌어 적용된다 */
+  bindingMirrored?: boolean;
+  /** 쪽 테두리/쪽 영역 왼쪽 위치 (px) */
+  pageBorderLeft?: number;
+  /** 쪽 테두리/쪽 영역 오른쪽 여백 (px) */
+  pageBorderRight?: number;
+  /** 쪽 테두리/쪽 영역 위쪽 위치 (px) */
+  pageBorderTop?: number;
+  /** 쪽 테두리/쪽 영역 아래쪽 여백 (px) */
+  pageBorderBottom?: number;
+  /** 단별 영역 (px, 페이지 좌표) */
+  columns?: { x: number; width: number }[];
+}
+
+/** WASM getPageDef() 반환 타입 — HWPUNIT 원본값 */
+export interface PageDef {
+  width: number;
+  height: number;
+  marginLeft: number;
+  marginRight: number;
+  marginTop: number;
+  marginBottom: number;
+  marginHeader: number;
+  marginFooter: number;
+  marginGutter: number;
+  landscape: boolean;
+  /** 0=한쪽, 1=맞쪽, 2=위로 */
+  binding: number;
+}
+
+export interface BorderLineProps {
+  type: number;
+  width: number;
+  color: string;
+}
+
+/** WASM getPageBorderFill() 반환 타입 */
+export interface PageBorderFillSettings {
+  attr: number;
+  basis: 'paper' | 'page';
+  spacingLeft: number;
+  spacingRight: number;
+  spacingTop: number;
+  spacingBottom: number;
+  borderFillId: number;
+  headerInside: boolean;
+  footerInside: boolean;
+  fillArea: 'paper' | 'page' | 'border';
+  hideBorder: boolean;
+  hideFill: boolean;
+  borderLeft: BorderLineProps;
+  borderRight: BorderLineProps;
+  borderTop: BorderLineProps;
+  borderBottom: BorderLineProps;
+  fillType: 'none' | 'solid' | string;
+  fillColor: string;
+  patternColor: string;
+  patternType: number;
+  applyPage?: 'all' | 'exceptFirst' | 'firstOnly';
+}
+
+export type EndnoteNumberFormat =
+  | 'digit'
+  | 'circledDigit'
+  | 'upperRoman'
+  | 'lowerRoman'
+  | 'upperAlpha'
+  | 'lowerAlpha'
+  | 'hangulSyllable'
+  | 'hangulJamo'
+  | 'hangulDigit'
+  | 'hanjaDigit';
+
+/** WASM getEndnoteShape() 반환 타입 — HWPUNIT 원본값 */
+export interface EndnoteShapeSettings {
+  ok?: boolean;
+  numberFormat: EndnoteNumberFormat | string;
+  userChar: string;
+  prefixChar: string;
+  suffixChar: string;
+  startNumber: number;
+  separatorEnabled: boolean;
+  separatorLength: number;
+  separatorMarginTop: number;
+  separatorMarginBottom: number;
+  noteSpacing: number;
+  separatorLineType: number;
+  separatorLineWidth: number;
+  separatorColor: string;
+  numbering: 'continue' | 'restartSection' | 'restartPage' | string;
+  placement: 'documentEnd' | 'sectionEnd' | string;
+}
+
+export interface NoteEditInfo {
+  ok: boolean;
+  kind: 'footnote' | 'endnote' | string;
+  pageNum: number;
+  footnoteIndex: number;
+  fnParaIndex: number;
+  charOffset: number;
+  virtualParaIndex?: number;
+}
+
+/** 구역 정의 (SectionDef) */
+export interface SectionDef {
+  /** 구역 개요 번호 정의 ID. 생략하면 현재 정의를 유지한다. */
+  outlineNumberingId?: number;
+  pageNum: number;
+  /** 쪽 번호 종류: 0=이어서, 1=홀수, 2=짝수 (사용자 지정은 pageNum > 0) */
+  pageNumType: number;
+  pictureNum: number;
+  tableNum: number;
+  equationNum: number;
+  columnSpacing: number;
+  defaultTabSpacing: number;
+  hideHeader: boolean;
+  hideFooter: boolean;
+  hideMasterPage: boolean;
+  hideBorder: boolean;
+  hideFill: boolean;
+  hideEmptyLine: boolean;
+}
+
+/** 표·글상자 편집 경로 엔트리. 각 레벨은 실제 문단을 소유한 컨테이너 하나를 나타낸다. */
+export interface CellPathEntry {
+  controlIndex: number;
+  /** 표의 셀 번호. 독립 글상자는 0, 묶음은 원본 자식 순서의 깊이 우선 글상자 번호. */
+  cellIndex: number;
+  cellParaIndex: number;
+}
+
+/**
+ * [Task #1138] 표 셀 by_path WASM API 의 path segment.
+ * Rust API 의 JSON key (`controlIdx`/`cellIdx`/`cellParaIdx`) 와 일치하는 짧은 형식.
+ * `CellPathEntry` 와 의미는 같으나 직렬화 시 key 형식이 다름.
+ */
+export interface CellPathSegment {
+  controlIdx: number;
+  cellIdx: number;
+  cellParaIdx: number;
+}
+export type CellPath = CellPathSegment[];
+export type CellPathLike = Array<CellPathEntry | CellPathSegment>;
+
+/** 문서 트리 DFS 순회 컨텍스트 엔트리 */
+export interface NavContextEntry {
+  parentPara: number;
+  ctrlIdx: number;
+  ctrlTextPos: number;
+  cellIdx: number;
+  isTextBox: boolean;
+}
+
+/** WASM getCursorRect() 반환 타입 */
+export interface CursorRect {
+  pageIndex: number;
+  x: number;
+  y: number;
+  height: number;
+  /** Clockwise angle of the composed TextBox caret about its top endpoint. */
+  rotation?: number;
+  /** 표 셀 내부 커서일 때만 제공되는 가시 셀 bbox */
+  cellBounds?: { x: number; y: number; w: number; h: number };
+  /** 원래 TextRun 좌표가 셀 bbox를 벗어나 보정됐는지 여부 */
+  cellOverflowed?: boolean;
+}
+
+/** WASM hitTest() 반환 타입 */
+export interface HitTestResult {
+  sectionIndex: number;
+  paragraphIndex: number;
+  charOffset: number;
+  /** 셀/글상자 컨텍스트 (셀 또는 글상자 내부 클릭 시에만 존재) */
+  parentParaIndex?: number;
+  controlIndex?: number;
+  cellIndex?: number;
+  cellParaIndex?: number;
+  /** 중첩 표 전체 경로 (depth 1=단일 표, depth 2+=중첩 표) */
+  cellPath?: CellPathEntry[];
+  /** 글상자 내부 여부 */
+  isTextBox?: boolean;
+  /** 필드 내부 여부 (ClickHere 등) */
+  isField?: boolean;
+  /** 필드 ID (isField=true일 때) */
+  fieldId?: number;
+  /** 필드 타입 ("clickhere" 등) */
+  fieldType?: string;
+}
+
+/** WASM hitTestBodyFootnoteMarker() 반환 타입 */
+export interface BodyFootnoteMarkerHit {
+  hit: boolean;
+  sectionIndex?: number;
+  paragraphIndex?: number;
+  controlIndex?: number;
+  footnoteNumber?: number;
+  footnoteIndex?: number;
+  bbox?: { x: number; y: number; w: number; h: number };
+  cursorRect?: CursorRect;
+}
+
+/** WASM getFootnoteAtCursor() 반환 타입 */
+export interface FootnoteAtCursorResult {
+  hit: boolean;
+  sectionIndex?: number;
+  paragraphIndex?: number;
+  controlIndex?: number;
+  charOffset?: number;
+  footnoteNumber?: number;
+}
+
+/** WASM deleteFootnote() 반환 타입 */
+export interface DeleteFootnoteResult {
+  ok: boolean;
+  sectionIndex: number;
+  paragraphIndex: number;
+  controlIndex: number;
+  charOffset: number;
+  deletedNumber: number;
+}
+
+/** 커서 위치의 필드 범위 정보 */
+export interface FieldInfoResult {
+  inField: boolean;
+  fieldId?: number;
+  fieldType?: string;
+  startCharIdx?: number;
+  endCharIdx?: number;
+  isGuide?: boolean;
+  guideName?: string;
+  editableInForm?: boolean;
+}
+
+/** WASM getLineInfo() 반환 타입 */
+export interface LineInfo {
+  lineIndex: number;
+  lineCount: number;
+  charStart: number;
+  charEnd: number;
+}
+
+/** WASM getTableDimensions() 반환 타입 */
+export interface TableDimensions {
+  rowCount: number;
+  colCount: number;
+  cellCount: number;
+}
+
+/** WASM getCellInfo() 반환 타입 */
+export interface CellInfo {
+  row: number;
+  col: number;
+  rowSpan: number;
+  colSpan: number;
+}
+
+/** WASM getTableCellBboxes() 반환 타입 */
+export interface CellBbox {
+  cellIdx: number;
+  row: number;
+  col: number;
+  rowSpan: number;
+  colSpan: number;
+  pageIndex: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** WASM moveVertical() 반환 타입 */
+export interface MoveVerticalResult {
+  sectionIndex: number;
+  paragraphIndex: number;
+  charOffset: number;
+  parentParaIndex?: number;
+  controlIndex?: number;
+  cellIndex?: number;
+  cellParaIndex?: number;
+  /** 중첩 표 전체 경로 */
+  cellPath?: CellPathEntry[];
+  /** 글상자 내부 여부 */
+  isTextBox?: boolean;
+  pageIndex: number;
+  x: number;
+  y: number;
+  height: number;
+  preferredX: number;
+  /** 커서 좌표 조회 실패 시 false */
+  rectValid?: boolean;
+}
+
+/** 선택 영역의 줄별 사각형 (렌더링용) */
+export interface SelectionRect {
+  pageIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 글자 서식 속성 (CharShape) */
+export interface CharProperties {
+  fontFamily?: string;
+  fontSize?: number;       // HWPUNIT (1pt = 100, base_size)
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  textColor?: string;      // '#RRGGBB'
+  shadeColor?: string;     // '#RRGGBB'
+  emboss?: boolean;
+  engrave?: boolean;
+  charShapeId?: number;
+  fontId?: number;
+  fontIds?: number[];       // 언어별 개별 글꼴 ID (7개)
+  // 확장 속성
+  underlineType?: string;  // 'None' | 'Bottom' | 'Top'
+  underlineColor?: string;
+  outlineType?: number;    // 0-6
+  shadowType?: number;     // 0=없음, 1=비연속, 2=연속
+  shadowColor?: string;
+  shadowOffsetX?: number;  // -100~100
+  shadowOffsetY?: number;
+  strikeColor?: string;
+  subscript?: boolean;
+  superscript?: boolean;
+  // 언어별 배열 (7개: 한글/영문/한자/일어/외국어/기호/사용자)
+  fontFamilies?: string[];
+  ratios?: number[];       // 장평
+  spacings?: number[];     // 자간
+  relativeSizes?: number[];// 상대크기
+  charOffsets?: number[];  // 글자 위치
+  fontName?: string;       // 글꼴 변경 시 (mods 전용)
+  // 강조점/밑줄모양/취소선모양/커닝
+  emphasisDot?: number;    // 0=없음, 1=● 2=○ 3=ˇ 4=˜ 5=･ 6=:
+  underlineShape?: number; // 0=실선, 1=긴점선, 2=점선, ...(표 27 선 종류)
+  strikeShape?: number;    // 0=실선, 1=긴점선, 2=점선, ...(표 27 선 종류)
+  kerning?: boolean;
+  // 테두리/배경
+  borderFillId?: number;
+  borderLeft?: { type: number; width: number; color: string };
+  borderRight?: { type: number; width: number; color: string };
+  borderTop?: { type: number; width: number; color: string };
+  borderBottom?: { type: number; width: number; color: string };
+  fillType?: string;       // 'none' | 'solid'
+  fillColor?: string;      // '#RRGGBB'
+  patternColor?: string;   // '#RRGGBB'
+  patternType?: number;    // 0=없음, 1=가로줄, 2=세로줄, 3=역슬래시, 4=슬래시, 5=십자, 6=X자
+}
+
+/** 문단 서식 속성 (ParaShape) — WASM getParaPropertiesAt 반환 타입 */
+export interface ParaProperties {
+  alignment?: string;        // 'justify'|'left'|'right'|'center'|'distribute'|'split'
+  lineSpacing?: number;      // Percent일 때 %, 그 외 HWPUNIT
+  lineSpacingType?: string;  // 'Percent'|'Fixed'|'SpaceOnly'|'Minimum'
+  marginLeft?: number;       // px (96dpi, zoom=1 기준, ResolvedParaStyle)
+  marginRight?: number;      // px (96dpi, zoom=1 기준, ResolvedParaStyle)
+  indent?: number;           // px (96dpi, zoom=1 기준, ResolvedParaStyle)
+  spacingBefore?: number;    // px (96dpi, zoom=1 기준)
+  spacingAfter?: number;     // px (96dpi, zoom=1 기준)
+  paraShapeId?: number;
+  // 확장 탭 속성
+  headType?: string;         // 'None'|'Outline'|'Number'|'Bullet'
+  paraLevel?: number;        // 0-6 (=1-7수준)
+  numberingId?: number;      // 번호/글머리표 정의 ID (1-based, 0=없음)
+  widowOrphan?: boolean;
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  pageBreakBefore?: boolean;
+  fontLineHeight?: boolean;
+  singleLine?: boolean;
+  autoSpaceKrEn?: boolean;
+  autoSpaceKrNum?: boolean;
+  verticalAlign?: number;    // 0=글꼴기준, 1=위, 2=가운데, 3=아래
+  englishBreakUnit?: number; // 0=단어, 1=하이픈, 2=글자
+  koreanBreakUnit?: number;  // 0=어절, 1=글자
+  // 탭 설정 탭 속성
+  tabAutoLeft?: boolean;
+  tabAutoRight?: boolean;
+  tabStops?: { position: number; type: number; fill: number }[];  // position 은 HWPUNIT×2 (core/tab-units.ts)
+  defaultTabSpacing?: number;    // HWPUNIT×2 (읽기 전용, 구역 기본 탭 간격)
+  // 테두리/배경 탭 속성
+  borderFillId?: number;
+  borderLeft?: { type: number; width: number; color: string };
+  borderRight?: { type: number; width: number; color: string };
+  borderTop?: { type: number; width: number; color: string };
+  borderBottom?: { type: number; width: number; color: string };
+  fillType?: string;       // 'none' | 'solid'
+  fillColor?: string;      // '#RRGGBB'
+  patternColor?: string;   // '#RRGGBB'
+  patternType?: number;    // 0=없음, 1~6=무늬
+  borderSpacing?: number[];  // [좌, 우, 상, 하] HWPUNIT
+  borderConnect?: boolean;   // 문단 테두리 연결
+  borderIgnoreMargin?: boolean; // 문단 여백 무시
+}
+
+/** 테두리 선 정보 */
+export interface BorderLineInfo {
+  /** 선 종류 (0=없음, 1=실선, 2=파선, 3=점선, ...) */
+  type: number;
+  /** 선 굵기 (0-6) */
+  width: number;
+  /** 선 색상 (#rrggbb) */
+  color: string;
+}
+
+/** WASM getCellProperties() 반환 타입 — HWPUNIT 원본값 */
+export interface CellProperties {
+  /** Explicit source-paint replacement intent: left, right, top, bottom. */
+  borderPaintSides?: boolean[];
+  width: number;
+  height: number;
+  paddingLeft: number;
+  paddingRight: number;
+  paddingTop: number;
+  paddingBottom: number;
+  /** 셀 고유 안 여백 지정 */
+  applyInnerMargin: boolean;
+  /** 0=top, 1=center, 2=bottom */
+  verticalAlign: number;
+  /** 0=horizontal, 1=vertical */
+  textDirection: number;
+  isHeader: boolean;
+  /** 셀 보호 */
+  cellProtect?: boolean;
+  /** 셀 필드 이름 */
+  fieldName?: string;
+  /** 양식 모드에서 편집 가능 */
+  editableInForm?: boolean;
+  /** 테두리/배경 */
+  borderFillId?: number;
+  borderLeft?: BorderLineInfo;
+  borderRight?: BorderLineInfo;
+  borderTop?: BorderLineInfo;
+  borderBottom?: BorderLineInfo;
+  fillType?: string;
+  fillColor?: string;
+  patternColor?: string;
+  patternType?: number;
+  /** 대각선 선 종류 (0=없음, 1=실선, 2=파선, ...) */
+  diagonalLine?: number;
+  /** / 대각선 방향 비트 */
+  diagonalSlash?: number;
+  /** \ 대각선 방향 비트 */
+  diagonalBackSlash?: number;
+  /** 대각선 굵기 (0-6) */
+  diagonalWidth?: number;
+  /** 대각선 색상 (#rrggbb) */
+  diagonalColor?: string;
+  /** 중심선 방향: NONE / VERTICAL / HORIZONTAL / CROSS */
+  centerLine?: string;
+}
+
+/** WASM getTableProperties() 반환 타입 — HWPUNIT 원본값 */
+export interface TableProperties {
+  cellSpacing: number;
+  paddingLeft: number;
+  paddingRight: number;
+  paddingTop: number;
+  paddingBottom: number;
+  /** 0=none(나누지 않음), 1=cellBreak(셀 단위로 나눔) */
+  pageBreak: number;
+  repeatHeader: boolean;
+  /** 표 전체 크기 (HWPUNIT) */
+  tableWidth?: number;
+  tableHeight?: number;
+  /** 바깥 여백 (HWP16) */
+  outerLeft?: number;
+  outerRight?: number;
+  outerTop?: number;
+  outerBottom?: number;
+  /** 캡션 */
+  hasCaption?: boolean;
+  captionDirection?: number;  // 0=왼쪽, 1=오른쪽, 2=위쪽, 3=아래쪽
+  captionVertAlign?: number;  // 0=위, 1=가운데, 2=아래 (Left/Right 캡션)
+  captionWidth?: number;      // HWPUNIT
+  captionSpacing?: number;    // HWP16
+  /** 글자처럼 취급 (본문배치) */
+  treatAsChar?: boolean;
+  /** 본문과의 배치 */
+  textWrap?: string;
+  /** 세로 위치 기준 */
+  vertRelTo?: string;
+  /** 세로 정렬 */
+  vertAlign?: string;
+  /** 가로 위치 기준 */
+  horzRelTo?: string;
+  /** 가로 정렬 */
+  horzAlign?: string;
+  /** 세로 오프셋 (HWPUNIT) */
+  vertOffset?: number;
+  /** 가로 오프셋 (HWPUNIT) */
+  horzOffset?: number;
+  /** 쪽 영역 안으로 제한 */
+  restrictInPage?: boolean;
+  /** 서로 겹침 허용 */
+  allowOverlap?: boolean;
+  /** 개체와 조판부호를 항상 같은 쪽에 놓기 */
+  keepWithAnchor?: boolean;
+  /** 테두리/배경 */
+  borderFillId?: number;
+  borderLeft?: BorderLineInfo;
+  borderRight?: BorderLineInfo;
+  borderTop?: BorderLineInfo;
+  borderBottom?: BorderLineInfo;
+  fillType?: string;
+  fillColor?: string;
+  patternColor?: string;
+  patternType?: number;
+}
+
+/** WASM getPageControlLayout() 반환 요소 */
+export interface NoteControlRef {
+  kind: 'footnote' | 'endnote';
+  sectionIdx: number;
+  paraIdx: number;
+  controlIdx: number;
+  noteParaIdx: number;
+  innerControlIdx: number;
+}
+
+export interface ControlLayoutItem {
+  type: 'table' | 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  secIdx?: number;
+  paraIdx?: number;
+  controlIdx?: number;
+  /** 표 셀 내 수식인 경우: 셀 인덱스 */
+  cellIdx?: number;
+  /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
+  cellParaIdx?: number;
+  /** 각주/미주 내부 컨트롤인 경우 원본 위치 */
+  noteRef?: NoteControlRef;
+  outerTableControlIdx?: number;
+  /** Source HF subList; secIdx is its owning section, not the displayed page section. */
+  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
+  /**
+   * [Task #1280 v2] 렌더 정렬키 — 겹침 클릭 시 "최상단 개체" 판정용.
+   * Rust `paper_node_sort_key`(layout.rs)와 단일 진실 원천. 클수록 위.
+   * plane: BehindText=1, 어울림/기본=2, InFrontOfText=3.
+   */
+  plane?: number;
+  /** [Task #1280 v2] 개체 z-order (작을수록 먼저 그림 = 아래). */
+  zOrder?: number;
+  /**
+   * [Task #1280 v2] 같은 plane/zOrder 내 안정 정렬 tie-breaker.
+   * [#4334] 더 이상 스칼라가 아니다 — 문서 경로 배열
+   * `[secIdx, paraIdx, ...셀 경로(controlIdx,cellIdx,cellParaIdx)*, controlIdx]`
+   * (`doc_path_for_node`, render_tree.rs). `next_id()` 카운터에도, layer 유무에 따라
+   * 서로 다른 자릿수 공간을 쓰던 예전 패킹된 u32 에도 의존하지 않는다. 사전식 비교
+   * (`compareLexArrays`, input-handler-picture.ts) 로 정렬한다.
+   * HF nodes can retain internal sentinel components here. Use secIdx plus
+   * headerFooter for source ownership; stableIndex is only a paint ordering key.
+   */
+  stableIndex?: number[];
+  /** [Task #1280 v2] 텍스트 어울림 모드(이미지뿐 아니라 shape/line/group에도 노출). */
+  wrap?: string;
+  /**
+   * [Task #2230] 그림 미지정 placeholder(bin 참조 실패 + 외부 경로 없음).
+   * 더블클릭 시 그림 지정(파일 선택) 진입 분기 근거.
+   */
+  missing?: boolean;
+}
+
+/** 개체 참조 (그림/글상자 공용) */
+export interface ObjectRef {
+  sec: number;
+  ppi: number;
+  ci: number;
+  type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
+  /** 표 셀 내 수식인 경우: 셀 인덱스 */
+  cellIdx?: number;
+  /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
+  cellParaIdx?: number;
+  noteRef?: NoteControlRef;
+}
+
+/** WASM getShapeProperties() 반환 타입 */
+export interface ShapeProperties {
+  width: number;
+  height: number;
+  treatAsChar: boolean;
+  vertRelTo: string;
+  vertAlign: string;
+  horzRelTo: string;
+  horzAlign: string;
+  vertOffset: number;
+  horzOffset: number;
+  textWrap: string;
+  /** 크기 고정 */
+  sizeProtect?: boolean;
+  tbMarginLeft?: number;
+  tbMarginRight?: number;
+  tbMarginTop?: number;
+  tbMarginBottom?: number;
+  tbVerticalAlign?: string;
+  borderColor?: number;
+  borderWidth?: number;
+  borderAttr?: number;
+  borderOutlineStyle?: number;
+  lineType?: number;         // 0=없음, 1=실선, 2=파선, 3=점선, 4=일점쇄선, 5=이점쇄선, ...
+  lineEndShape?: number;     // 0=둥근, 1=평면
+  arrowStart?: number;       // 0=없음, 1~6=화살표 모양
+  arrowEnd?: number;
+  arrowStartSize?: number;   // 0~8
+  arrowEndSize?: number;
+  rotationAngle?: number;
+  horzFlip?: boolean;
+  vertFlip?: boolean;
+  fillType?: string;
+  fillBgColor?: number;
+  fillPatColor?: number;
+  fillPatType?: number;
+  fillAlpha?: number;
+  gradientType?: number;
+  gradientAngle?: number;
+  gradientCenterX?: number;
+  gradientCenterY?: number;
+  gradientBlur?: number;
+  roundRate?: number;
+  description: string;
+}
+
+/** WASM getEquationProperties() 반환 타입 */
+export interface EquationProperties {
+  width?: number;
+  height?: number;
+  treatAsChar?: boolean;
+  vertRelTo?: string;
+  vertAlign?: string;
+  horzRelTo?: string;
+  horzAlign?: string;
+  vertOffset?: number;
+  horzOffset?: number;
+  textWrap?: string;
+  /** 크기 고정 */
+  sizeProtect?: boolean;
+  zOrder?: number;
+  instanceId?: number;
+  outerMarginLeft?: number;
+  outerMarginTop?: number;
+  outerMarginRight?: number;
+  outerMarginBottom?: number;
+  hasCaption?: boolean;
+  captionDirection?: string;
+  captionWidth?: number;
+  captionSpacing?: number;
+  description?: string;
+  script: string;
+  fontSize: number;
+  color: number;
+  baseline: number;
+  fontName: string;
+}
+
+/** WASM getPictureProperties() 반환 타입 */
+export interface PictureProperties {
+  width: number;
+  height: number;
+  treatAsChar: boolean;
+  vertRelTo: string;
+  vertAlign: string;
+  horzRelTo: string;
+  horzAlign: string;
+  vertOffset: number;
+  horzOffset: number;
+  textWrap: string;
+  /** 쪽 영역 안으로 제한 */
+  restrictInPage?: boolean;
+  /** 서로 겹침 허용 */
+  allowOverlap?: boolean;
+  /** 크기 고정 */
+  sizeProtect?: boolean;
+  brightness: number;
+  contrast: number;
+  effect: string;
+  /** 그림 개체 전체 투명도. 한컴 UI 기준 0=불투명, 100=완전 투명. */
+  transparency?: number;
+  description: string;
+  rotationAngle: number;
+  horzFlip: boolean;
+  vertFlip: boolean;
+  originalWidth: number;
+  originalHeight: number;
+  cropLeft: number;
+  cropTop: number;
+  cropRight: number;
+  cropBottom: number;
+  paddingLeft: number;
+  paddingTop: number;
+  paddingRight: number;
+  paddingBottom: number;
+  outerMarginLeft: number;
+  outerMarginTop: number;
+  outerMarginRight: number;
+  outerMarginBottom: number;
+  borderColor: number;
+  borderWidth: number;
+  hasCaption: boolean;
+  captionDirection: string;
+  captionVertAlign: string;
+  captionWidth: number;
+  captionSpacing: number;
+  captionMaxWidth: number;
+  captionIncludeMargin: boolean;
+  /** [Task #741 후속] 외부 file path (HWP3 외부 그림). 부재 시 문서 포함 그림. */
+  externalPath?: string;
+}
+
+/** 양식 개체 히트 결과 */
+export interface FormObjectHitResult {
+  found: boolean;
+  sec?: number;
+  para?: number;
+  ci?: number;
+  formType?: 'PushButton' | 'CheckBox' | 'ComboBox' | 'RadioButton' | 'Edit';
+  name?: string;
+  value?: number;
+  caption?: string;
+  text?: string;
+  bbox?: { x: number; y: number; w: number; h: number };
+  // 셀 내부 위치 (표 셀 안에 있는 경우)
+  inCell?: boolean;
+  tablePara?: number;
+  tableCi?: number;
+  cellIdx?: number;
+  cellPara?: number;
+}
+
+/** 양식 개체 값 정보 */
+export interface FormValueResult {
+  ok: boolean;
+  formType?: string;
+  name?: string;
+  value?: number;
+  text?: string;
+  caption?: string;
+  enabled?: boolean;
+}
+
+/** 양식 개체 상세 정보 */
+export interface FormObjectInfoResult {
+  ok: boolean;
+  formType?: string;
+  name?: string;
+  value?: number;
+  text?: string;
+  caption?: string;
+  enabled?: boolean;
+  width?: number;
+  height?: number;
+  foreColor?: number;
+  backColor?: number;
+  properties?: Record<string, string>;
+  /** ComboBox 항목 목록 (스크립트 InsertString 추출) */
+  items?: string[];
+}
+
+/** 텍스트 검색 결과 */
+export interface SearchResult {
+  found: boolean;
+  /** Find/F3가 실제로 순회할 수 있는 전체 매치 수. 이전 WASM에서는 없을 수 있다. */
+  totalMatchCount?: number;
+  wrapped?: boolean;
+  sec?: number;
+  para?: number;
+  charOffset?: number;
+  length?: number;
+  cellContext?: {
+    parentPara: number;
+    ctrlIdx: number;
+    cellIdx: number;
+    cellPara: number;
+  };
+  /** 중첩 표/글상자 매치의 전체 경로 */
+  cellPath?: CellPathEntry[];
+  /** 수식 스크립트 매치 시 문단 controls 안의 Equation 인덱스 */
+  equationControl?: number;
+}
+
+/** 전체 검색 결과 항목 */
+export interface SearchHit {
+  sec: number;
+  /** 본문 매치: 문단 인덱스. 셀 매치: 부모(호스트) 문단 인덱스 (= cellContext.parentPara) */
+  para: number;
+  charOffset: number;
+  length: number;
+  /** 표 셀/글상자 내부 매치 시 컨텍스트. cellPara가 실제 매치 문단 인덱스 */
+  cellContext?: {
+    parentPara: number;
+    ctrlIdx: number;
+    cellIdx: number;
+    cellPara: number;
+  };
+  /** 중첩 표/글상자 매치의 전체 경로 */
+  cellPath?: CellPathEntry[];
+  /** 수식 스크립트 매치 시 문단 controls 안의 Equation 인덱스 */
+  equationControl?: number;
+}
+
+/** 치환 결과 */
+export interface ReplaceResult {
+  ok: boolean;
+  charOffset?: number;
+  newLength?: number;
+}
+
+/** 단일 치환 (검색어 기반) 결과 */
+export interface ReplaceOneResult {
+  ok: boolean;
+  sec?: number;
+  para?: number;
+  charOffset?: number;
+  newLength?: number;
+}
+
+/** 전체 치환 결과 */
+export interface ReplaceAllResult {
+  ok: boolean;
+  count?: number;
+}
+
+/** 쪽 번호 조회 결과 */
+export interface PageOfPositionResult {
+  ok: boolean;
+  page?: number;
+}
+
+/** 문서 내 커서 위치 */
+export interface DocumentPosition {
+  sectionIndex: number;
+  paragraphIndex: number;
+  charOffset: number;
+  /** 셀 컨텍스트 — 레거시 flat 필드 (외부 표 기준) */
+  parentParaIndex?: number;
+  controlIndex?: number;
+  cellIndex?: number;
+  cellParaIndex?: number;
+  /** 중첩 표 전체 경로 (depth 1=단일 표, depth 2+=중첩 표) */
+  cellPath?: CellPathEntry[];
+  /** 글상자 내부 여부 */
+  isTextBox?: boolean;
+  /** hitTest에서 계산된 커서 좌표 (중첩 표 등 getCursorRect 폴백용) */
+  cursorRect?: CursorRect;
+}
+
+/** 책갈피 정보 */
+export interface BookmarkInfo {
+  name: string;
+  sec: number;
+  para: number;
+  ctrlIdx: number;
+  charPos: number;
+}
+
+export type LayerRenderProfile = 'fastPreview' | 'screen' | 'print' | 'highQuality';
+
+export type CanvasKitDocumentPreflightStatus = 'eligible' | 'ineligible' | 'incomplete';
+
+export interface CanvasKitReplaySummary {
+  totalItems: number;
+  directItems: number;
+  directRequiredItems: number;
+  compatOverlayItems: number;
+  textFallbackItems: number;
+  unsupportedItems: number;
+  hiddenOverlayViolations: number;
+}
+
+export interface CanvasKitDocumentPreflightBlocker {
+  code:
+    | 'pageLimitExceeded'
+    | 'workLimitExceeded'
+    | 'pageBuildFailed'
+    | 'hiddenCanvas2dOverlayRequired'
+    | 'unsupported'
+    | 'textFallback'
+    | 'compatOverlay';
+  pageIndex: number;
+  opType?: string;
+  detail?: string;
+}
+
+export interface CanvasKitDocumentPreflight {
+  schemaVersion: 1;
+  mode: 'default' | 'compat';
+  profile: LayerRenderProfile;
+  status: CanvasKitDocumentPreflightStatus;
+  eligible: boolean;
+  complete: boolean;
+  pageCount: number;
+  scannedPages: number;
+  scannedWorkUnits: number;
+  limits: {
+    maxPages: number;
+    maxWorkUnits: number;
+    maxBlockers: number;
+    maxRequiredFontFamilies: number;
+  };
+  summary: CanvasKitReplaySummary;
+  blockers: CanvasKitDocumentPreflightBlocker[];
+  requiredFontFamilies: string[];
+  capabilityDigest: string;
+}
+
+export interface LayerBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface LayerAffineTransform {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+export interface PageLayerTree {
+  schemaVersion?: number;
+  schemaMinorVersion?: number;
+  schema?: {
+    major: number;
+    minor: number;
+  };
+  /** The frontend adapter expands v2 envelopes into the v1 replay shape without changing paint order. */
+  normalizedFromSchema?: { major: 2; minor: number };
+  requiredFeatures?: string[];
+  textV2?: {
+    profile?: string;
+    fallbackPolicy?: string;
+    strictVisualFallbackFree?: boolean;
+    [key: string]: unknown;
+  };
+  unit?: 'px';
+  coordinateSystem?: string;
+  profile?: LayerRenderProfile;
+  /** Print 재생에서 지정된 글자 기하와 clip 장치 포함 정책이다. */
+  rasterTextGeometry?: boolean;
+  rasterClipCoverage?: boolean;
+  buildOptions?: {
+    showTransparentBorders?: boolean;
+    clipEnabled?: boolean;
+  };
+  debugOptions?: {
+    debugOverlay?: boolean;
+  };
+  pageWidth: number;
+  pageHeight: number;
+  outputOptions?: {
+    showParagraphMarks?: boolean;
+    showControlCodes?: boolean;
+    /** Compatibility mirror; prefer buildOptions.showTransparentBorders. */
+    showTransparentBorders?: boolean;
+    /** Compatibility mirror; prefer buildOptions.clipEnabled. */
+    clipEnabled?: boolean;
+    /** Compatibility mirror; prefer debugOptions.debugOverlay. */
+    debugOverlay?: boolean;
+  };
+  fontResources?: LayerFontResources;
+  resources?: LayerResources;
+  root: LayerNode;
+}
+
+/** Opt-in wire format. Kept separate from LayerPaintOp so v1 consumers cannot silently skip envelopes. */
+export interface LayerTextV2Envelope {
+  type: 'text';
+  id: string;
+  bbox: LayerBounds;
+  paintOrderSlotId: string;
+  selectionPolicy: 'exclusiveVariantSet';
+  defaultVariantId: string;
+  fallbackPolicy: 'required' | 'none';
+  variants: Array<{
+    variantId: string;
+    kind: 'textRun' | 'glyphRun' | 'glyphOutline' | string;
+    requiredFeatures: string[];
+    quality?: string;
+    parts: Array<{
+      partIndex: number;
+      partCount: number;
+      localPaintOrder?: number;
+      payload: LayerTextRunOp | LayerGlyphRunOp | LayerGlyphOutlineOp;
+    }>;
+  }>;
+}
+
+export type LayerNodeV2 =
+  | (Omit<LayerGroupNode, 'children'> & { children: LayerNodeV2[] })
+  | (Omit<LayerClipNode, 'child'> & { child: LayerNodeV2 })
+  | (Omit<LayerPathClipNode, 'child'> & { child: LayerNodeV2 })
+  | (Omit<LayerLeafNode, 'ops'> & { ops: Array<LayerPaintOp | LayerTextV2Envelope> });
+export type PageLayerTreeV2 = Omit<PageLayerTree, 'root'> & { root: LayerNodeV2 };
+
+export interface LayerResources {
+  tableId?: number;
+  images?: Array<Uint8Array | number[] | string | undefined>;
+  imageHashes?: string[];
+  imageKeys?: string[];
+  svgFragments?: Array<string | undefined>;
+  svgHashes?: string[];
+  svgKeys?: string[];
+  fontBlobs?: Array<Uint8Array | number[] | string | undefined>;
+  fontBlobKeys?: string[];
+}
+
+export interface LayerFontResources {
+  blobs: LayerFontBlobResource[];
+  faces: LayerFontFaceResource[];
+}
+
+export interface LayerFontDigest {
+  algorithm: string;
+  value: string;
+}
+
+export interface LayerFontBlobResource {
+  id: string;
+  source: 'embedded' | 'bundled' | 'systemResolved' | 'externalUrl' | 'unresolvedFallback';
+  portability:
+    | 'portableBlob'
+    | 'externalVerified'
+    | 'resolvedButNotEmbedded'
+    | 'systemNameOnly'
+    | 'unresolvedFallback';
+  digest?: LayerFontDigest;
+  dataRef?: { kind: 'fontBlob' | 'externalFont'; id: string };
+}
+
+export interface LayerFontFaceResource {
+  id: string;
+  blobKey: string;
+  faceIndex: number;
+  postscriptName?: string;
+  familyNames?: Array<{ value: string; locale?: string }>;
+  styleNames?: Array<{ value: string; locale?: string }>;
+  weightClass?: number;
+  widthClass?: number;
+  italic?: boolean;
+}
+
+export interface LayerInfo {
+  textWrap?: string | null;
+  zOrder: number;
+  stableIndex: number;
+  /** 바탕쪽 유래 여부 (#2318). true 면 replay plane 이 behindText 로 상한 고정된다. */
+  masterPage?: boolean;
+}
+
+export type LayerNode = LayerGroupNode | LayerClipNode | LayerPathClipNode | LayerLeafNode;
+
+export interface LayerGroupNode {
+  kind: 'group';
+  bounds: LayerBounds;
+  /** Conservative ink estimate; logical bounds remain independent. */
+  visualBounds?: LayerBounds;
+  layer?: LayerInfo;
+  groupKind?: { kind: string; [key: string]: unknown };
+  cacheHint?: LayerCacheHint;
+  children: LayerNode[];
+}
+
+export interface LayerClipNode {
+  kind: 'clipRect';
+  bounds: LayerBounds;
+  visualBounds?: LayerBounds;
+  layer?: LayerInfo;
+  clip: LayerBounds;
+  clipKind: 'body' | 'tableCell' | 'textBox' | 'generic' | 'printBitmapFill';
+  child: LayerNode;
+}
+
+export interface LayerPathClipNode {
+  kind: 'clipPath'; bounds: LayerBounds; visualBounds?: LayerBounds; layer?: LayerInfo;
+  paths: { commands: ({Move:[number,number]} | {Line:[number,number]} | {Cubic:[number,number,number,number,number,number]} | 'Close')[]; even_odd: boolean }[];
+  child: LayerNode;
+}
+
+export interface LayerLeafNode {
+  kind: 'leaf';
+  bounds: LayerBounds;
+  visualBounds?: LayerBounds;
+  layer?: LayerInfo;
+  ops: LayerPaintOp[];
+}
+
+export type LayerCacheHint =
+  | 'none'
+  | 'staticSubtree'
+  | 'preferRaster'
+  | 'preferVectorRecording';
+
+export type LayerPaintOp =
+  | LayerPageBackgroundOp
+  | LayerTextRunOp
+  | LayerFootnoteMarkerOp
+  | LayerLineOp
+  | LayerRectangleOp
+  | LayerEllipseOp
+  | LayerPathOp
+  | LayerImageOp
+  | LayerEquationOp
+  | LayerFormObjectOp
+  | LayerPlaceholderOp
+  | LayerRawSvgOp
+  | LayerTextDecorationOp
+  | LayerControlLabelOp
+  | LayerTextControlMarkOp
+  | LayerTabLeaderOp
+  | LayerCharOverlapOp
+  | LayerGlyphRunOp
+  | LayerGlyphOutlineOp;
+
+export interface LayerPageBackgroundOp {
+  type: 'pageBackground';
+  bbox: LayerBounds;
+  backgroundColor?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  gradient?: LayerGradientFill;
+  image?: {
+    fillMode?: string;
+    base64?: string;
+    resourceId?: number;
+    effect?: string;
+    brightness?: number;
+    contrast?: number;
+    opacity?: number;
+    watermark?: boolean;
+  };
+}
+
+export interface LayerTextStyle {
+  /** Rust의 공통 한컴 Print pen 결과. 명시 textPaint에는 적용하지 않는다. */
+  outlineStroke?: { width: number; intervals: number[] };
+  textPaint?: {
+    width: number;
+    paint: { fill: boolean; width_mpt: number; stroke_color: number; fill_alpha: number;
+      stroke_alpha: number; line_join: number; miter_limit_milli: number };
+  };
+  /** 줄 전체에서 해소한 방향. 논리 positions와 원문 주소는 유지한다. */
+  bidiLayout?: {
+    scalarCount: number;
+    logicalWidth: number;
+    runs: { start: number; end: number; x: number; rtl: boolean }[];
+  };
+  fontFamily?: string;
+  fontSize?: number;
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  /** 실제 기울임 face가 없을 때 Rust가 지정한 paint 변환. */
+  syntheticItalicSkew?: number;
+  ratio?: number;
+  underline?: string;
+  underlineShape?: number;
+  strikethrough?: boolean;
+  strikeShape?: number;
+  outlineType?: number;
+  shadowType?: number;
+  shadowColor?: string;
+  shadowOffsetX?: number;
+  shadowOffsetY?: number;
+  /** 공통 paint가 해소한 순서 그대로 재생한다. 글꼴·보간을 여기서 추정하지 않는다. */
+  shadowOffsets?: [number, number][];
+  emboss?: boolean;
+  engrave?: boolean;
+  /** producer가 확정한 첨자 크기와 본문 기준선에서의 이동이다. */
+  scriptMetrics?: { fontSize: number; baselineShift: number };
+  superscript?: boolean;
+  subscript?: boolean;
+  underlineColor?: string;
+  strikeColor?: string;
+  shadeColor?: string;
+  emphasisDot?: number;
+}
+
+export interface LayerTextLegacyVisuals {
+  charOverlap?: 'canonical' | 'mirror';
+  controlMarks?: 'canonical' | 'mirror';
+  tabLeaders?: 'canonical' | 'mirror';
+  decorations?: 'canonical' | 'mirror';
+}
+
+export interface LayerCharOverlap {
+  borderType: number;
+  innerCharSize: number;
+}
+
+export interface LayerTabLeader {
+  startX: number;
+  endX: number;
+  fillType: number;
+  /** 공통 glyph 원점과 채움 폭에서 만든 run 상대 점 중심·반지름. */
+  dotCenters?: number[];
+  dotRadius?: number;
+}
+
+export type LayerTextControlMarkKind = 'space' | 'tab' | 'paragraphEnd' | 'lineBreakEnd';
+
+export interface LayerTextControlMark {
+  kind: LayerTextControlMarkKind;
+  text: string;
+  /** X offset relative to the text run origin. */
+  x: number;
+  /** Y offset relative to the text run baseline. */
+  y: number;
+  fontSize: number;
+}
+
+export interface LayerTextRunOp {
+  /** Glyph-only output frame; source bbox/placement stay logical. */
+  paintTransform?: LayerAffineTransform;
+  type: 'textRun';
+  bbox: LayerBounds;
+  text: string;
+  displayText?: string;
+  /** 주소·전진은 원 표시 자소 기준이다. 실제 face에 가시 glyph가 있을 때만 선택한다. */
+  puaGlyphCandidates?: Array<{start: number; end: number; glyph: string; fallbackGlyph?: string}>;
+  puaGlyphCandidatesComplete?: boolean;
+  /** Run-local baseline offset from bbox.y when placement is absent. */
+  baseline?: number;
+  rotation?: number;
+  isVertical?: boolean;
+  orientation?: 'horizontal' | 'vertical-upright' | 'vertical-sideways';
+  style?: LayerTextStyle;
+  placement?: { runToPage?: LayerAffineTransform; baselineY?: number };
+  positions?: number[];
+  displayPositions?: number[];
+  legacyVisuals?: LayerTextLegacyVisuals;
+  controlMarks?: LayerTextControlMark[];
+  controlMarksComplete?: boolean;
+  tabLeaders?: LayerTabLeader[];
+  charOverlap?: LayerCharOverlap | null;
+  isParaEnd?: boolean;
+  isLineBreakEnd?: boolean;
+  fieldMarker?: { kind?: string; controlIndex?: number };
+  variant?: LayerTextVariantMeta;
+}
+
+export interface LayerFootnoteMarkerOp {
+  type: 'footnoteMarker';
+  baseline?: number;
+  bbox: LayerBounds;
+  text: string;
+  fontFamily?: string;
+  fontSize?: number;
+  color?: string;
+}
+
+export type LayerStrokeDash = 'solid' | 'dash' | 'dot' | 'dashDot' | 'dashDotDot'
+  | 'hwpDash' | 'hwpDot' | 'hwpDashDot' | 'hwpDashDotDot' | 'hwpLongDash' | 'hwpCircle'
+  | number[];
+
+export interface LayerShadowStyle {
+  shadowType?: number;
+  color?: string;
+  offsetX?: number;
+  offsetY?: number;
+  alpha?: number;
+}
+
+export interface LayerPatternFill {
+  tileSize?: number;
+  patternType?: number;
+  patternColor?: string;
+  backgroundColor?: string;
+}
+
+export interface LayerLineStyle {
+  color?: string;
+  width?: number;
+  dash?: LayerStrokeDash;
+  /** Physical on/off lengths supplied by the shared border layout. */
+  dashPattern?: number[];
+  lineType?: string;
+  /** A decomposed multiple/overpainted stroke keeps its parent's subpixel geometry. */
+  compoundComponent?: boolean;
+  preserveFractionalPosition?: boolean;
+  startArrow?: string;
+  endArrow?: string;
+  startArrowSize?: number;
+  endArrowSize?: number;
+  shadow?: LayerShadowStyle;
+}
+
+export interface LayerShapeStyle {
+  fillColor?: string | null;
+  strokeColor?: string | null;
+  strokeWidth?: number;
+  strokeDash?: LayerStrokeDash;
+  opacity?: number;
+  pattern?: LayerPatternFill;
+  shadow?: LayerShadowStyle;
+}
+
+/** HWP 도형/페이지 배경 그라데이션. paint JSON `gradient` 필드와 동일. */
+export interface LayerGradientFill {
+  gradientType?: number;
+  angle?: number;
+  centerX?: number;
+  centerY?: number;
+  colors?: string[];
+  positions?: number[];
+}
+
+
+export interface LayerArrowHead {
+  filled: boolean;
+  commands: LayerPathCommand[];
+}
+
+export interface LayerLineOp {
+  type: 'line';
+  bbox: LayerBounds;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  style?: LayerLineStyle;
+  arrowHeads?: LayerArrowHead[];
+}
+
+export interface LayerRectangleOp {
+  type: 'rectangle';
+  bbox: LayerBounds;
+  transform?: LayerPathTransform;
+  strokeJoin?: 'round';
+  cornerRadius?: number;
+  style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
+  /** Rust가 판정한 Print 단색 사각형의 장치 채움 정책. */
+  printFillCoverage?: 'device';
+  /** Print의 물리 채운 띠와 외곽 pen. raster 폭은 공통 WASM에서 계산한다. */
+  printPicturePen?: [number, number];
+}
+
+export interface LayerEllipseOp {
+  type: 'ellipse';
+  bbox: LayerBounds;
+  style?: LayerShapeStyle;
+  gradient?: LayerGradientFill;
+}
+
+export type LayerPathCommand =
+  | { type: 'moveTo'; x: number; y: number }
+  | { type: 'lineTo'; x: number; y: number }
+  | { type: 'curveTo'; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }
+  | { type: 'arcTo'; rx: number; ry: number; rotation: number; largeArc: boolean; sweep: boolean; x: number; y: number }
+  | { type: 'closePath' };
+
+/**
+ * [Task #1067] 도형(polygon, rectangle 등) path 의 회전/반전 변환.
+ *
+ * Rust paint pipeline (`src/paint/json.rs:write_transform`) 이 JSON 으로 다음 형식 emit:
+ * `{"rotation": <degrees>, "horzFlip": <bool>, "vertFlip": <bool>}`
+ *
+ * 누락 시 HWPX/HWP 도형의 회전/flip 정보가 캔버스 렌더링에 반영되지 않아
+ * 도형이 회전 없이 출력 (e.g. 두 도형이 거울 대칭이어야 하는데 같은 모양으로 보임).
+ */
+export interface LayerPathTransform {
+  rotation?: number;
+  horzFlip?: boolean;
+  vertFlip?: boolean;
+}
+
+export interface LayerPathOp {
+  type: 'path';
+  bbox: LayerBounds;
+  commands?: LayerPathCommand[];
+  style?: LayerShapeStyle;
+  lineStyle?: LayerLineStyle;
+  transform?: LayerPathTransform;
+  gradient?: LayerGradientFill;
+  arrowHeads?: LayerArrowHead[];
+}
+
+export interface LayerImageOp {
+  type: 'image';
+  bbox: LayerBounds;
+  /** Shared producer result before rotation; bbox remains the occupied frame. */
+  imagePaintBBox?: LayerBounds;
+  /** 회전 전 출력 크기. 없으면 기존 bbox 계약을 사용한다. */
+  paintBbox?: LayerBounds;
+  /** 그림 변환 바깥에서 적용하는 페이지 좌표의 저장 viewport. */
+  paintClip?: LayerBounds;
+  /** 저장 viewport의 실제 네 꼭짓점. 회전 외접 상자로 대체하지 않는다. */
+  paintClipPath?: [number, number][];
+  /** Explicit source sampling; absent preserves the output profile policy. */
+  imageInterpolation?: 'nearest' | 'linear';
+  /** 실제 Print 색 전달 payload의 축소 재구성 계약. */
+  imageReconstruction?: 'catmullRom' | 'printArea' | 'printMaskedArea';
+  imageAnisotropicReduction?: boolean;
+  imagePrintFrame?: number[];
+  /** Print bitmap 채움의 실제 장치 외접 영역. 필터 선택과 별개다. */
+  printImageCoverage?: 'device';
+  mime?: string;
+  base64?: string;
+  imageRef?: number | string;
+  /** 문서 세대와 BinData ID에서 만든 원본 그림 신원 키 (schema minor 20+). */
+  sourceImageKey?: string;
+  fillMode?: string;
+  originalSize?: { width: number; height: number };
+  crop?: { left: number; top: number; right: number; bottom: number };
+  originalSizeHu?: [number, number];
+  effect?: string;
+  brightness?: number;
+  contrast?: number;
+  opacity?: number;
+  bakedWatermark?: boolean;
+  wrap?: 'behindText' | 'inFrontOfText' | string;
+  transform?: LayerPathTransform;
+}
+
+export interface LayerEquationOp {
+  type: 'equation';
+  bbox: LayerBounds;
+  svgContent?: string;
+  svgResourceId?: number;
+  color?: string;
+  fontSize?: number;
+  layoutBox?: LayerEquationLayoutBox;
+  scaleX?: number;
+}
+
+export interface LayerControlLabelOp {
+  type: 'controlLabel';
+  bbox: LayerBounds;
+  label: string;
+  fontSize?: number;
+  color?: string;
+}
+
+export type LayerEquationMatrixStyle = 'plain' | 'paren' | 'bracket' | 'vert' | 'ladder' | 'short_ladder';
+export type LayerEquationDecoration =
+  | 'box'
+  | 'hat'
+  | 'check'
+  | 'tilde'
+  | 'acute'
+  | 'grave'
+  | 'dot'
+  | 'dDot'
+  | 'bar'
+  | 'vec'
+  | 'dyad'
+  | 'under'
+  | 'arch'
+  | 'underline'
+  | 'overline'
+  | 'strikeThrough';
+export type LayerEquationFontStyle =
+  | 'roman'
+  | 'italic'
+  | 'bold'
+  | 'blackboard'
+  | 'calligraphy'
+  | 'fraktur'
+  | 'sansSerif'
+  | 'monospace';
+
+export interface LayerEquationLayoutBox {
+  fontSize?: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  baseline: number;
+  kind: LayerEquationLayoutKind;
+}
+
+export interface LayerIntegralGeometry {
+  pathData: string;
+  /** 0은 닫힌 윤곽 채우기, 양수는 이전 stroke 경로다. */
+  strokeWidth: number;
+}
+
+export interface LayerFontGlyphGeometry extends LayerIntegralGeometry {
+  scaleX?: number;
+  fillAndStroke?: boolean;
+}
+
+export interface LayerNegationGeometry {
+  start: [number, number];
+  end: [number, number];
+  thickness: number;
+}
+
+export type LayerEquationLayoutKind =
+  | { type: 'hancomGlyphs'; fontFamily?: string; glyphs: string; positions: number[]; shears?: number[]; baselineShift: number }
+  | { type: 'row'; children: LayerEquationLayoutBox[] }
+  | { type: 'text'; text: string }
+  | { type: 'number'; text: string }
+  | { type: 'symbol'; text: string }
+  | { type: 'fontGlyph'; text: string; fontFamily: string; glyphScaleX?: number; outlineGeometry?: LayerFontGlyphGeometry }
+  | { type: 'mathSymbol'; text: string; integralGeometry?: LayerIntegralGeometry }
+  | { type: 'function'; name: string }
+  | { type: 'fraction'; numer: LayerEquationLayoutBox; denom: LayerEquationLayoutBox; axisHeight: number; ruleThickness?: number; ruleStart?: number; ruleEnd?: number }
+  | { type: 'atop'; top: LayerEquationLayoutBox; bottom: LayerEquationLayoutBox }
+  | { type: 'sqrt'; body: LayerEquationLayoutBox; index?: LayerEquationLayoutBox }
+  | { type: 'superscript'; base: LayerEquationLayoutBox; sup: LayerEquationLayoutBox }
+  | { type: 'subscript'; base: LayerEquationLayoutBox; sub: LayerEquationLayoutBox }
+  | { type: 'subSup'; base: LayerEquationLayoutBox; sub: LayerEquationLayoutBox; sup: LayerEquationLayoutBox }
+  | { type: 'bigOp'; symbol: string; opFontSize?: number; opWidth?: number; opX?: number; opY?: number; opBaseline?: number; integralGeometry?: LayerIntegralGeometry; sub?: LayerEquationLayoutBox; sup?: LayerEquationLayoutBox }
+  | { type: 'limit'; isUpper: boolean; name?: LayerEquationLayoutBox; nameFontSize?: number; subFontSize?: number; sub?: LayerEquationLayoutBox }
+  | { type: 'matrix'; style: LayerEquationMatrixStyle; cells: LayerEquationLayoutBox[][] }
+  | { type: 'rel'; arrow: LayerEquationLayoutBox; over: LayerEquationLayoutBox; under?: LayerEquationLayoutBox }
+  | { type: 'eqAlign'; rows: Array<{ left: LayerEquationLayoutBox; right: LayerEquationLayoutBox }> }
+  | { type: 'paren'; left: string; right: string; leftWidth?: number; rightWidth?: number; delimiterHeight?: number; glyphDelimiters?: boolean; body: LayerEquationLayoutBox }
+  | { type: 'decoration'; decoration: LayerEquationDecoration; body: LayerEquationLayoutBox; negationGeometry?: LayerNegationGeometry; outlineGeometry?: LayerFontGlyphGeometry }
+  | { type: 'color'; color: string; body: LayerEquationLayoutBox }
+  | { type: 'fontStyle'; fontStyle: LayerEquationFontStyle; body: LayerEquationLayoutBox }
+  | { type: 'space'; width: number }
+  | { type: 'newline' }
+  | { type: 'empty' };
+
+export interface LayerFormObjectOp {
+  type: 'formObject';
+  bbox: LayerBounds;
+  formType?: string;
+  caption?: string;
+  text?: string;
+  foreColor?: string;
+  backColor?: string;
+  /** Producer i32 selection state; boolean remains accepted for legacy object callers. */
+  value?: number | boolean;
+  enabled?: boolean;
+  drawing?: {
+    primitives: Array<
+      | { kind: 'rect'; bbox: LayerBounds; color: string }
+      | { kind: 'circle'; x: number; y: number; radius: number; color: string }
+      | { kind: 'polyline'; points: [number, number][]; color: string; width: number; closed: boolean }
+    >;
+    label?: {
+      text: string; x: number; baseline: number; fontFamily: string; fontSize: number;
+      bold: boolean; italic: boolean; color: string;
+    } | null;
+  };
+}
+
+export interface LayerPlaceholderOp {
+  type: 'placeholder';
+  bbox: LayerBounds;
+  kind?: 'ole' | 'missingPicture';
+  fillColor?: string;
+  strokeColor?: string;
+  label?: string;
+}
+
+export interface LayerRawSvgOp {
+  type: 'rawSvg';
+  bbox: LayerBounds;
+  svg?: string;
+}
+
+export interface LayerTextDecorationOp {
+  type: 'textDecoration';
+  bbox: LayerBounds;
+  decoration: {
+    kind: 'underline' | 'strikethrough' | 'emphasisDot';
+    baseline: number;
+    rotation: number;
+    isVertical: boolean;
+    fontSize: number;
+    ratio: number;
+    color: string;
+    shape: number;
+    underline: 'none' | 'bottom' | 'top';
+    emphasisDot: number;
+    positions: number[];
+    positionsComplete: boolean;
+    /** 본문과 독립된 강조점 face와 표시 자소 소속. */
+    emphasis?: {
+      fontFamily: string;
+      glyph: string;
+      fontSize: number;
+      bold: boolean;
+      ratio: number;
+      skewX: number;
+      baselineOffset: number;
+      positions: number[];
+      browserText: string;
+      browserOffset: number;
+      browserAlignEnd?: boolean;
+    };
+    /** 기존 키를 유지하며 위 밑줄·아래 일점쇄선의 공통 기하를 전달한다. 크기를 다시 추정하지 않는다. */
+    topUnderline?: {
+      phase?: number;
+      strokes: Array<{ offset: number; width: number; dash: number[] }>;
+      dots: { offset: number; radius: number; step: number } | null;
+    };
+  };
+}
+
+export interface LayerTextControlMarkOp {
+  type: 'textControlMark';
+  bbox: LayerBounds;
+  fieldMarker: string;
+  isParaEnd: boolean;
+  isLineBreakEnd: boolean;
+  baseline: number;
+  rotation: number;
+  isVertical: boolean;
+  marks: LayerTextControlMark[];
+  marksComplete: boolean;
+  shapeMarkerIndex?: number;
+}
+
+export interface LayerTabLeaderOp {
+  type: 'tabLeader';
+  bbox: LayerBounds;
+  leaders: LayerTabLeader[];
+  color: string;
+  fontSize: number;
+  baseline: number;
+  rotation: number;
+  isVertical: boolean;
+  leadersComplete: boolean;
+}
+
+export interface LayerCharOverlapOp {
+  /** Glyph-only output frame; source bbox/placement stay logical. */
+  paintTransform?: LayerAffineTransform;
+  type: 'charOverlap';
+  bbox: LayerBounds;
+  text: string;
+  displayText?: string;
+  baseline: number;
+  rotation: number;
+  isVertical: boolean;
+  orientation?: 'horizontal' | 'vertical-upright' | 'vertical-sideways';
+  style: LayerTextStyle;
+  positions: number[];
+  positionsComplete: boolean;
+  charOverlap: LayerCharOverlap;
+  /** 원문 겹침의 공통 배치. 최종 좌표·스타일을 재계산하지 않고 소비한다. */
+  composition?: {
+    reversed: boolean;
+    border: LayerTextRunOp | null;
+    interior: LayerTextRunOp[];
+  };
+}
+
+export interface LayerGlyphRunOp {
+  /** Glyph-only output frame; source bbox/placement stay logical. */
+  paintTransform?: LayerAffineTransform;
+  type: 'glyphRun';
+  bbox: LayerBounds;
+  source: LayerTextSourceSpan;
+  variant: LayerTextVariantMeta;
+  paintStyle: LayerTextStyle;
+  shapeKey: LayerShapeKey;
+  placement: LayerTextRunPlacement;
+  glyphIds: number[];
+  positions: LayerPoint[];
+  advances?: LayerVector[];
+  clusters: LayerGlyphCluster[];
+  direction: LayerTextDirection;
+  bidiLevel?: number;
+  writingMode: LayerWritingMode;
+  orientation: LayerGlyphRunOrientation;
+  glyphTransforms?: LayerGlyphTransform[];
+  diagnostics: LayerGlyphRunDiagnostics;
+}
+
+export interface LayerGlyphOutlineOp {
+  /** Glyph-only output frame; source bbox/placement stay logical. */
+  paintTransform?: LayerAffineTransform;
+  type: 'glyphOutline';
+  bbox: LayerBounds;
+  variant?: LayerTextVariantMeta;
+  payloadKind?: LayerGlyphOutlinePayloadKind;
+  payloadResourceKey?: string;
+  paintStyle?: LayerTextStyle;
+  placement?: { runToPage?: LayerAffineTransform; baselineY?: number };
+  paths?: LayerGlyphOutlinePath[];
+  stroke?: LayerGlyphOutlineStroke;
+  colorLayers?: LayerColorLayersPayload;
+  bitmapGlyph?: LayerBitmapGlyphPayload;
+  svgGlyph?: LayerSvgGlyphPayload;
+  diagnostics?: { strictVisualEligible?: boolean; [key: string]: unknown };
+}
+
+export interface LayerTextVariantMeta {
+  equivalenceGroup?: string;
+  variantId?: string;
+  variantKind?: 'textRun' | 'glyphRun' | 'glyphOutline' | string;
+  partIndex?: number;
+  partCount?: number;
+  isDefaultFallback?: boolean;
+  requires?: string[];
+  quality?: string;
+  anchorOpId?: string;
+  localPaintOrder?: number;
+}
+
+export interface LayerTextSourceRange {
+  start: number;
+  end: number;
+}
+
+export interface LayerTextSourceSpan {
+  id: number;
+  utf8Range: LayerTextSourceRange;
+  utf16Range: LayerTextSourceRange;
+  stableSourceKey?: string;
+}
+
+export interface LayerTextRunPlacement {
+  runToPage: LayerAffineTransform;
+  baselineY?: number;
+}
+
+export interface LayerPoint {
+  x: number;
+  y: number;
+}
+
+export interface LayerVector {
+  dx: number;
+  dy: number;
+}
+
+export interface LayerShapeKey {
+  fontInstance: {
+    faceKey: string;
+    sizePx: number;
+    variations?: Array<{ tag: string; value: number }>;
+    syntheticBold?: boolean;
+    syntheticItalic?: boolean;
+  };
+  direction: LayerTextDirection;
+  writingMode: LayerWritingMode;
+  script?: string;
+  language?: string;
+  features?: Array<{ tag: string; enabled: boolean; value?: number }>;
+  shapingEngine: string;
+  fallbackPolicy: string;
+}
+
+export type LayerTextDirection = 'ltr' | 'rtl' | 'auto';
+export type LayerWritingMode = 'horizontal-tb' | 'vertical-rl' | 'vertical-lr';
+export type LayerGlyphRunOrientation =
+  | 'horizontal'
+  | 'vertical-upright'
+  | 'vertical-sideways'
+  | 'mixedPerGlyph';
+
+export interface LayerGlyphCluster {
+  sourceRangeUtf8: LayerTextSourceRange;
+  sourceRangeUtf16?: LayerTextSourceRange;
+  textRangeUtf8?: LayerTextSourceRange;
+  glyphRange: LayerTextSourceRange;
+  flags?: Array<'ligature' | 'fallbackBoundary'>;
+}
+
+export interface LayerGlyphTransform {
+  xx: number;
+  xy: number;
+  yx: number;
+  yy: number;
+  tx: number;
+  ty: number;
+}
+
+export interface LayerGlyphRunDiagnostics {
+  quality: 'exact' | 'positionAdjusted' | 'approximate' | 'diagnosticOnly' | 'omitted';
+  replayEligibility: 'portable' | 'conditionalExternalFont' | 'localDiagnosticOnly' | 'notReplayable';
+  strictVisualEligible: boolean;
+  maxOriginDeltaPx: number;
+  maxAdvanceDeltaPx: number;
+  maxResidualAfterAdjustmentPx: number;
+  clusterMismatchCount: number;
+  missingGlyphCount: number;
+  usedFallbackFontCount: number;
+  reason?: string;
+}
+
+export type LayerGlyphOutlinePayloadKind =
+  | 'monochromeFill'
+  | 'monochromeFillStroke'
+  | 'colorLayers'
+  | 'bitmapGlyph'
+  | 'svgGlyph'
+  | string;
+
+export interface LayerGlyphOutlinePath {
+  glyphId?: number;
+  sourceRangeUtf8?: LayerTextRange;
+  glyphRange?: LayerTextRange;
+  fillRule?: 'nonzero' | 'evenodd' | string;
+  commands?: LayerPathCommand[];
+}
+
+export interface LayerGlyphOutlineStroke {
+  color?: string;
+  width?: number;
+  join?: 'miter' | 'round' | 'bevel' | string;
+  cap?: 'butt' | 'round' | 'square' | string;
+  miterLimit?: number;
+  paintOrder?: 'fillOnly' | 'strokeOnly' | 'fillThenStroke' | 'strokeThenFill' | string;
+  strictSubset?: boolean;
+}
+
+export interface LayerTextRange {
+  start?: number;
+  end?: number;
+}
+
+export interface LayerResolvedColor {
+  colorSpace?: string;
+  rgba?: number[];
+}
+
+export interface LayerColorGradientStop {
+  offset?: number;
+  color?: LayerResolvedColor;
+}
+
+export interface LayerColorSolidPathNode {
+  commands?: LayerPathCommand[];
+  fill?: LayerResolvedColor;
+  fillRule?: 'nonzero' | 'evenodd' | string;
+  sourceGlyphId?: number;
+  paletteIndex?: number;
+}
+
+export interface LayerColorLinearGradient {
+  x0?: number;
+  y0?: number;
+  x1?: number;
+  y1?: number;
+  stops?: LayerColorGradientStop[];
+}
+
+export interface LayerColorRadialGradient {
+  cx?: number;
+  cy?: number;
+  radius?: number;
+  stops?: LayerColorGradientStop[];
+}
+
+export interface LayerColorSweepGradient {
+  cx?: number;
+  cy?: number;
+  startAngleDegrees?: number;
+  endAngleDegrees?: number;
+  stops?: LayerColorGradientStop[];
+}
+
+export interface LayerColorLinearGradientPathNode {
+  commands?: LayerPathCommand[];
+  gradient?: LayerColorLinearGradient;
+  fillRule?: 'nonzero' | 'evenodd' | string;
+  sourceGlyphId?: number;
+  paletteIndex?: number;
+}
+
+export interface LayerColorRadialGradientPathNode {
+  commands?: LayerPathCommand[];
+  gradient?: LayerColorRadialGradient;
+  fillRule?: 'nonzero' | 'evenodd' | string;
+  sourceGlyphId?: number;
+  paletteIndex?: number;
+}
+
+export interface LayerColorSweepGradientPathNode {
+  commands?: LayerPathCommand[];
+  gradient?: LayerColorSweepGradient;
+  fillRule?: 'nonzero' | 'evenodd' | string;
+  sourceGlyphId?: number;
+  paletteIndex?: number;
+}
+
+export interface LayerColorTransformNode {
+  childNodeId?: number;
+  transform?: LayerAffineTransform;
+}
+
+export interface LayerFontColorGlyphRef {
+  faceKey?: string;
+  glyphId?: number;
+  paletteIndex?: number;
+  colorFormat?: 'colrV0' | 'colrV1' | 'other' | string;
+}
+
+export interface LayerPaletteRef {
+  id?: string;
+  index?: number;
+  cpalDigest?: string;
+}
+
+export interface LayerColorPaintGraphNode {
+  nodeId?: number;
+  kind?: string;
+  solidPath?: LayerColorSolidPathNode;
+  linearGradientPath?: LayerColorLinearGradientPathNode;
+  radialGradientPath?: LayerColorRadialGradientPathNode;
+  sweepGradientPath?: LayerColorSweepGradientPathNode;
+  transform?: LayerColorTransformNode;
+  composite?: { sourceNodeId?: number; backdropNodeId?: number; mode?: 'sourceOver' | string };
+  clip?: { childNodeId?: number; clipCommands?: LayerPathCommand[]; fillRule?: string };
+  sourceRangeUtf8?: LayerTextRange;
+  glyphRange?: LayerTextRange;
+  sourceFontRef?: LayerFontColorGlyphRef;
+}
+
+export interface LayerColorPaintGraphPayload {
+  rootNodeId?: number;
+  nodes?: LayerColorPaintGraphNode[];
+}
+
+export interface LayerColorLayersPayload {
+  colorFormat?: 'colrV0' | 'colrV1' | 'other' | string;
+  sourceFontRef?: LayerFontColorGlyphRef;
+  paletteRef?: LayerPaletteRef;
+  layers?: Array<{
+    layerIndex?: number | null;
+    glyphId?: number;
+    glyphRange?: LayerTextRange;
+    sourceRangeUtf8?: LayerTextRange;
+    sourceFontRef?: LayerFontColorGlyphRef;
+    commands?: LayerPathCommand[];
+    fill?: LayerResolvedColor;
+    fillRule?: 'nonzero' | 'evenodd' | string;
+    paletteIndex?: number;
+    color?: string;
+    opacity?: number;
+    transformToRun?: LayerAffineTransform;
+  }>;
+  paintGraph?: LayerColorPaintGraphPayload;
+  sourceRangeUtf8?: LayerTextRange;
+  glyphRange?: LayerTextRange;
+}
+
+export interface LayerBitmapGlyphPayload {
+  imageRef?: number;
+  imageResourceId?: number | string;
+  sourceRangeUtf8?: LayerTextRange;
+  glyphRange?: LayerTextRange;
+  placement?: LayerBounds;
+  alphaPremultiplied?: boolean;
+  scalingPolicy?: 'sourceExact' | 'pixelAligned' | 'backendDefault' | string;
+  filtering?: 'nearest' | 'linear' | string;
+  transformToRun?: LayerAffineTransform;
+}
+
+export interface LayerSvgGlyphPayload {
+  svgRef?: number;
+  vectorResourceId?: number | string;
+  sourceRangeUtf8?: LayerTextRange;
+  glyphRange?: LayerTextRange;
+  viewBox?: LayerBounds;
+  /** OpenType SVG의 em square와 baseline을 보존하는 producer 전용 배치. */
+  fontEmBox?: LayerBounds;
+  intrinsicSize?: { width?: number; height?: number };
+  staticSanitized?: boolean;
+  scriptAllowed?: boolean;
+  animationAllowed?: boolean;
+  externalResourcesAllowed?: boolean;
+  interactivityAllowed?: boolean;
+  transformToRun?: LayerAffineTransform;
+}
+/** 글자 모양 history 구간. offset은 문단 기준 문자 단위(UTF-16 아님). */
+export interface CharShapeRun {
+  startOffset: number;
+  endOffset: number;
+  charShapeId: number;
+}

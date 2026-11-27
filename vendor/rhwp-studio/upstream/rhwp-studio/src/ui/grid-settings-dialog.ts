@@ -1,0 +1,235 @@
+import { ModalDialog } from './dialog';
+import type {
+  GridLayer,
+  GridOffsetMm,
+  GridOrigin,
+  GridPattern,
+  GridSnapMode,
+  GridViewSettings,
+} from '../view/grid-settings';
+import { convertGridOffsetForOrigin, normalizeGridSettings } from '../view/grid-settings';
+
+import { t } from '../i18n/index.ts';
+/**
+ * 격자 설정 대화상자 — 보기 격자와 표/개체 이동 간격을 설정한다.
+ */
+export class GridSettingsDialog extends ModalDialog {
+  private visibleInput!: HTMLInputElement;
+  private horizontalInput!: HTMLInputElement;
+  private verticalInput!: HTMLInputElement;
+  private offsetXInput!: HTMLInputElement;
+  private offsetYInput!: HTMLInputElement;
+  private moveStepInput!: HTMLInputElement;
+  private callback: (settings: GridViewSettings, moveStepMm: number) => void;
+  private currentSettings: GridViewSettings;
+  private originBases: Record<GridOrigin, GridOffsetMm>;
+  private currentMoveStepMm: number;
+  private lastOrigin: GridOrigin;
+
+  constructor(
+    currentSettings: GridViewSettings,
+    originBases: Record<GridOrigin, GridOffsetMm>,
+    currentMoveStepMm: number,
+    onConfirm: (settings: GridViewSettings, moveStepMm: number) => void,
+  ) {
+    super(t('dialog.gridSettings.title'), 430);
+    this.currentSettings = currentSettings;
+    this.originBases = originBases;
+    this.currentMoveStepMm = currentMoveStepMm;
+    this.lastOrigin = currentSettings.origin;
+    this.callback = onConfirm;
+  }
+
+  protected createBody(): HTMLElement {
+    const body = document.createElement('div');
+    body.style.padding = '14px 16px';
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.gap = '12px';
+
+    this.visibleInput = document.createElement('input');
+    this.visibleInput.type = 'checkbox';
+    this.visibleInput.checked = this.currentSettings.visible;
+    body.appendChild(this.checkboxRow(this.visibleInput, t('dialog.gridSettings.checkboxRow.label')));
+
+    body.appendChild(this.radioGroup<GridPattern>(t('dialog.gridSettings.radioGroup.label'), 'grid-pattern', [
+      ['dots', t('dialog.gridSettings.createBody.label')],
+      ['horizontal', t('dialog.gridSettings.createBody.label.x2a4d89')],
+      ['vertical', t('dialog.gridSettings.createBody.label.x0f5636')],
+      ['both', t('dialog.gridSettings.createBody.label.x9d73bc')],
+    ], this.currentSettings.pattern));
+
+    body.appendChild(this.radioGroup<GridLayer>(t('dialog.gridSettings.radioGroup.label.xaa4389'), 'grid-layer', [
+      ['behindText', t('dialog.gridSettings.createBody.label.x8c9027')],
+      ['inFrontOfText', t('dialog.gridSettings.createBody.label.x476f90')],
+    ], this.currentSettings.layer));
+
+    body.appendChild(this.radioGroup<GridSnapMode>(t('dialog.gridSettings.radioGroup.label.x4ff439'), 'grid-snap-mode', [
+      ['free', t('dialog.gridSettings.createBody.label.x607281')],
+      ['magnetic', t('dialog.gridSettings.createBody.label.xe7dc60')],
+      ['gridOnly', t('dialog.gridSettings.createBody.label.xf9d295')],
+    ], this.currentSettings.snapMode));
+
+    const spacing = this.group(t('dialog.gridSettings.group.label'));
+    this.horizontalInput = this.numberInput(this.currentSettings.horizontalMm);
+    this.horizontalInput.name = 'grid-horz';
+    this.verticalInput = this.numberInput(this.currentSettings.verticalMm);
+    this.verticalInput.name = 'grid-vert';
+    spacing.append(
+      this.numberRow(t('dialog.gridSettings.numberRow.label'), this.horizontalInput),
+      this.numberRow(t('dialog.gridSettings.numberRow.label.xe59031'), this.verticalInput),
+    );
+    body.appendChild(spacing);
+
+    body.appendChild(this.originGroup());
+
+    const move = this.group(t('dialog.gridSettings.group.label.xc19b25'));
+    this.moveStepInput = this.numberInput(this.currentMoveStepMm);
+    this.moveStepInput.name = 'move-step';
+    move.appendChild(this.numberRow(t('dialog.gridSettings.numberRow.label.x347d50'), this.moveStepInput));
+    body.appendChild(move);
+
+    return body;
+  }
+
+  protected onConfirm(): void {
+    const settings = normalizeGridSettings({
+      visible: this.visibleInput.checked,
+      pattern: this.radioValue<GridPattern>('grid-pattern', this.currentSettings.pattern),
+      layer: this.radioValue<GridLayer>('grid-layer', this.currentSettings.layer),
+      snapMode: this.radioValue<GridSnapMode>('grid-snap-mode', this.currentSettings.snapMode),
+      horizontalMm: parseFloat(this.horizontalInput.value),
+      verticalMm: parseFloat(this.verticalInput.value),
+      origin: this.radioValue<GridOrigin>('grid-origin', this.currentSettings.origin),
+      offsetXmm: parseFloat(this.offsetXInput.value),
+      offsetYmm: parseFloat(this.offsetYInput.value),
+    });
+    const moveStepMm = this.clampMoveStep(parseFloat(this.moveStepInput.value));
+    this.callback(settings, moveStepMm);
+  }
+
+  private checkboxRow(input: HTMLInputElement, labelText: string): HTMLElement {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--color-text);';
+    label.append(input, document.createTextNode(labelText));
+    return label;
+  }
+
+  private group(title: string): HTMLElement {
+    const fieldset = document.createElement('fieldset');
+    fieldset.style.cssText = 'border:1px solid var(--color-border-lighter);padding:10px 12px 12px;margin:0;';
+    const legend = document.createElement('legend');
+    legend.textContent = title;
+    legend.style.cssText = 'font-size:12px;color:var(--color-primary-dark);padding:0 4px;';
+    fieldset.appendChild(legend);
+    return fieldset;
+  }
+
+  private radioGroup<T extends string>(
+    title: string,
+    name: string,
+    options: [T, string][],
+    current: T,
+  ): HTMLElement {
+    const fieldset = this.group(title);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px 14px;color:var(--color-text);';
+    for (const [value, labelText] of options) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:13px;color:var(--color-text);';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = name;
+      input.value = value;
+      input.checked = value === current;
+      label.append(input, document.createTextNode(labelText));
+      row.appendChild(label);
+    }
+    fieldset.appendChild(row);
+    return fieldset;
+  }
+
+  private originGroup(): HTMLElement {
+    const fieldset = this.group(t('dialog.gridSettings.group.label.xd359fa'));
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px 14px;margin-bottom:8px;color:var(--color-text);';
+
+    for (const [value, labelText] of [
+      ['page', t('dialog.gridSettings.originGroup.label')],
+      ['paper', t('dialog.gridSettings.originGroup.label.xd3445e')],
+    ] as [GridOrigin, string][]) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:13px;color:var(--color-text);';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'grid-origin';
+      input.value = value;
+      input.checked = value === this.currentSettings.origin;
+      input.addEventListener('change', () => this.onOriginChanged(value));
+      label.append(input, document.createTextNode(labelText));
+      row.appendChild(label);
+    }
+
+    this.offsetXInput = this.numberInput(this.currentSettings.offsetXmm, -500, 500);
+    this.offsetXInput.name = 'grid-offset-x';
+    this.offsetYInput = this.numberInput(this.currentSettings.offsetYmm, -500, 500);
+    this.offsetYInput.name = 'grid-offset-y';
+    fieldset.append(
+      row,
+      this.numberRow(t('dialog.gridSettings.numberRow.label'), this.offsetXInput),
+      this.numberRow(t('dialog.gridSettings.numberRow.label.xe59031'), this.offsetYInput),
+    );
+    return fieldset;
+  }
+
+  private numberInput(value: number, min = 0.5, max = 50): HTMLInputElement {
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = '0.5';
+    input.value = String(value);
+    input.className = 'dialog-input';
+    input.style.cssText = 'width:78px;padding:3px 5px;';
+    return input;
+  }
+
+  private numberRow(labelText: string, input: HTMLInputElement): HTMLElement {
+    const row = document.createElement('label');
+    row.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px;color:var(--color-text);';
+    const label = document.createElement('span');
+    label.textContent = labelText;
+    label.style.minWidth = '56px';
+    const unit = document.createElement('span');
+    unit.textContent = 'mm';
+    unit.style.color = 'var(--color-text-secondary)';
+    row.append(label, input, unit);
+    return row;
+  }
+
+  private radioValue<T extends string>(name: string, fallback: T): T {
+    const selected = this.dialog.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`);
+    return (selected?.value as T | undefined) ?? fallback;
+  }
+
+  private onOriginChanged(nextOrigin: GridOrigin): void {
+    if (nextOrigin === this.lastOrigin) return;
+    const nextOffset = convertGridOffsetForOrigin(
+      {
+        x: parseFloat(this.offsetXInput.value),
+        y: parseFloat(this.offsetYInput.value),
+      },
+      this.lastOrigin,
+      nextOrigin,
+      this.originBases,
+    );
+    this.offsetXInput.value = String(nextOffset.x);
+    this.offsetYInput.value = String(nextOffset.y);
+    this.lastOrigin = nextOrigin;
+  }
+
+  private clampMoveStep(value: number): number {
+    if (!Number.isFinite(value)) return this.currentMoveStepMm;
+    return Math.min(50, Math.max(0.5, value));
+  }
+}

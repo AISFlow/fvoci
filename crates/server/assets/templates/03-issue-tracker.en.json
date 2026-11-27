@@ -1,0 +1,793 @@
+{
+  "key": "issue-tracker",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "61dfafed-a3e0-5f6f-a4fe-e2b4062f4d48",
+    "title": "Issue tracker",
+    "description": "Collects bugs and requests. Who reported and last changed an issue, and when, is filled in for you, and the “Active issues” view filters out what is closed.",
+    "icon": "🐞",
+    "showDescription": true,
+    "doneWhen": {
+      "propertyId": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+      "optionIds": [
+        "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+        "0dc0879a-7d99-594d-ba6b-cf906869740a"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+        "name": "Status",
+        "type": "select",
+        "options": [
+          {
+            "id": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+            "label": "New",
+            "color": "gray"
+          },
+          {
+            "id": "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+            "label": "Confirmed",
+            "color": "yellow"
+          },
+          {
+            "id": "16f381d8-7af4-50a9-af83-f722169249ea",
+            "label": "Being fixed",
+            "color": "blue"
+          },
+          {
+            "id": "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+            "label": "Closed",
+            "color": "green"
+          },
+          {
+            "id": "0dc0879a-7d99-594d-ba6b-cf906869740a",
+            "label": "Won't fix",
+            "color": "brown"
+          }
+        ]
+      },
+      {
+        "id": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+        "name": "Kind",
+        "type": "select",
+        "options": [
+          {
+            "id": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+            "label": "Bug",
+            "color": "red"
+          },
+          {
+            "id": "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+            "label": "Request",
+            "color": "purple"
+          },
+          {
+            "id": "28939bf7-286a-58b9-b78b-42cfeff3155f",
+            "label": "Chore",
+            "color": "gray"
+          }
+        ]
+      },
+      {
+        "id": "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+        "name": "Severity",
+        "type": "select",
+        "options": [
+          {
+            "id": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+            "label": "High",
+            "color": "red"
+          },
+          {
+            "id": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+            "label": "Medium",
+            "color": "orange"
+          },
+          {
+            "id": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+            "label": "Low",
+            "color": "gray"
+          }
+        ]
+      },
+      {
+        "id": "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+        "name": "Areas",
+        "type": "multiSelect",
+        "options": [
+          {
+            "id": "b6af3143-d64b-5425-863b-bc776cc46409",
+            "label": "Sign-up",
+            "color": "blue"
+          },
+          {
+            "id": "633c044a-7e58-5e08-9f63-86101a98359e",
+            "label": "Billing",
+            "color": "green"
+          },
+          {
+            "id": "a0b743ca-edd6-50a6-8551-983a195ff002",
+            "label": "Search",
+            "color": "yellow"
+          },
+          {
+            "id": "304d6fa0-f4dd-56bc-98f9-0660b6beb50d",
+            "label": "Mobile",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "6ec62f07-9679-5652-9ab4-861c1ea07901",
+        "name": "Assignee",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6",
+        "name": "Related issues",
+        "type": "relation",
+        "options": []
+      },
+      {
+        "id": "6e8b0484-a81f-51c6-ae9c-11f98f1ef192",
+        "name": "Reported by",
+        "type": "createdBy",
+        "options": []
+      },
+      {
+        "id": "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+        "name": "Reported at",
+        "type": "createdTime",
+        "options": []
+      },
+      {
+        "id": "1be99720-7c2a-5376-8e30-f9daac480026",
+        "name": "Last changed by",
+        "type": "updatedBy",
+        "options": []
+      },
+      {
+        "id": "e1e24824-08ba-5d36-8db5-0517fe0d5370",
+        "name": "Last changed at",
+        "type": "updatedTime",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "6c07154f-bc87-5003-b31c-ada20b17cb39",
+      "type": "view",
+      "title": "Active issues",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+              "condition": "notIncludes",
+              "values": [
+                "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+                "0dc0879a-7d99-594d-ba6b-cf906869740a"
+              ]
+            }
+          ]
+        },
+        "hiddenGroups": [
+          "",
+          "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+          "0dc0879a-7d99-594d-ba6b-cf906869740a"
+        ],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+          "16f381d8-7af4-50a9-af83-f722169249ea"
+        ],
+        "shownProperties": [
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901"
+        ],
+        "groupBy": "41fb4307-4d35-515d-8f28-ee0bd207e0fd"
+      }
+    },
+    {
+      "id": "45663b0b-bf48-51b1-95da-4269f9eb9960",
+      "type": "view",
+      "title": "By severity",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "bb942f44-0169-5f70-959c-e845bc3abfd0"
+        ],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5"
+        ],
+        "groupBy": "9c1adb28-489c-5bb0-b0da-56ff86b55106"
+      }
+    },
+    {
+      "id": "c46e049d-bf0c-5176-a1b5-e15a38812a7b",
+      "type": "view",
+      "title": "All issues",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "countUniqueValue"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+            "reversed": true
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [
+          "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+          "28939bf7-286a-58b9-b78b-42cfeff3155f"
+        ],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901",
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6",
+          "6e8b0484-a81f-51c6-ae9c-11f98f1ef192",
+          "ba4606fa-0a3c-52c1-bf70-094ce1711774",
+          "1be99720-7c2a-5376-8e30-f9daac480026",
+          "e1e24824-08ba-5d36-8db5-0517fe0d5370"
+        ],
+        "groupBy": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa"
+      }
+    },
+    {
+      "id": "b1267acb-0000-5baa-982c-b43274ad873c",
+      "type": "view",
+      "title": "Bugs only",
+      "fields": {
+        "cardOrder": [
+          "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+          "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+          "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+          "7b912e28-264e-5540-8bda-328541ffe898",
+          "69938723-8f66-5682-8227-29c11ab0de54",
+          "9faa6727-6720-577d-8e01-7dba55bf0e27"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "d1dc2175-04b7-5afe-9ee0-c1e806659aaa",
+              "condition": "includes",
+              "values": ["6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c"]
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5",
+          "6ec62f07-9679-5652-9ab4-861c1ea07901"
+        ]
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+      "type": "card",
+      "title": "The password reset mail arrives twice",
+      "fields": {
+        "icon": "📨",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "16f381d8-7af4-50a9-af83-f722169249ea",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["b6af3143-d64b-5425-863b-bc776cc46409"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Steps to reproduce"
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Press “Forgot your password” on the sign-in screen"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Enter an address and press the button twice, quickly"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Look at the inbox"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Expected and seen"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Expected",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ": one mail."
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "Seen",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ": two mails that say the same."
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "A guess"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "typescript"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "// The button stays enabled while the request is on its way.\nbutton.disabled = false;\nawait send(address);"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "1b68f9cf-9835-5522-bf34-ba574d8b543d",
+      "type": "card",
+      "title": "The exported total differs from the screen",
+      "fields": {
+        "icon": "🧾",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "7ed17f61-04fa-59ec-b47a-bc83c17463d0",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["633c044a-7e58-5e08-9f63-86101a98359e"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Last month's total is 1,204,000 on the screen and 1,194,000 in the exported file."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "One refund is taken off in the file only. The screen is right."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+      "type": "card",
+      "title": "Search misses a word with an ending attached",
+      "fields": {
+        "icon": "🔍",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "0c3a80e9-0da4-526e-9eb3-8b3994a5584e",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["a0b743ca-edd6-50a6-8551-983a195ff002"]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Searching for one form of a word finds the cards that hold it and misses those that hold another form: "
+              },
+              {
+                "type": "text",
+                "text": "deploy",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " finds "
+              },
+              {
+                "type": "text",
+                "text": "deploys",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " but not "
+              },
+              {
+                "type": "text",
+                "text": "deployed",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "7b912e28-264e-5540-8bda-328541ffe898",
+      "type": "card",
+      "title": "Let me resize table columns on a phone",
+      "fields": {
+        "icon": "📱",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "2ce17139-dab0-56d4-af61-78b09a7b3586",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "a9a1d66a-412f-5e36-b63e-f4a8bba38654",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": ["304d6fa0-f4dd-56bc-98f9-0660b6beb50d"],
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6": [
+            {
+              "card": "c9b1987c-c654-52d4-87ae-db49caa3d4b8",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Dragging is hard with a finger. “Wider” and “Narrower” in the menu of a column head would do."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "69938723-8f66-5682-8227-29c11ab0de54",
+      "type": "card",
+      "title": "Pressing Pay twice charges twice",
+      "fields": {
+        "icon": "💳",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "41e2d65c-a5b7-5f21-83a1-cde59a83c25d",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "6b41afa1-3697-5dd5-b3d3-0a91ca03bb4c",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "31be07e5-e6a5-5f75-a98c-e2fd505bf4f1",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": [
+            "633c044a-7e58-5e08-9f63-86101a98359e",
+            "304d6fa0-f4dd-56bc-98f9-0660b6beb50d"
+          ],
+          "4e7f4a57-e008-5681-a3c3-4ea0ee5d6fa6": [
+            {
+              "card": "ceb53077-29a3-5834-8dcb-cb3adff67eeb",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The same cause as "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "ceb53077-29a3-5834-8dcb-cb3adff67eeb"
+                }
+              },
+              {
+                "type": "text",
+                "text": ": fixed by keeping the button disabled until the request is over."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Fixed"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Covered by a test"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Released"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "9faa6727-6720-577d-8e01-7dba55bf0e27",
+      "type": "card",
+      "title": "Remove the settings nobody uses",
+      "fields": {
+        "icon": "🧹",
+        "isTemplate": false,
+        "properties": {
+          "41fb4307-4d35-515d-8f28-ee0bd207e0fd": "0dc0879a-7d99-594d-ba6b-cf906869740a",
+          "d1dc2175-04b7-5afe-9ee0-c1e806659aaa": "28939bf7-286a-58b9-b78b-42cfeff3155f",
+          "9c1adb28-489c-5bb0-b0da-56ff86b55106": "bb942f44-0169-5f70-959c-e845bc3abfd0",
+          "f7664802-8fcb-57c9-a358-3c839dbaa8d5": []
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "To be removed this quarter.",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " They go together with the next major version."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

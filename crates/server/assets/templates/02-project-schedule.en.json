@@ -1,0 +1,807 @@
+{
+  "key": "project-schedule",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "9639bb66-ecfc-5b4b-905d-bcf2ae50790c",
+    "title": "Project schedule",
+    "description": "The periods and the order of your tasks, as a Gantt chart. Name the cards that have to end first under “Comes after”: they are joined by lines, and a task that starts too early is marked.",
+    "icon": "🗓️",
+    "showDescription": true,
+    "dueDatePropertyId": "88342316-ebe4-5a49-880c-fa57c660421f",
+    "doneWhen": {
+      "propertyId": "6c9349df-a282-5b45-9fff-80ccf96accd6",
+      "optionIds": [
+        "f4b6ca92-4a4b-511b-bce0-0b0bf93235af"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "6c9349df-a282-5b45-9fff-80ccf96accd6",
+        "name": "Status",
+        "type": "select",
+        "options": [
+          {
+            "id": "1079060a-4dfb-5467-b0aa-08f872513261",
+            "label": "Planned",
+            "color": "gray"
+          },
+          {
+            "id": "db5cce69-a125-51fa-afd0-8467f3dfb917",
+            "label": "In progress",
+            "color": "blue"
+          },
+          {
+            "id": "6f77cd0e-fcf4-5fc2-be6e-051ba96d553f",
+            "label": "Blocked",
+            "color": "red"
+          },
+          {
+            "id": "f4b6ca92-4a4b-511b-bce0-0b0bf93235af",
+            "label": "Done",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "02395517-c420-5332-a9e7-e1fcb3ab755c",
+        "name": "Phase",
+        "type": "select",
+        "options": [
+          {
+            "id": "d3ad562c-78a0-56f9-9305-1f22a5de35b9",
+            "label": "Planning",
+            "color": "purple"
+          },
+          {
+            "id": "5ba0164d-fee6-5595-adf6-841b4bfbf46b",
+            "label": "Building",
+            "color": "blue"
+          },
+          {
+            "id": "e909c936-4c44-598d-ab01-ff914f9a4b9a",
+            "label": "Launch",
+            "color": "orange"
+          }
+        ]
+      },
+      {
+        "id": "2cbc1594-4c36-5fb3-93d4-61f1cc2fb4d5",
+        "name": "Owner",
+        "type": "person",
+        "options": []
+      },
+      {
+        "id": "88342316-ebe4-5a49-880c-fa57c660421f",
+        "name": "Period",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "5c4a770c-c3a3-558d-ac9f-5280261b7ae6",
+        "name": "Comes after",
+        "type": "relation",
+        "options": []
+      },
+      {
+        "id": "1c966bee-b3ab-53a6-b2ea-61e262ee8494",
+        "name": "Estimated hours",
+        "type": "number",
+        "options": []
+      },
+      {
+        "id": "e04bca34-a253-5f3c-9653-ceddff102119",
+        "name": "Milestone",
+        "type": "checkbox",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "f5fd82be-ae16-5d82-bf07-5878e67f13f3",
+      "type": "view",
+      "title": "Gantt",
+      "fields": {
+        "cardOrder": [
+          "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+          "68961e85-69d9-5398-b479-99b3f7b192b3",
+          "1ac66760-3e14-56fd-9832-48a3fecb167d",
+          "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+          "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+          "8ed32366-4d85-539d-ae2c-c8fa85cb713a"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gantt",
+        "visibleGroups": [
+          "d3ad562c-78a0-56f9-9305-1f22a5de35b9",
+          "5ba0164d-fee6-5595-adf6-841b4bfbf46b",
+          "e909c936-4c44-598d-ab01-ff914f9a4b9a"
+        ],
+        "shownProperties": [
+          "6c9349df-a282-5b45-9fff-80ccf96accd6",
+          "2cbc1594-4c36-5fb3-93d4-61f1cc2fb4d5"
+        ],
+        "groupBy": "02395517-c420-5332-a9e7-e1fcb3ab755c",
+        "dateProperty": "88342316-ebe4-5a49-880c-fa57c660421f",
+        "dependencyPropertyId": "5c4a770c-c3a3-558d-ac9f-5280261b7ae6",
+        "ganttZoom": "week"
+      }
+    },
+    {
+      "id": "6b9d2cbe-7d28-5c17-b056-6a9fc0d086d4",
+      "type": "view",
+      "title": "Status board",
+      "fields": {
+        "cardOrder": [
+          "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+          "68961e85-69d9-5398-b479-99b3f7b192b3",
+          "1ac66760-3e14-56fd-9832-48a3fecb167d",
+          "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+          "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+          "8ed32366-4d85-539d-ae2c-c8fa85cb713a"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "1079060a-4dfb-5467-b0aa-08f872513261",
+          "db5cce69-a125-51fa-afd0-8467f3dfb917",
+          "6f77cd0e-fcf4-5fc2-be6e-051ba96d553f",
+          "f4b6ca92-4a4b-511b-bce0-0b0bf93235af"
+        ],
+        "shownProperties": [
+          "2cbc1594-4c36-5fb3-93d4-61f1cc2fb4d5",
+          "88342316-ebe4-5a49-880c-fa57c660421f"
+        ],
+        "groupBy": "6c9349df-a282-5b45-9fff-80ccf96accd6"
+      }
+    },
+    {
+      "id": "1503b412-c63a-51a2-9804-446d54e8ff80",
+      "type": "view",
+      "title": "Task table",
+      "fields": {
+        "cardOrder": [
+          "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+          "68961e85-69d9-5398-b479-99b3f7b192b3",
+          "1ac66760-3e14-56fd-9832-48a3fecb167d",
+          "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+          "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+          "8ed32366-4d85-539d-ae2c-c8fa85cb713a"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "sum"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "88342316-ebe4-5a49-880c-fa57c660421f",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "6c9349df-a282-5b45-9fff-80ccf96accd6",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c",
+          "2cbc1594-4c36-5fb3-93d4-61f1cc2fb4d5",
+          "88342316-ebe4-5a49-880c-fa57c660421f",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6",
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494",
+          "e04bca34-a253-5f3c-9653-ceddff102119"
+        ]
+      }
+    },
+    {
+      "id": "1c8c10f9-2bbb-5df2-b8b4-4e3da5b18adb",
+      "type": "view",
+      "title": "Month calendar",
+      "fields": {
+        "cardOrder": [
+          "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+          "68961e85-69d9-5398-b479-99b3f7b192b3",
+          "1ac66760-3e14-56fd-9832-48a3fecb167d",
+          "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+          "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+          "8ed32366-4d85-539d-ae2c-c8fa85cb713a"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "88342316-ebe4-5a49-880c-fa57c660421f"
+      }
+    },
+    {
+      "id": "24dd8df3-c767-5724-9447-756368a5d1e3",
+      "type": "view",
+      "title": "Milestones",
+      "fields": {
+        "cardOrder": [
+          "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+          "68961e85-69d9-5398-b479-99b3f7b192b3",
+          "1ac66760-3e14-56fd-9832-48a3fecb167d",
+          "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+          "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+          "8ed32366-4d85-539d-ae2c-c8fa85cb713a"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": [
+            {
+              "propertyId": "e04bca34-a253-5f3c-9653-ceddff102119",
+              "condition": "isSet",
+              "values": []
+            }
+          ]
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "88342316-ebe4-5a49-880c-fa57c660421f",
+          "6c9349df-a282-5b45-9fff-80ccf96accd6"
+        ]
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+      "type": "card",
+      "title": "Agree on the scope",
+      "fields": {
+        "icon": "🎯",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "f4b6ca92-4a4b-511b-bce0-0b0bf93235af",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "d3ad562c-78a0-56f9-9305-1f22a5de35b9",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2026-12-01",
+            "to": "2026-12-03"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "12"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "In"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The new sign-up screen"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exporting payment records"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Out"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The mobile app"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "The scope changes on this card and nowhere else. When it does, look at the schedule too."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "68961e85-69d9-5398-b479-99b3f7b192b3",
+      "type": "card",
+      "title": "Design the screens",
+      "fields": {
+        "icon": "✏️",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "db5cce69-a125-51fa-afd0-8467f3dfb917",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "d3ad562c-78a0-56f9-9305-1f22a5de35b9",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2026-12-04",
+            "to": "2026-12-10"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "30",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6": [
+            {
+              "card": "45613c53-e93c-5cd4-a81b-92d9c8868d9a",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The flow of the sign-up screen"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The export screen"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Have it reviewed"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The scope is on "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "45613c53-e93c-5cd4-a81b-92d9c8868d9a"
+                }
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "1ac66760-3e14-56fd-9832-48a3fecb167d",
+      "type": "card",
+      "title": "Build",
+      "fields": {
+        "icon": "🛠️",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "1079060a-4dfb-5467-b0aa-08f872513261",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "5ba0164d-fee6-5595-adf6-841b4bfbf46b",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2026-12-11",
+            "to": "2026-12-24"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "80",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6": [
+            {
+              "card": "68961e85-69d9-5398-b479-99b3f7b192b3",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Starts when the design is done. In the Gantt view its bar follows “Design the screens”."
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart LR\n  Design --> Build --> Test --> Launch\n  Design --> Docs --> Launch"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+      "type": "card",
+      "title": "Write the help pages",
+      "fields": {
+        "icon": "📖",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "1079060a-4dfb-5467-b0aa-08f872513261",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "5ba0164d-fee6-5595-adf6-841b4bfbf46b",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2026-12-11",
+            "to": "2026-12-18"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "16",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6": [
+            {
+              "card": "68961e85-69d9-5398-b479-99b3f7b192b3",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Runs beside the build. The pages are written in the wiki; this card says what is left."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Signing up"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Exporting records"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+      "type": "card",
+      "title": "Test",
+      "fields": {
+        "icon": "🧪",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "1079060a-4dfb-5467-b0aa-08f872513261",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "5ba0164d-fee6-5595-adf6-841b4bfbf46b",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2026-12-28",
+            "to": "2027-01-05"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "24",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6": [
+            {
+              "card": "1ac66760-3e14-56fd-9832-48a3fecb167d",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Go from signing up to a first payment in one sitting"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Export last quarter's records and check the amounts"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Put what you find on the issue tracker"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "8ed32366-4d85-539d-ae2c-c8fa85cb713a",
+      "type": "card",
+      "title": "Launch",
+      "fields": {
+        "icon": "🚀",
+        "isTemplate": false,
+        "properties": {
+          "6c9349df-a282-5b45-9fff-80ccf96accd6": "1079060a-4dfb-5467-b0aa-08f872513261",
+          "02395517-c420-5332-a9e7-e1fcb3ab755c": "e909c936-4c44-598d-ab01-ff914f9a4b9a",
+          "88342316-ebe4-5a49-880c-fa57c660421f": {
+            "from": "2027-01-07"
+          },
+          "1c966bee-b3ab-53a6-b2ea-61e262ee8494": "4",
+          "5c4a770c-c3a3-558d-ac9f-5280261b7ae6": [
+            {
+              "card": "3f5e36b3-a342-55b7-bec9-54c0601bc2c4",
+              "kind": "fs",
+              "lagDays": 0
+            },
+            {
+              "card": "3229bbc0-56ec-57ca-955b-c42d9b672dc9",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ],
+          "e04bca34-a253-5f3c-9653-ceddff102119": "true"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A card of one day is a short mark on the chart. Both the test and the help pages have to be done."
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Post the announcement"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Watch the questions for the first week"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

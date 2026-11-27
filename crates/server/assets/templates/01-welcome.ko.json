@@ -1,0 +1,2073 @@
+{
+  "key": "welcome",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": true,
+  "board": {
+    "id": "b4b96ed2-37eb-5214-80d4-0fc05fc5ecad",
+    "title": "fvoci 시작하기",
+    "description": "fvoci로 할 수 있는 일을 카드 하나에 하나씩 담았습니다. 카드를 열어 읽고, 해 본 것은 ‘해 봤어요’ 열로 옮기세요. 다 보고 나면 이 보드는 지워도 됩니다.",
+    "icon": "👋",
+    "showDescription": true,
+    "dueDatePropertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+    "doneWhen": {
+      "propertyId": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+      "optionIds": [
+        "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+        "name": "진행",
+        "type": "select",
+        "options": [
+          {
+            "id": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+            "label": "읽어 볼 것",
+            "color": "gray"
+          },
+          {
+            "id": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+            "label": "해 보는 중",
+            "color": "blue"
+          },
+          {
+            "id": "b85715c5-85df-5e1c-b84a-7e6135ad4606",
+            "label": "해 봤어요",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "71019124-7b11-5930-9898-f92ad857b013",
+        "name": "주제",
+        "type": "select",
+        "options": [
+          {
+            "id": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+            "label": "보드",
+            "color": "blue"
+          },
+          {
+            "id": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+            "label": "본문",
+            "color": "purple"
+          },
+          {
+            "id": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+            "label": "파일",
+            "color": "orange"
+          },
+          {
+            "id": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+            "label": "위키",
+            "color": "green"
+          },
+          {
+            "id": "4f67cfad-2507-5e05-8267-bc7815d86019",
+            "label": "함께 쓰기",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "name": "해 볼 날",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "bde3dd15-2849-5b86-a9f2-ae55788ea043",
+        "name": "걸리는 시간(분)",
+        "type": "number",
+        "options": []
+      },
+      {
+        "id": "1d3b531d-827c-5a62-a944-223fe93abb8b",
+        "name": "먼저 볼 카드",
+        "type": "relation",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "6878736d-5f17-569f-834e-c1755c9385bf",
+      "type": "view",
+      "title": "가이드",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+        ],
+        "shownProperties": [
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043"
+        ],
+        "groupBy": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"
+      }
+    },
+    {
+      "id": "9e718f3c-b68a-53e3-9d6d-f6e02eea000b",
+      "type": "view",
+      "title": "표",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "sum"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b"
+        ]
+      }
+    },
+    {
+      "id": "d99f7d80-7f6f-5a23-b792-7a1008c49099",
+      "type": "view",
+      "title": "갤러리",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gallery",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "71019124-7b11-5930-9898-f92ad857b013"]
+      }
+    },
+    {
+      "id": "67a936c4-80ae-5068-970e-fb930b371414",
+      "type": "view",
+      "title": "달력",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48"
+      }
+    },
+    {
+      "id": "3101eb5b-1938-5445-88ef-1b389449ad52",
+      "type": "view",
+      "title": "간트",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gantt",
+        "visibleGroups": [],
+        "shownProperties": ["5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "dependencyPropertyId": "1d3b531d-827c-5a62-a944-223fe93abb8b",
+        "ganttZoom": "day"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+      "type": "card",
+      "title": "카드를 열어 보세요",
+      "fields": {
+        "icon": "👋",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-01"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "2"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "지금 보고 있는 것이 카드입니다. 보드의 일 하나, 안건 하나, 고객 한 사람이 카드 하나입니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "제목과 아이콘",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "은 맨 위에 있습니다. 눌러서 고칩니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "속성",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "은 그 아래에 있습니다. 이 카드에는 진행, 주제, 해 볼 날이 있습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "본문",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "은 이 글이 있는 자리입니다. 길게 써도 됩니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "댓글",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "은 맨 아래에 남깁니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "해 보기"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "이 카드의 ‘진행’을 ‘해 봤어요’로 바꾸기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "아래에 댓글 하나 남기기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "카드를 닫고, 보드에서 다른 열로 끌어 옮기기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+      "type": "card",
+      "title": "같은 카드를 다섯 가지로 보세요",
+      "fields": {
+        "icon": "🧭",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-02"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "보드 위쪽의 탭이 뷰입니다. 뷰를 바꿔도 카드는 그대로이고, 보이는 모양만 달라집니다. 이 보드에 다섯 가지가 모두 있으니 하나씩 눌러 보세요."
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "board.png",
+              "alt": "열 세 개에 카드가 놓인 보드"
+            }
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "보드",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 속성 하나로 열을 나누고 카드를 끌어 옮깁니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "표",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 카드가 줄, 속성이 칸입니다. 칸 아래에서 합계나 평균을 봅니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "갤러리",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 본문의 첫 그림이 카드의 얼굴이 됩니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "달력",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 날짜 속성을 따라 카드가 놓입니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "간트",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 기간을 막대로 그리고, 먼저 끝나야 하는 카드를 선으로 잇습니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "timeline.png",
+              "alt": "막대가 차례로 이어지는 간트 차트"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+      "type": "card",
+      "title": "속성으로 카드를 설명하세요",
+      "fields": {
+        "icon": "🏷️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-03"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "속성은 보드의 모든 카드가 함께 갖는 칸입니다. 카드를 열고 속성 아래의 ‘+ 속성 추가’를 누르면 종류를 고를 수 있습니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "텍스트, 숫자, 전자우편, 전화번호, URL 주소"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "선택과 다중 선택: 선택지에 색을 줍니다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "날짜: 하루이거나 기간입니다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "사람: 담당자처럼 사람을 가리킵니다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "체크박스"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "만든 사람과 생성 시간, 최근 수정한 사람과 시간: 저절로 채워집니다"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "카드 관계: 같은 보드의 다른 카드를 가리킵니다. 이 보드의 ‘먼저 볼 카드’가 그것입니다"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "다른 템플릿에서 쓰임새를 볼 수 있습니다. 고객 연락처에는 전자우편과 전화번호가, 이슈 트래커에는 만든 사람과 최근 수정 시간이 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+      "type": "card",
+      "title": "거르고, 정렬하고, 묶으세요",
+      "fields": {
+        "icon": "🔎",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-04"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+              "kind": "fs",
+              "lagDays": 0
+            },
+            {
+              "card": "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "뷰마다 무엇을 어떤 순서로 보일지 따로 정합니다. 뷰 이름 옆의 단추들입니다."
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "필터",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 조건에 맞는 카드만 남깁니다. 조건을 여럿 두고 ‘모두’나 ‘하나라도’로 잇습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "정렬",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 속성 값의 순서로 늘어놓습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "그룹화",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 보드의 열, 표와 간트의 묶음을 어느 속성으로 나눌지 고릅니다. 필요 없는 열은 숨깁니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "속성",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 카드 겉에 보일 속성을 고릅니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "이 보드의 ‘표’ 뷰는 날짜순으로 정렬되어 있고, ‘걸리는 시간(분)’ 칸 아래에 합계가 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+      "type": "card",
+      "title": "본문을 써 보세요",
+      "fields": {
+        "icon": "✍️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-07"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "10",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "빈 줄에서 "
+              },
+              {
+                "type": "text",
+                "text": "/",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "를 누르면 넣을 수 있는 블록이 나옵니다. 아래는 모두 이 본문에 실제로 들어 있는 블록입니다."
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "제목은 세 단계입니다"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "글"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "굵게",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ", "
+              },
+              {
+                "type": "text",
+                "text": "기울여",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ", "
+              },
+              {
+                "type": "text",
+                "text": "지워서",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ", "
+              },
+              {
+                "type": "text",
+                "text": "코드처럼",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " 쓸 수 있습니다."
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "줄만 바꾸려면 Shift와 Enter를 함께 누릅니다."
+              }
+            ]
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "인용은 이렇게 들여서 보입니다."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "목록"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "글머리 기호 목록"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "또 한 줄"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "번호 목록"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "둘째"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "끝낸 할 일"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "남은 할 일"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "코드, 수식, 다이어그램"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "코드"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "python"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "def greet(name):\n    return f\"Hello, {name}!\""
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "수식"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "글 사이의 수식 "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "a^2 + b^2 = c^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 과, 줄을 차지하는 수식:"
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\bar{x} = \\frac{1}{n} \\sum_{i=1}^{n} x_i"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "다이어그램"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "코드 블록의 언어를 mermaid로 고르면 그림으로 그려집니다."
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart LR\n  A[읽어 볼 것] --> B[해 보는 중] --> C[해 봤어요]"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "다른 카드 가리키기"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "카드나 위키 페이지를 본문에서 가리킬 수 있습니다: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "a0825cf8-c93e-5361-b6ce-a1c788531158"
+                }
+              },
+              {
+                "type": "text",
+                "text": " 누르면 그 카드가 열립니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "430842d5-e669-5b81-82ba-f325d20bbf9d",
+      "type": "card",
+      "title": "파일을 올리고 그 자리에서 여세요",
+      "fields": {
+        "icon": "📎",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-08"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "본문에 파일을 끌어다 놓으면 그림은 그림으로, 그 밖의 파일은 이름이 적힌 블록으로 들어갑니다. 아래 파일의 이름을 눌러 보세요."
+              }
+            ]
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "viewer-sample.ko.docx"
+            }
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "내려받지 않고 브라우저 안에서 열립니다. 이렇게 열리는 파일은 다음과 같습니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PDF"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Word 문서(DOCX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Excel 통합 문서(XLSX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PowerPoint 발표 자료(PPTX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "한글 문서(HWP, HWPX)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "다른 종류의 파일은 내려받아 엽니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+      "type": "card",
+      "title": "위키에 문서를 모으세요",
+      "fields": {
+        "icon": "📚",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-09"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "10",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "보드가 일을 카드로 나눈다면, 위키는 글을 페이지로 쌓습니다. 업무 안내, 회의 규칙, 제품 설명처럼 오래 두고 읽는 글에 맞습니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "페이지 아래에 페이지를 두어 나무처럼 엮습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "페이지의 본문은 카드의 본문과 같습니다. 목록, 코드, 수식, 그림, 파일이 모두 들어갑니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "본문에서 다른 페이지나 카드를 가리킬 수 있습니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "지운 페이지는 위키의 휴지통에서 되살립니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "해 보기"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "사이드바의 ‘보드·위키 추가’를 누르고 ‘새 위키’ 고르기"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "첫 페이지에 제목을 쓰고, 그 아래에 페이지 하나 더 만들기"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+      "type": "card",
+      "title": "템플릿으로 보드를 시작하세요",
+      "fields": {
+        "icon": "🧩",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-10"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "사이드바의 ‘보드·위키 추가’를 누르면 빈 보드와 함께 템플릿이 나옵니다. 템플릿마다 fvoci의 다른 면을 보여 줍니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "프로젝트 일정",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 간트 뷰와 선행 작업"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "이슈 트래커",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 필터, 숨긴 열, 저절로 채워지는 속성"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "회의록",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 카드 템플릿과 달력"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "콘텐츠 캘린더",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 갤러리와 달력"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "고객 연락처",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 표와 계산"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "공부 노트",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": 수식, 코드, 다이어그램"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "여러분의 보드도 템플릿으로 만들어 둘 수 있습니다. 사이드바에서 보드의 메뉴를 열면 됩니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+      "type": "card",
+      "title": "동료와 함께 쓰세요",
+      "fields": {
+        "icon": "🤝",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-11"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "보드와 위키는 여럿이 함께 씁니다. 같은 본문을 동시에 고쳐도 서로의 글이 바로 보입니다."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "보드마다 사람에게 역할을 줍니다: 관리자, 편집자, 댓글 작성자, 열람자."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "본문에서 "
+                      },
+                      {
+                        "type": "text",
+                        "text": "@",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "를 누르고 이름을 고르면 그 사람을 가리킵니다."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "보드나 위키 하나만 보여 줄 사람은 손님으로 초대합니다. 관리자가 손님 초대를 켜 두었을 때 됩니다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "이 보드에는 여러분뿐입니다. 사람을 더하려면 보드 위쪽의 ‘공유’를 여세요."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555501",
+      "type": "card",
+      "title": "학습에서 차례대로 배우세요",
+      "fields": {
+        "icon": "🎓",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-12"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "사이드바에서 ‘학습’을 만들면 온보딩 과정이나 스터디를 챕터와 단원으로 엮고, 진도와 복습·모임 일정을 챙기며 단원마다 질문 댓글을 나눌 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555502",
+      "type": "card",
+      "title": "⌘K로 어디로든 바로 가세요",
+      "fields": {
+        "icon": "⚡",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-13"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "2"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "어느 화면에서든 ⌘K(또는 Ctrl+K)를 누르면 공간 안의 카드, 위키 페이지, 학습 단원을 찾아 바로 열 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555503",
+      "type": "card",
+      "title": "‘오늘’과 알림으로 놓치지 마세요",
+      "fields": {
+        "icon": "🔔",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-14"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "3"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "사이드바의 ‘오늘’에서 내 담당 마감 카드, 오늘의 학습 단원과 복습, 예정 모임을 한눈에 확인하고, 누군가 나를 부르거나 카드를 맡기면 알림 종에서 바로 열어 보세요."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "viewer-sample.ko.docx",
+      "name": "파일 보기 예시.docx"
+    },
+    {
+      "asset": "board.png",
+      "name": "보드.png"
+    },
+    {
+      "asset": "timeline.png",
+      "name": "간트.png"
+    }
+  ]
+}

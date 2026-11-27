@@ -1,0 +1,24 @@
+# Build output and generated files
+dist/
+storybook-static/
+test-results/
+playwright-report/
+src/lib/i18n/paraglide/
+src/styles/fonts/
+
+# Code emitted by the shadcn-svelte CLI keeps the generator's formatting, so that
+# a regenerated file can be compared with the one here. See src/lib/ui/README.md.
+src/lib/ui/**/*.svelte
+src/lib/ui/**/*.ts
+src/lib/hooks/
+src/lib/utils.ts
+components.json
+
+# Made from contracts/openapi.json by `pnpm run api:types`; `check` fails when it is stale.
+src/lib/api/contract.ts
+
+# A cargo-about template: its lines are the notices' lines, which Prettier would fold.
+tools/licenses/rhwp-wasm.hbs
+
+# Written by pnpm for the Wrangler that deploys Storybook (tools/storybook/wrangler.ts).
+tools/storybook/wrangler/pnpm-lock.yaml

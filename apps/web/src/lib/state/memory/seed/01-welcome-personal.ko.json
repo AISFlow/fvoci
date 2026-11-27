@@ -1,0 +1,367 @@
+{
+  "key": "welcome-personal",
+  "language": "ko",
+  "baseDate": "2026-12-01",
+  "onboarding": false,
+  "board": {
+    "id": "a1b2c3d4-e5f6-5789-8abc-def012345678",
+    "title": "내 공간 시작하기",
+    "description": "이곳의 모든 기록은 나만의 것입니다. 카드를 열어 내 공간에서 할 수 있는 일을 살펴보고, 해 본 카드는 ‘해 봤어요’ 열로 옮기세요. 다 본 뒤에는 이 보드를 지워도 됩니다.",
+    "icon": "🌱",
+    "showDescription": true,
+    "dueDatePropertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+    "doneWhen": {
+      "propertyId": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+      "optionIds": ["b85715c5-85df-5e1c-b84a-7e6135ad4606"]
+    },
+    "cardProperties": [
+      {
+        "id": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+        "name": "진행",
+        "type": "select",
+        "options": [
+          {
+            "id": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+            "label": "읽어 볼 것",
+            "color": "gray"
+          },
+          {
+            "id": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+            "label": "해 보는 중",
+            "color": "blue"
+          },
+          {
+            "id": "b85715c5-85df-5e1c-b84a-7e6135ad4606",
+            "label": "해 봤어요",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "71019124-7b11-5930-9898-f92ad857b013",
+        "name": "영역",
+        "type": "select",
+        "options": [
+          {
+            "id": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+            "label": "오늘",
+            "color": "blue"
+          },
+          {
+            "id": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+            "label": "일기",
+            "color": "purple"
+          },
+          {
+            "id": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+            "label": "학습",
+            "color": "green"
+          },
+          {
+            "id": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+            "label": "내 시간",
+            "color": "orange"
+          },
+          {
+            "id": "4f67cfad-2507-5e05-8267-bc7815d86019",
+            "label": "공유·확장",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "name": "해 볼 날",
+        "type": "date",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "22222222-1111-5111-8111-111111111101",
+      "type": "view",
+      "title": "가이드",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+        ],
+        "shownProperties": [
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48"
+        ],
+        "groupBy": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"
+      }
+    },
+    {
+      "id": "22222222-1111-5111-8111-111111111102",
+      "type": "view",
+      "title": "표",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48"
+        ]
+      }
+    },
+    {
+      "id": "22222222-1111-5111-8111-111111111103",
+      "type": "view",
+      "title": "달력",
+      "fields": {
+        "cardOrder": [
+          "11111111-1111-5111-8111-111111111101",
+          "11111111-1111-5111-8111-111111111102",
+          "11111111-1111-5111-8111-111111111103",
+          "11111111-1111-5111-8111-111111111104",
+          "11111111-1111-5111-8111-111111111105",
+          "11111111-1111-5111-8111-111111111106"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "11111111-1111-5111-8111-111111111101",
+      "type": "card",
+      "title": "카드를 열고 ‘오늘’을 확인하세요",
+      "fields": {
+        "icon": "👋",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-01"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "내 공간은 나만의 보드, 위키, 일기, 학습을 한곳에 모으는 비공개 공간입니다. 사이드바의 ‘오늘’을 열면 마감 임박 카드와 오늘의 학습·복습을 한눈에 볼 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111102",
+      "type": "card",
+      "title": "일기에 하루를 기록하세요",
+      "fields": {
+        "icon": "📔",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-02"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "내 공간의 사이드바에서 ‘일기’를 만들 수 있습니다. 날짜마다 글이 하나씩 쌓이고, 이어서 쓴 날은 연속 기록으로 남습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111103",
+      "type": "card",
+      "title": "학습을 만들고 때맞춰 복습하세요",
+      "fields": {
+        "icon": "🎓",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-03"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "‘학습’을 만들어 챕터와 단원을 나누고, 목표 일정을 세우고, 단원마다 개인 메모와 간격 복습을 남겨 보세요."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111104",
+      "type": "card",
+      "title": "내 시간 타이머로 집중한 시간을 재세요",
+      "fields": {
+        "icon": "⏱️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-04"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "카드, 위키 페이지, 학습 단원 위에서 바로 타이머를 켜거나 사이드바의 ‘내 시간’을 열어 나만의 집중 기록을 쌓을 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111105",
+      "type": "card",
+      "title": "공개 링크로 읽기 전용 공유하기",
+      "fields": {
+        "icon": "🔗",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-05"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "내 공간의 보드나 위키도 ‘공유’에서 공개 링크를 켜면 다른 사람에게 읽기 전용으로 보여 줄 수 있고, 언제든 다시 닫을 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "11111111-1111-5111-8111-111111111106",
+      "type": "card",
+      "title": "동료와 함께할 때는 언제든 조직을 만드세요",
+      "fields": {
+        "icon": "🏢",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-06"
+          }
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "내 공간에는 다른 구성원을 초대하지 않습니다. 동료와 실시간으로 함께 쓰고 싶을 때는 왼쪽 위의 공간 전환 메뉴에서 새 조직을 만들고, 내 공간의 보드·위키·학습을 다른 공간으로 복제해 이어 갈 수 있습니다."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": []
+}

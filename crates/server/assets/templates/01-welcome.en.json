@@ -1,0 +1,2077 @@
+{
+  "key": "welcome",
+  "language": "en",
+  "baseDate": "2026-12-01",
+  "onboarding": true,
+  "board": {
+    "id": "b4b96ed2-37eb-5214-80d4-0fc05fc5ecad",
+    "title": "Getting started with fvoci",
+    "description": "One card for each thing fvoci does. Open a card to read it, and move it to “Done it” once you have tried it. Delete this board when you are through.",
+    "icon": "👋",
+    "showDescription": true,
+    "dueDatePropertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+    "doneWhen": {
+      "propertyId": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+      "optionIds": [
+        "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+      ]
+    },
+    "cardProperties": [
+      {
+        "id": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+        "name": "Progress",
+        "type": "select",
+        "options": [
+          {
+            "id": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+            "label": "To read",
+            "color": "gray"
+          },
+          {
+            "id": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+            "label": "Trying it",
+            "color": "blue"
+          },
+          {
+            "id": "b85715c5-85df-5e1c-b84a-7e6135ad4606",
+            "label": "Done it",
+            "color": "green"
+          }
+        ]
+      },
+      {
+        "id": "71019124-7b11-5930-9898-f92ad857b013",
+        "name": "Topic",
+        "type": "select",
+        "options": [
+          {
+            "id": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+            "label": "Boards",
+            "color": "blue"
+          },
+          {
+            "id": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+            "label": "Writing",
+            "color": "purple"
+          },
+          {
+            "id": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+            "label": "Files",
+            "color": "orange"
+          },
+          {
+            "id": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+            "label": "Wiki",
+            "color": "green"
+          },
+          {
+            "id": "4f67cfad-2507-5e05-8267-bc7815d86019",
+            "label": "Together",
+            "color": "pink"
+          }
+        ]
+      },
+      {
+        "id": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "name": "Day",
+        "type": "date",
+        "options": []
+      },
+      {
+        "id": "bde3dd15-2849-5b86-a9f2-ae55788ea043",
+        "name": "Minutes",
+        "type": "number",
+        "options": []
+      },
+      {
+        "id": "1d3b531d-827c-5a62-a944-223fe93abb8b",
+        "name": "Read first",
+        "type": "relation",
+        "options": []
+      }
+    ]
+  },
+  "views": [
+    {
+      "id": "6878736d-5f17-569f-834e-c1755c9385bf",
+      "type": "view",
+      "title": "Board",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [""],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "board",
+        "visibleGroups": [
+          "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "b85715c5-85df-5e1c-b84a-7e6135ad4606"
+        ],
+        "shownProperties": [
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043"
+        ],
+        "groupBy": "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"
+      }
+    },
+    {
+      "id": "9e718f3c-b68a-53e3-9d6d-f6e02eea000b",
+      "type": "view",
+      "title": "Table",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {
+          "__title": "count",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "sum"
+        },
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [
+          {
+            "propertyId": "0181ce69-589b-5981-9166-9a7340b53a48",
+            "reversed": false
+          }
+        ],
+        "viewType": "table",
+        "visibleGroups": [],
+        "shownProperties": [
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad",
+          "71019124-7b11-5930-9898-f92ad857b013",
+          "0181ce69-589b-5981-9166-9a7340b53a48",
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b"
+        ]
+      }
+    },
+    {
+      "id": "d99f7d80-7f6f-5a23-b792-7a1008c49099",
+      "type": "view",
+      "title": "Gallery",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gallery",
+        "visibleGroups": [],
+        "shownProperties": ["__title", "71019124-7b11-5930-9898-f92ad857b013"]
+      }
+    },
+    {
+      "id": "67a936c4-80ae-5068-970e-fb930b371414",
+      "type": "view",
+      "title": "Calendar",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "calendar",
+        "visibleGroups": [],
+        "shownProperties": ["__title"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48"
+      }
+    },
+    {
+      "id": "3101eb5b-1938-5445-88ef-1b389449ad52",
+      "type": "view",
+      "title": "Gantt",
+      "fields": {
+        "cardOrder": [
+          "a0825cf8-c93e-5361-b6ce-a1c788531158",
+          "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+          "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+          "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+          "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+          "430842d5-e669-5b81-82ba-f325d20bbf9d",
+          "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+          "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+          "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+          "c1111111-2222-5333-8444-555555555501",
+          "c1111111-2222-5333-8444-555555555502",
+          "c1111111-2222-5333-8444-555555555503"
+        ],
+        "collapsedGroups": [],
+        "columnCalculations": {},
+        "columnWidths": {},
+        "defaultTemplateId": "",
+        "filter": {
+          "operation": "and",
+          "filters": []
+        },
+        "hiddenGroups": [],
+        "groupCalculations": {},
+        "sort": [],
+        "viewType": "gantt",
+        "visibleGroups": [],
+        "shownProperties": ["5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad"],
+        "dateProperty": "0181ce69-589b-5981-9166-9a7340b53a48",
+        "dependencyPropertyId": "1d3b531d-827c-5a62-a944-223fe93abb8b",
+        "ganttZoom": "day"
+      }
+    }
+  ],
+  "cards": [
+    {
+      "id": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+      "type": "card",
+      "title": "Open a card",
+      "fields": {
+        "icon": "👋",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "ffe5f982-6255-5683-8eec-59f68f1bc939",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-01"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "2"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "What you are reading is a card. One task, one topic or one customer of a board is one card."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The title and the icon",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " are at the top. Press them to change them."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The properties",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " come next. This card has a progress, a topic and a day."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The body",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " is where this text is. Write as much as you like."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Comments",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " go at the bottom."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Try it"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Set this card's Progress to “Done it”"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Leave a comment below"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Close the card and drag it to another column of the board"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+      "type": "card",
+      "title": "See the same cards five ways",
+      "fields": {
+        "icon": "🧭",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-02"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The tabs at the top of a board are its views. Changing the view changes how the cards are shown, never the cards. This board has all five: press each one."
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "board.png",
+              "alt": "A board of three columns with cards in them"
+            }
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Board",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": columns by one property, and cards you drag between them."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Table",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": a row for each card, a column for each property, and sums or averages below."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gallery",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the first picture of a body becomes the face of its card."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Calendar",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": cards placed by a date property."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Gantt",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": a bar for each period, and lines from the cards that have to end first."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "image",
+            "attrs": {
+              "fileId": "timeline.png",
+              "alt": "A Gantt chart of bars that follow one another"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+      "type": "card",
+      "title": "Describe cards with properties",
+      "fields": {
+        "icon": "🏷️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-03"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A property is a field that every card of the board has. Open a card and press “+ Add a property” below its properties to choose a kind."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Text, number, email, phone and URL"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Select and multi select, with a color for each option"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Date: one day, or a period"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Person: somebody, such as who is in charge"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Checkbox"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Who made or last changed a card, and when: filled in for you"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Card relation: other cards of the same board. “Read first” on this board is one"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The other templates show them at work: Customer contacts has email and phone, Issue tracker has who made a card and when it last changed."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+      "type": "card",
+      "title": "Filter, sort and group",
+      "fields": {
+        "icon": "🔎",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-04"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "0318c5dc-6f2c-565f-85f0-a6b25f7a9b6e",
+              "kind": "fs",
+              "lagDays": 0
+            },
+            {
+              "card": "2b1c5b9c-3d5c-53b1-991b-59c041fd22f5",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Each view decides for itself what it shows and in what order, with the buttons beside its name."
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Filter",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": keeps the cards that meet your conditions, all of them or any of them."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Sort",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": puts the cards in the order of a property."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Group by",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the property that makes the columns of a board and the groups of a table or a Gantt chart. Hide the columns you do not need."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Properties",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the properties shown on the face of a card."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "The Table view of this board is sorted by day and has a sum below its Minutes column."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+      "type": "card",
+      "title": "Write in the body",
+      "fields": {
+        "icon": "✍️",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "bdc2ac7b-dd27-5112-8c19-fac84dc54503",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-07"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "10",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "a0825cf8-c93e-5361-b6ce-a1c788531158",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Press "
+              },
+              {
+                "type": "text",
+                "text": "/",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " on an empty line to see the blocks you can put in. Everything below is such a block, in this very body."
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Headings come in three sizes"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Text"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Write "
+              },
+              {
+                "type": "text",
+                "text": "bold",
+                "marks": [
+                  {
+                    "type": "bold"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ", "
+              },
+              {
+                "type": "text",
+                "text": "italic",
+                "marks": [
+                  {
+                    "type": "italic"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": ", "
+              },
+              {
+                "type": "text",
+                "text": "struck out",
+                "marks": [
+                  {
+                    "type": "strike"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " or "
+              },
+              {
+                "type": "text",
+                "text": "as code",
+                "marks": [
+                  {
+                    "type": "code"
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "."
+              },
+              {
+                "type": "hardBreak"
+              },
+              {
+                "type": "text",
+                "text": "Shift and Enter start a new line without a new paragraph."
+              }
+            ]
+          },
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A quotation is set off like this."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Lists"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A bulleted list"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Another line"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "orderedList",
+            "attrs": {
+              "start": 1
+            },
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A numbered list"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The second"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": true
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A task that is done"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A task that is left"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "horizontalRule"
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Code, formulas and diagrams"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Code"
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "python"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "def greet(name):\n    return f\"Hello, {name}!\""
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Formulas"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A formula in a line, "
+              },
+              {
+                "type": "inlineMath",
+                "attrs": {
+                  "latex": "a^2 + b^2 = c^2"
+                }
+              },
+              {
+                "type": "text",
+                "text": ", and one on a line of its own:"
+              }
+            ]
+          },
+          {
+            "type": "blockMath",
+            "attrs": {
+              "latex": "\\bar{x} = \\frac{1}{n} \\sum_{i=1}^{n} x_i"
+            }
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 3
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Diagrams"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A code block whose language is mermaid is drawn as a diagram."
+              }
+            ]
+          },
+          {
+            "type": "codeBlock",
+            "attrs": {
+              "language": "mermaid"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "flowchart LR\n  A[To read] --> B[Trying it] --> C[Done it]"
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Pointing at another card"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A body can point at a card or a wiki page: "
+              },
+              {
+                "type": "reference",
+                "attrs": {
+                  "id": "a0825cf8-c93e-5361-b6ce-a1c788531158"
+                }
+              },
+              {
+                "type": "text",
+                "text": " Press it and the card opens."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "430842d5-e669-5b81-82ba-f325d20bbf9d",
+      "type": "card",
+      "title": "Attach files and open them right here",
+      "fields": {
+        "icon": "📎",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "3f2385b2-9b0d-5aa6-aaef-87834c60a36b",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-08"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Drop a file into a body: a picture is shown as a picture, any other file as a block with its name. Press the name of the file below."
+              }
+            ]
+          },
+          {
+            "type": "file",
+            "attrs": {
+              "fileId": "viewer-sample.en.docx"
+            }
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "It opens in the browser, with nothing to download. These kinds of file open this way:"
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PDF"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Word documents (DOCX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Excel workbooks (XLSX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "PowerPoint decks (PPTX)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Hangul documents (HWP, HWPX)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A file of any other kind is downloaded."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "80fdb5ab-38aa-5917-929f-93342dcbf14a",
+      "type": "card",
+      "title": "Keep your documents in a wiki",
+      "fields": {
+        "icon": "📚",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-09"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "10",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "082b3bb6-1623-56ed-989b-d9a179c49f0e",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A board divides work into cards; a wiki gathers writing into pages. It suits what is read for a long time: how we work, the rules of a meeting, what the product does."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Pages go below pages, as a tree."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "The body of a page is the body of a card: lists, code, formulas, pictures and files all go in."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A body can point at other pages and at cards."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "A deleted page comes back from the wiki's trash."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "heading",
+            "attrs": {
+              "level": 2
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Try it"
+              }
+            ]
+          },
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Press “Add board or wiki” in the sidebar and choose “New wiki”"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Give the first page a title and make another page below it"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+      "type": "card",
+      "title": "Start a board from a template",
+      "fields": {
+        "icon": "🧩",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-10"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "603481df-f2fe-585f-82f8-7d4b6413cf3a",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "“Add board or wiki” in the sidebar offers an empty board and the templates. Each template shows another side of fvoci."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Project schedule",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the Gantt view, and tasks that wait for others"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Issue tracker",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": filters, hidden columns and properties that fill themselves in"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Meeting notes",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": a card template, and the calendar"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Content calendar",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the gallery and the calendar"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Customer contacts",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": the table and its calculations"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Study notes",
+                        "marks": [
+                          {
+                            "type": "bold"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": ": formulas, code and diagrams"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A board of your own can be made into a template too, from its menu in the sidebar."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "bd5a25b1-25aa-5ca1-b529-e278a81e1ed3",
+      "type": "card",
+      "title": "Work on it together",
+      "fields": {
+        "icon": "🤝",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-11"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5",
+          "1d3b531d-827c-5a62-a944-223fe93abb8b": [
+            {
+              "card": "d1e693bb-e55c-5417-8e2c-841dc141f54b",
+              "kind": "fs",
+              "lagDays": 0
+            }
+          ]
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Boards and wikis are shared. Several people can write in the same body at once and see each other's words as they come."
+              }
+            ]
+          },
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "On each board a person has a role: admin, editor, commenter or viewer."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Press "
+                      },
+                      {
+                        "type": "text",
+                        "text": "@",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " in a body and pick a name to point at somebody."
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Somebody who should see one board or one wiki and nothing else is invited as a guest, where an administrator has turned guests on."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "You are alone on this board. Open “Share” at the top of the board to add people."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555501",
+      "type": "card",
+      "title": "Learn step by step in a course",
+      "fields": {
+        "icon": "🎓",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "e6a530b5-a4cd-5d31-b3d8-1bd2bafad7f0",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-12"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "5"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Create a Course from the sidebar to structure onboarding lessons or shared study plans into chapters and units, track completion, schedule meetings, and leave unit questions."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555502",
+      "type": "card",
+      "title": "Jump anywhere with ⌘K",
+      "fields": {
+        "icon": "⚡",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "d9774bd7-74f8-54db-b3cc-cd275479abe9",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-13"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "2"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Press ⌘K (or Ctrl+K) from anywhere to search cards, wiki pages and course units across the workspace and jump straight to them."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "c1111111-2222-5333-8444-555555555503",
+      "type": "card",
+      "title": "Stay on top of Today and notifications",
+      "fields": {
+        "icon": "🔔",
+        "isTemplate": false,
+        "properties": {
+          "5bfbc5cb-596f-5a90-9d0a-8c2b259bf5ad": "de9f9830-d321-5ea0-93eb-75474b12a7a9",
+          "71019124-7b11-5930-9898-f92ad857b013": "4f67cfad-2507-5e05-8267-bc7815d86019",
+          "0181ce69-589b-5981-9166-9a7340b53a48": {
+            "from": "2026-12-14"
+          },
+          "bde3dd15-2849-5b86-a9f2-ae55788ea043": "3"
+        }
+      },
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Open “Today” in the sidebar to see due cards, course units, reviews and upcoming meetings across your spaces, and check the notification bell whenever someone mentions or assigns you."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "files": [
+    {
+      "asset": "viewer-sample.en.docx",
+      "name": "Try the viewer.docx"
+    },
+    {
+      "asset": "board.png",
+      "name": "board.png"
+    },
+    {
+      "asset": "timeline.png",
+      "name": "timeline.png"
+    }
+  ]
+}

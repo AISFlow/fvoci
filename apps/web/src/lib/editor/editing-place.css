@@ -1,0 +1,233 @@
+/*
+ * Diagrams and block formulas in the editor (diagram-block.ts, math-block.ts,
+ * editing-place.ts): the picture alone until the place is opened, then the
+ * source right under it.
+ */
+
+/* ------------------------------------------------------------ a diagram */
+
+.doc-diagram-block {
+  position: relative;
+  margin-block: 0.5em;
+}
+/* The source is the block's text, in sight only while the place is open. */
+.doc-diagram-block:not([data-open]) > .doc-diagram-source,
+.doc-diagram-block:not([data-open]) > .doc-diagram-problem,
+.doc-diagram-block:not([data-open]) > .doc-place-footer {
+  display: none;
+}
+.doc-body .doc-diagram-block > .doc-diagram:not([data-state='error']) {
+  border-color: transparent;
+}
+/* Room for the picture while it is being drawn, so that the page does not jump twice. */
+.doc-body .doc-diagram-block > .doc-diagram[data-state='pending'] {
+  display: block;
+  min-height: 6em;
+}
+.doc-body .doc-diagram-block > .doc-diagram[data-state='empty']:empty {
+  display: none;
+}
+/* Closed and not drawn: the source in place of the picture, with what went wrong. */
+.doc-diagram-copy {
+  margin: 0.5em 0 0;
+  text-align: start;
+}
+.doc-diagram-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+.doc-body .doc-diagram-block > .doc-diagram[data-state='empty'] {
+  border: 1px dashed var(--input-border);
+}
+/* Where nothing can be written, an empty diagram is nothing, as in the read-only view. */
+.ProseMirror[contenteditable='false'] .doc-diagram-block > .doc-diagram[data-state='empty'] {
+  display: none;
+}
+
+/* Where it can be edited, the picture says so when pointed at or selected. */
+.ProseMirror[contenteditable='true'] .doc-diagram-block:not([data-open]) > .doc-diagram {
+  cursor: pointer;
+}
+.ProseMirror[contenteditable='true'] .doc-diagram-block:not([data-open]):hover > .doc-diagram,
+.ProseMirror[contenteditable='true'] .doc-diagram-block.ProseMirror-selectednode > .doc-diagram {
+  border-color: var(--input-border);
+}
+/* Selected, where it can be edited: where nothing opens, a press leaves no frame. */
+.ProseMirror[contenteditable='true'] .doc-diagram-block.ProseMirror-selectednode > .doc-diagram {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.doc-place-edit {
+  cursor: pointer;
+  position: absolute;
+  top: 0.5em;
+  inset-inline-end: 0.5em;
+  padding: 0.15em 0.6em;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--input-border);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans-stack);
+  font-size: var(--text-xs);
+  opacity: 0;
+  pointer-events: none;
+}
+.ProseMirror[contenteditable='true'] .doc-diagram-block:not([data-open]):hover > .doc-place-edit,
+.ProseMirror[contenteditable='true'] .doc-math-block:not([data-open]):hover > .doc-place-edit,
+.ProseMirror[contenteditable='true']
+  :is(.doc-diagram-block, .doc-math-block).ProseMirror-selectednode:not([data-open])
+  > .doc-place-edit {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Open: the picture above (dimmed while the source cannot be drawn), the source under it. */
+.doc-diagram-block[data-open] > .doc-diagram {
+  border-color: var(--border);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.doc-diagram[data-stale] {
+  opacity: 0.4;
+}
+.doc-body .doc-diagram-block[data-open] > pre.doc-diagram-source {
+  margin: 0;
+  border: 1px solid var(--ring);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+/* ------------------------------------------------------------ the place */
+
+.doc-diagram-problem:empty {
+  display: none;
+}
+.doc-diagram-problem {
+  margin: 0.4em 0 0;
+}
+.doc-place-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  margin-top: 0.4em;
+  font-family: var(--font-sans-stack);
+}
+.doc-place-hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+}
+.doc-place-footer button {
+  padding: 0.25em 0.9em;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--text-sm);
+}
+.doc-place-footer button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+/* ------------------------------------------------------------ a block formula */
+
+.doc-math-block {
+  position: relative;
+}
+/*
+ * The space between blocks is the formula's, as in the read-only view, not
+ * its holder's (editor.css gives it to the second of two blocks): the two
+ * lay out alike, and the place opens under the formula, inside that space.
+ */
+.doc-body > * + .doc-math-block,
+.doc-body li > * + .doc-math-block {
+  margin-top: 0;
+}
+.doc-body > * + .doc-math-block > .doc-math {
+  margin-top: 0.75em;
+}
+.doc-body li > * + .doc-math-block > .doc-math {
+  margin-top: 0.25em;
+}
+.doc-math-block:not([data-open]) > .doc-place {
+  display: none;
+}
+.ProseMirror[contenteditable='true'] .doc-math-block:not([data-open]) > .doc-math {
+  cursor: pointer;
+}
+.ProseMirror[contenteditable='true'] .doc-math-block:not([data-open]):hover > .doc-math {
+  outline: 1px solid var(--input-border);
+  outline-offset: 1px;
+}
+.ProseMirror[contenteditable='true'] .doc-math-block.ProseMirror-selectednode > .doc-math {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.doc-math[data-stale],
+.doc-math-preview > [data-stale] {
+  opacity: 0.4;
+}
+.doc-place {
+  position: relative;
+  margin-top: 0.25em;
+  font-family: var(--font-sans-stack);
+}
+/* Open, a source that cannot be drawn is said under the field, not shown again above it. */
+.doc-math-block[data-open] > .doc-math[data-state='error'] {
+  display: none;
+}
+.doc-place textarea {
+  display: block;
+  width: 100%;
+  min-height: 4.5em;
+  padding: 0.5em;
+  border: 1px solid var(--ring);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono-stack);
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+.doc-place textarea:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.doc-place-problem {
+  margin: 0.4em 0 0;
+}
+.doc-place-problem:empty,
+.doc-place-new .doc-math-preview:empty {
+  display: none;
+}
+/* Out of sight but laid out: where a formula is drawn before it is shown. */
+.doc-math-aside {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+/* A new formula's empty line shows its place, not the editor's placeholder. */
+.doc-body p:has(> .doc-place-new)::before {
+  content: none;
+}
+
+/* Said by a screen reader, seen by nobody. */
+.doc-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* On a phone the button is easy to hit. */
+@media (pointer: coarse) {
+  .doc-place-footer button {
+    min-height: 2.75rem;
+    padding-inline: 1.25em;
+  }
+}

@@ -1,0 +1,19 @@
+# Installed packages and the build cache. Tools installed for one worktree
+# (target/tools) and the output of long runs go under target/ as well.
+node_modules/
+/target/
+
+# Local settings and secrets; example files are committed
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+*.log
+.DS_Store
+
+# Claude Code: the worktrees it makes and the settings of one machine
+.claude/worktrees/
+.claude/settings.local.json
+
+# What apps/web builds and the fonts it fetches are in apps/web/.gitignore.

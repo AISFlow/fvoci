@@ -1,0 +1,195 @@
+[workspace]
+resolver = "3"
+members = ["crates/model", "crates/store", "crates/collab", "crates/server", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+mail-parser = "1.0.2"
+mail-builder = { version = "2.0.1", default-features = false }
+lettre = { version = "0.11.24", default-features = false, features = ["smtp-transport", "tokio1-rustls", "aws-lc-rs", "rustls-platform-verifier"] }
+fvoci-collab = { path = "crates/collab" }
+fvoci-model = { path = "crates/model" }
+fvoci-store = { path = "crates/store" }
+
+anyhow = "1"
+# AES-256-GCM, which seals the client secrets of the providers in the database. The
+# library rustls uses already, through tokio-rustls. License: ISC AND (Apache-2.0 OR ISC)
+# AND OpenSSL-style notices of the AWS-LC C library, as for rustls.
+aws-lc-rs = "1"
+# Password hashing: Argon2id with PHC strings. License: MIT OR Apache-2.0.
+argon2 = "0.6"
+axum = { version = "0.8", features = ["ws", "multipart", "macros"] }
+# The alphabet of the secrets: tokens and stored file names. License: MIT OR Apache-2.0.
+base64 = "0.23"
+# Brotli, to read compressed answers in the tests (the server's compression has it
+# already). License: BSD-3-Clause AND MIT.
+brotli = "9"
+bytes = "1"
+# Streaming RFC 4180 CSV reader, for Notion database imports. License: Unlicense OR MIT.
+csv = "1"
+# The pure-Rust DEFLATE backend (miniz_oxide) that `zip` uses. License: MIT OR Apache-2.0.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+futures-util = "0.3"
+# The operating system's random number generator, for secrets. License: MIT OR Apache-2.0.
+getrandom = "0.4"
+# RFC 1123 date formatting and parsing for Last-Modified / If-Modified-Since. License: MIT OR Apache-2.0.
+httpdate = "1"
+# The names of the IANA time zones, compiled in (`tzdb-bundle-always`): what a user may
+# set as their time zone is the same on every installation, whatever the host has in
+# /usr/share/zoneinfo. License: Unlicense OR MIT.
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# The limits of the worker processes of editing together (setrlimit, prctl), on Unix.
+# License: MIT OR Apache-2.0.
+libc = "0.2"
+# The signatures of the ID tokens of the OpenID Connect providers, checked with aws-lc-rs.
+# The `openidconnect` crate is not used: its 4.x line depends on `rsa` 0.9, which has an
+# advisory (RUSTSEC-2023-0071) with no fixed 0.9 release, and on reqwest 0.12. License: MIT.
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
+mime_guess = "2"
+clap = { version = "4", features = ["derive"] }
+# Ctrl-C, SIGTERM and SIGHUP in xtask, so that a test run stops the containers it
+# started. License: MIT OR Apache-2.0.
+ctrlc = { version = "3", features = ["termination"] }
+# The metrics: a registry per server, the Prometheus text format and the process
+# metrics (procfs, Linux). License: Apache-2.0.
+prometheus = { version = "0.14", default-features = false, features = ["process"] }
+# Pure-Rust CommonMark + GFM pull parser, for Trello and Notion imports. License: MIT.
+pulldown-cmark = { version = "0.13", default-features = false }
+object_store = { version = "0.14", default-features = false, features = ["aws"] }
+rcgen = "0.14"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "multipart", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+# The digest under which session tokens are stored. License: MIT OR Apache-2.0.
+sha2 = "0.11"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "sqlite",
+    "postgres",
+    "json",
+    "migrate",
+    "uuid",
+] }
+subtle = "2"
+thiserror = "2"
+tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+tokio-tungstenite = "0.30"
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+# The API contract: the OpenAPI document is made from the handlers and the wire types.
+# License: MIT OR Apache-2.0.
+utoipa = "6"
+utoipa-axum = "0.3"
+tower = { version = "0.5", features = ["util"] }
+# The static files and the compression of API answers: gzip, brotli and zstd (the
+# encoders are the C zstd library and the pure-Rust brotli). License: MIT. The zstd
+# library that `zstd-sys` builds into the binary is BSD-3-Clause (or GPL-2.0); its
+# notice is in about.hbs, as cargo-about sees the crate's own license only.
+tower-http = { version = "0.7", features = ["fs", "compression-br", "compression-gzip", "compression-zstd"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+unicode-segmentation = "1"
+uuid = { version = "1", features = ["v7"] }
+# Pure-Rust ZIP, DEFLATE via flate2/miniz_oxide only (no AES/bzip2/zstd/lzma), for the
+# board archive format. License: MIT.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# The Yjs CRDT in Rust: the Y document of a body that people edit together. Only
+# `crates/collab` uses it. License: MIT.
+#
+# Held to one exact version. Before the library reads an update from a client,
+# `crates/collab/src/scan.rs` walks the same bytes in the library's own framing, to
+# keep from it what it does not survive (a value nested deep ends the process). A
+# newer version may frame differently. When this version is raised: hold scan.rs
+# against the new version's decoder (`impl Decode for Update`, `decode_block`,
+# `ItemContent::decode`, `Any::decode`, the delete set, the variable-length numbers),
+# and run the tests of bytes from anybody again
+# (`cargo test -p fvoci-collab --test untrusted`: random and damaged updates).
+yrs = "=0.28.2"
+# Zstandard, to read compressed answers in the tests (the server's compression has it
+# already). License: MIT.
+zstd = "0.14"
+
+# Lints from the BeautifulRust `lints/lints.toml`. Everything is "warn"; CI and the
+# local gate run clippy with `-D warnings`.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+unwrap_used = "warn"
+expect_used = "allow"
+panic_in_result_fn = "warn"
+missing_panics_doc = "warn"
+missing_errors_doc = "warn"
+missing_assert_message = "warn"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+rc_buffer = "warn"
+
+# The crates in this workspace are not published and are matched exhaustively across
+# crate boundaries on purpose, so that adding a variant is a compile error at every
+# use site. The upstream config warns on exported enums that are not #[non_exhaustive].
+exhaustive_enums = "allow"
+
+string_add = "warn"
+wildcard_imports = "warn"
+
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+as_conversions = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"
+
+# Line tables only: backtraces and panics keep their files and lines, and a debugger
+# steps by line, while the target folder and the binaries shrink to about half
+# (docs/handoff.md 2, "빌드 크기").
+[profile.dev]
+debug = "line-tables-only"
+
+# Password hashing is deliberately slow; unoptimized it makes every test that signs a
+# user in take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+# The names check of `cargo xtask check` digests the words of every file.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# The Y library walks the lists of a document to place an update; unoptimized it takes
+# ten times as long, and the tests that hold an update to the time a worker has measure
+# it as it is built for the server.
+[profile.dev.package.yrs]
+opt-level = 3

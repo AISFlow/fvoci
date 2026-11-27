@@ -1,0 +1,8 @@
+{
+  "singleQuote": true,
+  "printWidth": 100,
+  "plugins": ["prettier-plugin-svelte", "prettier-plugin-tailwindcss"],
+  "tailwindStylesheet": "./src/styles/app.css",
+  "tailwindFunctions": ["cn", "tv"],
+  "overrides": [{ "files": "*.svelte", "options": { "parser": "svelte" } }]
+}
