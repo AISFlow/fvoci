@@ -6,6 +6,7 @@
  * with the same functions. Every function returns a new object and leaves
  * its argument alone.
  */
+import { sameRecurrence } from '../logic/recurrence.ts';
 import {
   createBoardView,
   createPatchesFromBlocks,
@@ -50,6 +51,10 @@ export function cardPatches(next: Card, prev: Card): [CardPatch, CardPatch] {
     if (was === undefined) (backward.deletedProperties ??= []).push(id);
     else (backward.updatedProperties ??= {})[id] = was;
   }
+  if (!sameRecurrence(next.fields.recurrence, prev.fields.recurrence)) {
+    forward.recurrence = next.fields.recurrence ?? null;
+    backward.recurrence = prev.fields.recurrence ?? null;
+  }
   return [forward, backward];
 }
 
@@ -58,6 +63,7 @@ export function isEmptyCardPatch(patch: CardPatch): boolean {
     patch.parentId === undefined &&
     patch.title === undefined &&
     patch.icon === undefined &&
+    patch.recurrence === undefined &&
     Object.keys(patch.updatedProperties ?? {}).length === 0 &&
     (patch.deletedProperties ?? []).length === 0
   );
@@ -69,11 +75,20 @@ export function applyCardPatch<T extends Card>(card: T, patch: CardPatch): T {
     // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- a patch names the keys to drop
     delete properties[id];
   }
+  const fields = { ...card.fields, icon: patch.icon ?? card.fields.icon, properties };
+  if (patch.recurrence !== undefined) {
+    // Set anew, it repeats anew: the card made before is no longer its next.
+    if (!sameRecurrence(patch.recurrence ?? undefined, card.fields.recurrence)) {
+      delete fields.recurredTo;
+    }
+    if (patch.recurrence === null) delete fields.recurrence;
+    else fields.recurrence = structuredClone(patch.recurrence);
+  }
   return {
     ...card,
     parentId: patch.parentId === undefined ? card.parentId : (patch.parentId ?? ''),
     title: patch.title ?? card.title,
-    fields: { ...card.fields, icon: patch.icon ?? card.fields.icon, properties },
+    fields,
   };
 }
 

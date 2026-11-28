@@ -28,7 +28,9 @@
     <a
       class="mt-4 inline-block underline underline-offset-4 roomy:py-3"
       href={router.href({})}
-      onclick={goHome}>{m['error.back-to-home']()}</a
+      onclick={goHome}
     >
+      {m['error.back-to-home']()}
+    </a>
   </div>
 </div>

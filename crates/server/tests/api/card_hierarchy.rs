@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::Write as _;
 
-use fvoci_model::{Block, BlockType, Card, ContainerVisibility};
+use fvoci_model::{BlockType, Card, ContainerVisibility};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use zip::ZipWriter;
@@ -20,10 +20,6 @@ fn cards_path(board_id: &str) -> String {
 
 fn card_path(card_id: &str) -> String {
     format!("{TEST_WS}/cards/{card_id}")
-}
-
-fn block_path(board_id: &str, block_id: &str) -> String {
-    format!("{TEST_WS}/boards/{board_id}/blocks/{block_id}")
 }
 
 async fn make_card(client: &Client, board_id: &str, body: Value) -> Card {
@@ -243,8 +239,7 @@ async fn ws_broadcasts_subcard_deletion_and_restoration() {
 
     let mut socket = WorkspaceSocket::subscribe(&th, &th.client, TEST_WORKSPACE_ID, &me).await;
 
-    th.client
-        .delete(&block_path(&board.id, &d1.id))
+    crate::blocks::trash_card(&th.client, &board.id, &d1.id)
         .await
         .check_no_content();
     for id in [&d1.id, &d2.id, &d3.id] {
@@ -255,12 +250,14 @@ async fn ws_broadcasts_subcard_deletion_and_restoration() {
         );
     }
 
-    let undeleted: Block = th
-        .client
-        .post_empty(&format!("{}/restore", block_path(&board.id, &d1.id)))
-        .await
-        .ok_json();
-    assert_eq!(undeleted.id, d1.id, "undelete returned top card");
+    let restored: fvoci_model::RestoredCards =
+        crate::blocks::restore_card(&th.client, &board.id, &d1.id)
+            .await
+            .ok_json();
+    assert!(
+        restored.cards.iter().any(|card| card.id == d1.id),
+        "the restore answers the top card"
+    );
     for (id, expected_parent) in [
         (&d1.id, ""),
         (&d2.id, d1.id.as_str()),

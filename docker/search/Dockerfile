@@ -16,8 +16,8 @@
 # named by its digest.
 
 # The version of the digest above, for the label.
-ARG OPENSEARCH_VERSION=3.9.0
-FROM opensearchproject/opensearch:3.9.0@sha256:3b55f6b6249cfdb92b52ee59adc8a266203ba9ef9f5d82544fad6f1af2f3609e
+ARG OPENSEARCH_VERSION=3.10.1
+FROM opensearchproject/opensearch:3.10.1@sha256:02358b2be62b268a404a54581184d027ac0dfa8f875be15fe4c4fa3f8884f464
 
 USER root
 # openssl makes the certificates at the first start.

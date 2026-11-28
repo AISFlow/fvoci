@@ -346,6 +346,41 @@ async fn an_entry_keeps_its_day_and_its_row_follows_its_mood() {
     test.teardown().await;
 }
 
+/// An empty entry goes for good, not to the trash, in the organization of its space,
+/// and takes with it what is kept beside a block: a line of activity under it as well,
+/// whose row names no organization on SQLite.
+#[tokio::test]
+async fn an_empty_entry_goes_for_good_with_what_is_kept_beside_it() {
+    let test = common::setup().await;
+    let (user_id, own, _, diary_id) = writer(&test, "writer").await;
+    let entry = written(&own, &diary_id, "2026-11-21", &user_id).await;
+    let line = new_id();
+    let kept = own
+        .execute_unchecked(&format!(
+            "INSERT INTO card_events (id, container_id, card_id, kind, created_at, updated_at) \
+             VALUES ('{line}', '{diary_id}', '{}', 'created', 1, 1)",
+            entry.id
+        ))
+        .await
+        .expect("a line is kept");
+    assert_eq!(kept, 1);
+
+    let deleted = own
+        .delete_diary_entry(&diary_id, &entry.id, &user_id)
+        .await
+        .expect("the empty entry is deleted");
+    assert!(deleted, "the entry was there");
+    let left = own
+        .texts_unchecked(&format!(
+            "SELECT CAST(id AS TEXT) FROM card_events WHERE card_id = '{}'",
+            entry.id
+        ))
+        .await
+        .expect("the lines are read");
+    assert!(left.is_empty(), "{left:?}");
+    test.teardown().await;
+}
+
 /// A diary holds entries, at its top, and nothing else; no board and no wiki holds an
 /// entry.
 #[tokio::test]

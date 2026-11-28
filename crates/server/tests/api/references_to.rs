@@ -7,7 +7,7 @@ use fvoci_model::{Block, BlockType, Container, ContainerVisibility};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::blocks::{block_path, undelete_path};
+use crate::blocks::{restore_card, trash_card};
 use crate::common::{ApiResponse, Client, ROOT_WS, Setup, TEST_WORKSPACE_ID, TEST_WS, UNKNOWN_ID};
 use crate::references::{HIDDEN, Made, fewest_reads, let_read, made};
 
@@ -72,11 +72,7 @@ pub(crate) async fn comment_naming(
         updated_at: 1,
         ..Block::default()
     };
-    let stored: Vec<Block> = client
-        .insert_blocks(board_id, &[comment])
-        .await
-        .created_json();
-    stored[0].id.clone()
+    crate::blocks::insert_one(client, &comment).await.id
 }
 
 /// Asks what names the block, as `client`, with the query `query` (empty, or from `?`).
@@ -171,17 +167,27 @@ async fn what_names_a_card_or_a_page_is_told_once_and_in_pages() {
     }
 
     // A comment in the trash names nothing, nor does a card there; back, they do.
-    for (gone, without) in [(&comment, &second), (&first, &first)] {
-        user.delete(&block_path(&mine.board, gone))
-            .await
-            .check_no_content();
-        let told = listed(&naming(user, TEST_WS, target, "").await);
-        assert!(!told.contains(without), "{gone} is in the trash: {told:?}");
-        user.post_empty(&undelete_path(&mine.board, gone))
-            .await
-            .check_ok();
-        assert_eq!(listed(&naming(user, TEST_WS, target, "").await).len(), 3);
-    }
+    let comment_path = format!(
+        "{TEST_WS}/boards/{}/cards/{second}/comments/{comment}",
+        mine.board
+    );
+    user.delete(&comment_path).await.check_no_content();
+    let told = listed(&naming(user, TEST_WS, target, "").await);
+    assert!(
+        !told.contains(&second),
+        "the comment is in the trash: {told:?}"
+    );
+    user.post_empty(&format!("{comment_path}/restore"))
+        .await
+        .check_ok();
+    assert_eq!(listed(&naming(user, TEST_WS, target, "").await).len(), 3);
+    trash_card(user, &mine.board, &first)
+        .await
+        .check_no_content();
+    let told = listed(&naming(user, TEST_WS, target, "").await);
+    assert!(!told.contains(&first), "the card is in the trash: {told:?}");
+    restore_card(user, &mine.board, &first).await.check_ok();
+    assert_eq!(listed(&naming(user, TEST_WS, target, "").await).len(), 3);
     // A body that names it no more is told no more.
     page_names(user, TEST_WS, &mine, &[]).await;
     assert_eq!(
@@ -273,8 +279,7 @@ async fn what_names_a_block_the_asker_does_not_read_is_asked_as_of_nothing() {
     }
     let comment = comment_naming(member, &own.board, &own.card, &[&own.card]).await;
     let in_the_trash = card_of(member, TEST_WS, &own.board, "gone").await;
-    member
-        .delete(&block_path(&own.board, &in_the_trash))
+    trash_card(member, &own.board, &in_the_trash)
         .await
         .check_no_content();
 
@@ -526,7 +531,7 @@ async fn what_a_reference_may_name_is_found_by_its_title() {
 
     // In the trash a card is not found; a card that is a template of the board's
     // cards never is, nor what is on a board that is a template.
-    user.delete(&block_path(&mine.board, &percent))
+    trash_card(user, &mine.board, &percent)
         .await
         .check_no_content();
     assert_eq!(found(user, TEST_WS, "done").await.text(), "[]");

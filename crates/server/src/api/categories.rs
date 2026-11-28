@@ -91,8 +91,7 @@ impl CategoryRequest {
         let mut refused = category
             .validate()
             .err()
-            .map(CategoryError::into_refusals)
-            .unwrap_or_default();
+            .map_or_default(CategoryError::into_refusals);
         refused.refuse(
             "type",
             RefusalReason::Invalid,

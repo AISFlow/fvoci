@@ -1,41 +1,37 @@
-//! Atomic board card and view endpoints: pre-copied card duplication, multi-card view
-//! moves, batch card delete/restore, verified card attachments, and fractional-indexed
-//! board view creation, reordering, and duplication.
+//! Atomic card endpoints of a board: pre-copied card duplication, multi-card view moves,
+//! and batch card patch, delete and restore.
 
 use axum::body::Bytes;
 use axum::extract::Path;
-use axum::http::HeaderMap;
 use fvoci_model::{
-    Block, BoardViewDuplicate, BoardViewMove, BoardViewWrite, Card, CardBatchIds, CardMovesRequest,
-    CardMovesResult, NewBoardView, NewCardAttachment, RestoredCards,
+    Card, CardBatchIds, CardBatchPatch, CardMovesRequest, CardMovesResult, MAX_CARD_BATCH,
+    RestoredCards,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::contract::params::{
-    AcceptLanguage, AsTemplate, BoardId, CardId, DisableNotify, MemberWorkspaceId, ViewId,
+    AsTemplate, BoardId, CardId, DisableNotify, MemberWorkspaceId, ViewId,
 };
 use super::contract::tag;
 use super::query::{AsTemplateQuery, DisableNotifyQuery, QueryParams};
 use super::workspace::InWorkspace;
 use super::{
-    ApiResult, accept_language, created, decode_object, json_response, no_content,
+    ApiResult, BLOCK_FIELDS, created, decode_object, json_response, no_content,
     require_container_permission,
 };
 use super::{Delegated, Write};
-use crate::app::App;
+use crate::app::{App, ChangeNotification};
+use crate::error::AppError;
 use crate::permissions::ContainerPermission;
 
 pub(super) fn routes() -> OpenApiRouter<App> {
     OpenApiRouter::new()
         .routes(routes!(handle_duplicate_card))
         .routes(routes!(handle_move_view_cards))
+        .routes(routes!(handle_batch_patch_cards))
         .routes(routes!(handle_batch_delete_cards))
         .routes(routes!(handle_batch_restore_cards))
-        .routes(routes!(handle_create_card_attachment))
-        .routes(routes!(handle_create_board_view))
-        .routes(routes!(handle_move_board_view))
-        .routes(routes!(handle_duplicate_board_view))
 }
 
 /// Duplicate a card atomically
@@ -110,6 +106,102 @@ async fn handle_move_view_cards(
     Ok(json_response(&result))
 }
 
+/// Change several cards alike
+///
+/// Sets and removes the same property values of `1..=200` distinct cards of the board,
+/// all or none in one transaction: each card is changed as `patchCard` with only
+/// `updatedProperties` and `deletedProperties` would change it, its values checked alike
+/// against the board's properties, and whom it is newly given to told alike. More cards
+/// are 400 with the `limit`. A card of another board, or a block that is no card, is not
+/// there (404); a template of the board's cards is 400. For the board's editors.
+#[utoipa::path(
+    post,
+    path = "/w/{workspaceId}/boards/{boardId}/cards/batch-patch",
+    operation_id = "batchPatchCards",
+    tag = tag::CARDS,
+    params(MemberWorkspaceId, BoardId, DisableNotify),
+    request_body = CardBatchPatch,
+    responses((status = 200, description = "The cards as they are now, in the order of `cardIds`.", body = Vec<Card>)),
+)]
+async fn handle_batch_patch_cards(
+    Delegated(ws, ..): Delegated<Write, InWorkspace>,
+    Path((_, board_id)): Path<(String, String)>,
+    QueryParams(query): QueryParams<DisableNotifyQuery>,
+    body: Bytes,
+) -> ApiResult {
+    let cards = batch_patch_cards_from(&ws, &board_id, &body, query.notification()).await?;
+    Ok(json_response(&cards))
+}
+
+/// What `batchPatchCards` does with `body` on the board `board_id`: the cards as they
+/// are after it, in the order of `cardIds`.
+///
+/// # Errors
+///
+/// As `batchPatchCards` answers.
+async fn batch_patch_cards_from(
+    ws: &InWorkspace,
+    board_id: &str,
+    body: &Bytes,
+    notification: ChangeNotification,
+) -> Result<Vec<Card>, AppError> {
+    // Asked before the body is read, as every route asks.
+    may_patch_cards(ws, board_id).await?;
+    let batch: CardBatchPatch = decode_object(body)?;
+    patch_cards_asked(ws, board_id, &batch, notification).await
+}
+
+/// Patches the cards `batch` names on the board `board_id`, as `batchPatchCards` does
+/// with the body it read: for what writes as the route does (the MCP server's
+/// `save_cards`).
+///
+/// # Errors
+///
+/// As `batchPatchCards` answers.
+pub(super) async fn batch_patch_cards_with(
+    ws: &InWorkspace,
+    board_id: &str,
+    batch: &CardBatchPatch,
+    notification: ChangeNotification,
+) -> Result<Vec<Card>, AppError> {
+    may_patch_cards(ws, board_id).await?;
+    patch_cards_asked(ws, board_id, batch, notification).await
+}
+
+async fn may_patch_cards(ws: &InWorkspace, board_id: &str) -> Result<(), AppError> {
+    require_container_permission(
+        &ws.app,
+        &ws.caller.user_id,
+        board_id,
+        ContainerPermission::ManageCards,
+        "access denied to patch cards",
+    )
+    .await
+}
+
+/// [`batch_patch_cards_with`] once its caller may patch the board's cards.
+async fn patch_cards_asked(
+    ws: &InWorkspace,
+    board_id: &str,
+    batch: &CardBatchPatch,
+    notification: ChangeNotification,
+) -> Result<Vec<Card>, AppError> {
+    if batch.card_ids.len() > MAX_CARD_BATCH {
+        return Err(AppError::bad_request(format_args!(
+            "at most {MAX_CARD_BATCH} cards are patched at once"
+        ))
+        .with_field("cardIds")
+        .with_limit(u64::try_from(MAX_CARD_BATCH).unwrap_or(u64::MAX)));
+    }
+    batch.check_request()?;
+    // The store names what it refuses as a block has it; the batch has it under another
+    // name, as `patchCard` does.
+    ws.app
+        .patch_cards(board_id, batch, &ws.caller.user_id, notification)
+        .await
+        .map_err(|error| error.moved(BLOCK_FIELDS, "/updatedProperties"))
+}
+
 /// Delete multiple cards atomically
 ///
 /// Deletes `1..=200` distinct cards on `boardId` in one transaction so each card remains
@@ -178,150 +270,4 @@ async fn handle_batch_restore_cards(
         .batch_restore_cards(&board_id, &batch.card_ids, user_id)
         .await?;
     Ok(json_response(&restored))
-}
-
-/// Attach an uploaded file to a card
-///
-/// Verifies under the board lock that `fileId` belongs to `boardId`, sets the attachment
-/// block's trusted filename and size from `files`, and stores the attachment block.
-#[utoipa::path(
-    post,
-    path = "/w/{workspaceId}/boards/{boardId}/cards/{cardId}/attachments",
-    operation_id = "createCardAttachment",
-    tag = tag::CARDS,
-    params(MemberWorkspaceId, BoardId, CardId, DisableNotify),
-    request_body = NewCardAttachment,
-    responses((status = 201, description = "The created attachment block.", body = Block)),
-)]
-async fn handle_create_card_attachment(
-    Delegated(ws, ..): Delegated<Write, InWorkspace>,
-    Path((_, board_id, card_id)): Path<(String, String, String)>,
-    QueryParams(query): QueryParams<DisableNotifyQuery>,
-    body: Bytes,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &board_id,
-        ContainerPermission::ManageCards,
-        "access denied to attach file to card",
-    )
-    .await?;
-    let request: NewCardAttachment = decode_object(&body)?;
-    let attachment = ws
-        .app
-        .create_card_attachment(&board_id, &card_id, &request, user_id, query.notification())
-        .await?;
-    Ok(created(&attachment))
-}
-
-/// Create a board view
-///
-/// Creates a view on `boardId` using server-side fractional indexing (`after`).
-#[utoipa::path(
-    post,
-    path = "/w/{workspaceId}/boards/{boardId}/views",
-    operation_id = "createBoardView",
-    tag = tag::CONTAINERS,
-    params(MemberWorkspaceId, BoardId),
-    request_body = NewBoardView,
-    responses((status = 201, description = "The created view and any rebalanced companion views.", body = BoardViewWrite)),
-)]
-async fn handle_create_board_view(
-    ws: InWorkspace,
-    Path((_, board_id)): Path<(String, String)>,
-    body: Bytes,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &board_id,
-        ContainerPermission::ManageProperties,
-        "access denied to create board view",
-    )
-    .await?;
-    let request: NewBoardView = decode_object(&body)?;
-    let write = ws
-        .app
-        .create_board_view(&board_id, &request, user_id)
-        .await?;
-    Ok(created(&write))
-}
-
-/// Move a board view
-///
-/// Reorders `viewId` among the views of `boardId` using server-side fractional indexing.
-#[utoipa::path(
-    post,
-    path = "/w/{workspaceId}/boards/{boardId}/views/{viewId}/move",
-    operation_id = "moveBoardView",
-    tag = tag::CONTAINERS,
-    params(MemberWorkspaceId, BoardId, ViewId),
-    request_body = BoardViewMove,
-    responses((status = 200, description = "The moved view and any rebalanced companion views.", body = BoardViewWrite)),
-)]
-async fn handle_move_board_view(
-    ws: InWorkspace,
-    Path((_, board_id, view_id)): Path<(String, String, String)>,
-    body: Bytes,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &board_id,
-        ContainerPermission::ManageProperties,
-        "access denied to move board view",
-    )
-    .await?;
-    let request: BoardViewMove = decode_object(&body)?;
-    let write = ws
-        .app
-        .move_board_view(&board_id, &view_id, &request, user_id)
-        .await?;
-    Ok(json_response(&write))
-}
-
-/// Duplicate a board view
-///
-/// Copies `viewId` on `boardId` and places the copy using server-side fractional
-/// indexing.
-#[utoipa::path(
-    post,
-    path = "/w/{workspaceId}/boards/{boardId}/views/{viewId}/duplicate",
-    operation_id = "duplicateBoardView",
-    tag = tag::CONTAINERS,
-    params(MemberWorkspaceId, BoardId, ViewId, AcceptLanguage),
-    request_body = BoardViewDuplicate,
-    responses((status = 201, description = "The duplicated view and any rebalanced companion views.", body = BoardViewWrite)),
-)]
-async fn handle_duplicate_board_view(
-    ws: InWorkspace,
-    Path((_, board_id, view_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &board_id,
-        ContainerPermission::ManageProperties,
-        "access denied to duplicate board view",
-    )
-    .await?;
-    let request: BoardViewDuplicate = decode_object(&body)?;
-    let write = ws
-        .app
-        .duplicate_board_view(
-            &board_id,
-            &view_id,
-            &request,
-            user_id,
-            accept_language(&headers),
-        )
-        .await?;
-    Ok(created(&write))
 }

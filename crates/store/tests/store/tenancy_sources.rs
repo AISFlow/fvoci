@@ -25,8 +25,9 @@ pub(crate) fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>
 /// before the baseline (`schema.rs`, which replaces its record of the migrations), and
 /// the one function of the server that its housekeeping works through;
 /// the revisions of the cached checks, which name it to tell what its writes move;
-/// what a person was told (`notifications.rs`), which is theirs in whichever
-/// organization it was made; and a person's time entries (`time_entries.rs`), where one
+/// what a person was told (`notifications.rs`, and its sorting as an inbox,
+/// `notification_triage.rs`), which is theirs in whichever organization it was made, of
+/// those their session opens; and a person's time entries (`time_entries.rs`), where one
 /// active timer per account spans organizations and every statement names the person and
 /// excludes closed organizations, never touching another user's rows.
 /// Asked by the handle or by the setting of a transaction alike. Anywhere else, a
@@ -35,11 +36,12 @@ pub(crate) fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>
 /// organization like another to the wall: `Tenant::org(SYSTEM_ORG_ID)` is not this.)
 #[test]
 fn the_systems_reach_is_asked_for_in_few_places() {
-    const ALLOWED: [&str; 15] = [
+    const ALLOWED: [&str; 16] = [
         "store/src/lib.rs",
         "store/src/db.rs",
         "store/src/api_tokens.rs",
         "store/src/notifications.rs",
+        "store/src/notification_triage.rs",
         "store/src/time_entries.rs",
         "store/src/account_deletion.rs",
         "store/src/account_erasure.rs",
@@ -289,8 +291,9 @@ fn the_operators_webhooks_are_posted_from_one_place() {
 /// SQLite personal spaces and shared organizations cannot mix (`1.4.3 H-5`).
 #[test]
 fn system_queries_on_org_tables_scope_by_caller_or_open_organization() {
-    const SYSTEM_READERS: [&str; 9] = [
+    const SYSTEM_READERS: [&str; 10] = [
         "notifications.rs",
+        "notification_triage.rs",
         "time_entries.rs",
         "account_deletion.rs",
         "account_erasure.rs",

@@ -11,11 +11,11 @@
 use std::net::IpAddr;
 
 use fvoci_model::{LinkedIdentity, Session, UnlinkRequest, User, is_email_valid};
-use fvoci_store::{Identity, LinkRefusal, LinkingSession, StoredProvider, Unlinked};
+use fvoci_store::{FlowPurpose, Identity, LinkRefusal, LinkingSession, StoredProvider, Unlinked};
 
 use super::App;
 use super::auth::WrongPassword;
-use super::oidc::{Callback, LoginFailure, Start, StartedLogin};
+use super::oidc::{Callback, LoginFailure, StartedLogin};
 use crate::auth::now_millis;
 use crate::auth::oidc::provider::IdClaims;
 use crate::auth::secret::token_digest;
@@ -75,8 +75,8 @@ impl App {
         self.start_oidc_flow(
             org_id,
             address,
-            Start::Link {
-                session_id: &session.id,
+            FlowPurpose::Link {
+                session_id: session.id.clone(),
             },
         )
         .await

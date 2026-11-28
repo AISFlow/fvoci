@@ -105,10 +105,7 @@ fn recheck_planned_fields_blocking(
     let entry = zip
         .by_index(zip_index)
         .map_err(|error| AppError::bad_request(format_args!("{error}")))?;
-    let entry_label = entry
-        .name()
-        .map(std::borrow::Cow::into_owned)
-        .unwrap_or_default();
+    let entry_label = entry.name().map_or_default(std::borrow::Cow::into_owned);
     let mut reader = BufReader::with_capacity(STREAM_READER_BUF_BYTES, entry);
     let mut line_buf = Vec::with_capacity(4096);
     let mut total_read: u64 = 0;

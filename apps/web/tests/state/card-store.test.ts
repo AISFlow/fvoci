@@ -274,7 +274,12 @@ describe('comments and attachments', () => {
 
     // The reader begins on this version; somebody else changes it, and that is heard.
     const begun = card.comment(mine.id)?.updatedAt ?? 0;
-    await other.patchComment(board.boardId, mine.id, { body: text('theirs'), readAt: begun });
+    await other.patchComment(
+      board.boardId,
+      mine.id,
+      { body: text('theirs'), readAt: begun },
+      card.cardId,
+    );
     await settle();
     expect(card.comment(mine.id)?.body).toEqual(text('theirs'));
     // Saved on the version begun from: refused, theirs stays.
@@ -416,7 +421,7 @@ describe('comments and attachments', () => {
       workspace.transfers.dismiss(card.uploads[0]?.id ?? 0);
       return made;
     });
-    backend.failNext('deleteBlock', new BackendError(500, { detail: 'down' }));
+    backend.failNext('deleteAttachment', new BackendError(500, { detail: 'down' }));
     const told = workspace.problems.length;
     await card.attach(new File(['hello'], 'late.txt'));
     expect(workspace.transfers.list).toMatchObject([{ name: 'late.txt', failure: 'kept' }]);
@@ -438,7 +443,7 @@ describe('comments and attachments', () => {
       workspace.transfers.dismiss(card.uploads[0]?.id ?? 0);
       return made;
     });
-    backend.failNext('deleteBlock', new BackendError(404, { detail: 'gone' }));
+    backend.failNext('deleteAttachment', new BackendError(404, { detail: 'gone' }));
     const said = workspace.transfers.said.length;
     await card.attach(new File(['hello'], 'gone.txt'));
     expect(workspace.transfers.list).toEqual([]);
@@ -448,7 +453,7 @@ describe('comments and attachments', () => {
 
   it('closes when its card is deleted by somebody else', async () => {
     const { card, other, board, cardId } = await openAlpha();
-    await other.deleteBlock(board.boardId, cardId);
+    await other.batchDeleteCards(board.boardId, [cardId]);
     await settle();
     expect(card.missing).toBe(true);
   });
@@ -457,10 +462,10 @@ describe('comments and attachments', () => {
 describe('deleted and brought back', () => {
   it('an open card deleted by somebody else is missing, and is there again once restored', async () => {
     const { card, other, board, cardId } = await openAlpha();
-    await other.deleteBlock(board.boardId, cardId);
+    await other.batchDeleteCards(board.boardId, [cardId]);
     await settle();
     expect(card.missing).toBe(true);
-    await other.restoreBlock(board.boardId, cardId);
+    await other.batchRestoreCards(board.boardId, [cardId]);
     await settle();
     await vi.waitFor(() => {
       expect(card.missing).toBe(false);
@@ -488,7 +493,7 @@ describe('deleted and brought back', () => {
     const { board, workspace, other } = await openAlpha();
     const made = await board.createCard({ title: 'Brief', fields: {} } as never);
     if (!made) throw new Error('not made');
-    await other.deleteBlock(board.boardId, made.id);
+    await other.batchDeleteCards(board.boardId, [made.id]);
     await settle();
     await workspace.undoLast();
     expect(workspace.problems).toHaveLength(0);

@@ -29,13 +29,15 @@ const latestFirst = (first: DeletedItem, second: DeletedItem): number =>
 /**
  * The cards of a board in the trash: those deleted by themselves. A card
  * that went with the block it was on comes back with that block, and is not
- * listed. The last deleted first.
+ * listed. The last deleted first. Only for who may manage the board's cards.
  */
 export function deletedCardsOf(
   world: World,
+  userId: string,
   boardId: string,
   paging: Paging | undefined,
 ): DeletedItem[] {
+  mayManageCards(world, userId, boardId, 'access denied to the trash of the board');
   const items: DeletedItem[] = [];
   for (const [id, deleted] of world.deletedBlocks) {
     const [first] = deleted.blocks;

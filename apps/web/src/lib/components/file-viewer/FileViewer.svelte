@@ -368,9 +368,9 @@
     }}
   >
     <header class="flex min-h-12 items-center gap-1 border-b py-1 pr-1 pl-4">
-      <Dialog.Title class="min-w-0 flex-1 truncate text-base font-semibold"
-        >{file.name}</Dialog.Title
-      >
+      <Dialog.Title class="min-w-0 flex-1 truncate text-base font-semibold">
+        {file.name}
+      </Dialog.Title>
       <Dialog.Description class="sr-only">{m.viewer_description()}</Dialog.Description>
       {#if older}
         <p

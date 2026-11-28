@@ -32,6 +32,7 @@
     newDiary,
     whileHere,
     type ContainerDraft,
+    type Favorite,
     type NewKind,
   } from '$lib/state/index.ts';
   import type { AuditRecord } from '$lib/state/organization.ts';
@@ -41,6 +42,7 @@
   import ShellDialogs from './ShellDialogs.svelte';
   import { SidebarState } from './sidebar-state.svelte.ts';
   import Sidebar from './Sidebar.svelte';
+  import type { FavoritePlaces } from './favorite-places.ts';
   import SidebarStrip from './SidebarStrip.svelte';
   import TopBar from './TopBar.svelte';
   import { undoKey } from './undo-keys.ts';
@@ -55,6 +57,8 @@
     reviewsToday?: { active: boolean; onOpen: () => void } | undefined;
     learningToday?: { active: boolean; onOpen: () => void } | undefined;
     containerHref: (container: ContainerPlace) => string;
+    /** Where the reader's stars lead (`SidebarFavorites`); none, no stars in the sidebar. */
+    favoritePlaces?: FavoritePlaces | undefined;
     sharedHref: (containerId: string, readToken: string) => string;
     onOpenContainer: (container: ContainerPlace) => void;
     locales?: readonly string[];
@@ -83,6 +87,7 @@
     reviewsToday,
     learningToday,
     containerHref,
+    favoritePlaces,
     sharedHref,
     onOpenContainer,
     locales,
@@ -310,6 +315,11 @@
       reviewsToday={reviewsEntry}
       learningToday={todayEntry}
       {containerHref}
+      favoritePlaces={favoritePlaces && {
+        href: favoritePlaces.href,
+        open: (favorite: Favorite) =>
+          void (favoritePlaces.open(favorite), (sidebar.drawerOpen = false)),
+      }}
       beside={layout.list === 'beside'}
       onOpenContainer={openContainer}
       onClose={closeList}

@@ -5,7 +5,7 @@
 //! are in [`crate::trash`]. Lists come oldest first, by creation time and then by
 //! identifier.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::num::NonZeroU32;
 
 use fvoci_model::{
@@ -23,7 +23,7 @@ use crate::card_values::{self, NamedCards};
 use crate::comment_places;
 use crate::comment_versions::{self, EDITED_AT_COLUMN};
 use crate::containers;
-use crate::db::{Id, OptId, Param, Row, Scope, Sql, SqlFragment};
+use crate::db::{FromRow, Id, OptId, Param, Row, Scope, Sql, SqlFragment};
 use crate::error::StoreError;
 use crate::file_refs::NewBodyFiles;
 use crate::notification_noting::{self, Telling};
@@ -261,7 +261,7 @@ impl Store {
                         last_comment_at: row.int(LISTED_LAST_COMMENT_AT)?,
                         preview: match previews {
                             Previews::Without => None,
-                            Previews::With => Some(preview_from_row(row)?),
+                            Previews::With => Some(BodyPreview::from_row(row)?),
                         },
                     })
                 })
@@ -480,15 +480,13 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StoreError::Database`] if the query fails.
-    pub async fn get_block_counts_by_type(&self) -> Result<BTreeMap<String, i64>, StoreError> {
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn get_block_counts_by_type(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, i64>, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql("SELECT type, COUNT(*) FROM blocks GROUP BY type");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| Ok((row.text(0)?, row.int(1)?)))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -525,28 +523,9 @@ impl Store {
             }
             let mut sql = scope.sql("SELECT container_id FROM deleted_blocks WHERE id = ");
             sql.bind(Id(block_id)).push(" LIMIT 1");
-            scope
-                .fetch_optional(sql)
-                .await?
-                .map(|row| row.id(0))
-                .transpose()
+            scope.first(sql).await
         })
         .await
-    }
-
-    /// Bulk lookup of distinct live `container_id`s for `block_ids` without reading
-    /// `body` or `fields`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError::InvalidId`] if an identifier is invalid, or
-    /// [`StoreError::Database`] if a query fails.
-    pub async fn find_block_container_ids(
-        &self,
-        block_ids: &[String],
-    ) -> Result<Vec<String>, StoreError> {
-        self.with_conn(async |scope| find_container_ids(scope, block_ids).await)
-            .await
     }
 
     /// Returns the identifiers of all live room-bearing blocks (`card`, `page`, `entry`,
@@ -648,11 +627,13 @@ fn block_from_row(row: &Row) -> Result<Block, StoreError> {
 }
 
 /// What a preview shows of the body of a listed row read with [`PREVIEW_COLUMNS`].
-fn preview_from_row(row: &Row) -> Result<BodyPreview, StoreError> {
-    Ok(BodyPreview {
-        text: row.text(LISTED_BODY_TEXT)?,
-        first_image: row.opt_text(LISTED_FIRST_IMAGE)?,
-    })
+impl FromRow for BodyPreview {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(BodyPreview {
+            text: row.text(LISTED_BODY_TEXT)?,
+            first_image: row.opt_text(LISTED_FIRST_IMAGE)?,
+        })
+    }
 }
 
 pub(crate) async fn get_blocks(
@@ -700,11 +681,7 @@ pub(crate) async fn find_container_id(
 ) -> Result<Option<String>, StoreError> {
     let mut sql = scope.sql("SELECT container_id FROM blocks WHERE id = ");
     sql.bind(Id(block_id));
-    scope
-        .fetch_optional(sql)
-        .await?
-        .map(|row| row.id(0))
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Bulk lookup of distinct `container_id`s for `block_ids` without reading `body` or
@@ -758,7 +735,7 @@ async fn is_below(
              SELECT 1 FROM up WHERE id = ",
         )
         .bind(Id(ancestor_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 pub(crate) async fn insert_block(
@@ -894,7 +871,9 @@ async fn insert_block_inner(
         block.created_at = now;
         block.edited_at = 0;
         crate::diaries::stamp_entry_body_time(block, None);
+        crate::card_recurrence::settle_new(scope, block, how.telling).await?;
         insert_block_row(scope, block, how.new_files).await?;
+        crate::card_events::note_created(scope, block, user_id).await?;
         notification_noting::note_named(scope, block, None, user_id, how.telling).await?;
     }
     Ok(named)

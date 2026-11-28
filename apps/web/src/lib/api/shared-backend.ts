@@ -93,7 +93,14 @@ export class SharedBackend implements Backend {
   };
   /** Nobody is told anything through a public link. */
   readonly notifications = undefined;
+  /** What was done to a card is for the board's members, not a reader by the link. */
+  readonly cardActivity = undefined;
   readonly watches = undefined;
+  readonly favorites = undefined;
+  /** Nothing is taken out in Markdown through a public link: the board is read where it is. */
+  readonly markdown = undefined;
+  /** A reaction names who reacted, which a reader by the link is not told. */
+  readonly reactions = undefined;
   /** Personal time tracking is strictly owner-only and never available on public links. */
   readonly time = undefined;
   /** No search through a public link: the board is all there is to read. */
@@ -443,9 +450,12 @@ export class SharedBackend implements Backend {
   moveView: Backend['moveView'] = refused;
   duplicateView: Backend['duplicateView'] = refused;
   patchView: Backend['patchView'] = refused;
+  deleteView: Backend['deleteView'] = refused;
+  restoreView: Backend['restoreView'] = refused;
   createCard: Backend['createCard'] = refused;
   duplicateCard: Backend['duplicateCard'] = refused;
   moveViewCards: Backend['moveViewCards'] = refused;
+  batchPatchCards: Backend['batchPatchCards'] = refused;
   batchDeleteCards: Backend['batchDeleteCards'] = refused;
   batchRestoreCards: Backend['batchRestoreCards'] = refused;
   patchCard: Backend['patchCard'] = refused;
@@ -454,8 +464,8 @@ export class SharedBackend implements Backend {
   deleteComment: Backend['deleteComment'] = refused;
   restoreComment: Backend['restoreComment'] = refused;
   createAttachment: Backend['createAttachment'] = refused;
-  deleteBlock: Backend['deleteBlock'] = refused;
-  restoreBlock: Backend['restoreBlock'] = refused;
+  deleteAttachment: Backend['deleteAttachment'] = refused;
+  restoreAttachment: Backend['restoreAttachment'] = refused;
   copyContainerToWorkspace: Backend['copyContainerToWorkspace'] = refused;
   upload: Backend['upload'] = refused;
   exportContainer: Backend['exportContainer'] = refused;

@@ -1,22 +1,32 @@
 #!/usr/bin/env bash
-# Starts the containers of the tests for a job that does not run `cargo xtask test`,
-# which starts them itself, and writes their addresses to the job's environment.
+# Starts the containers of the tests where `cargo xtask test` does not start them (it
+# makes PostgreSQL 18 and S3 only when no address is given), and writes their addresses
+# to the job's environment, where xtask and the other tests take them.
 #
 #   test-services.sh postgres [s3]
+#   test-services.sh postgres-17 | postgres-19
 #
 # It makes what xtask/src/containers.rs makes (`prepare_postgres`,
 # `prepare_object_store`): the same images, names, ports, credentials and role. Change
-# one with the other. The credentials are the tests' own, of a database that lives for
-# one job on the runner's loopback interface.
+# one with the other. FVOCI_TEST_PG_CONTAINER and FVOCI_TEST_PG_PORT name another
+# PostgreSQL container and port, as they do for xtask. `postgres-17` and `postgres-19`
+# make the same PostgreSQL from the image of that major, where xtask makes 18 only: the
+# other majors the server supports (docs/configuration.md), for the store's tests on
+# them (ci.yml's `rust-postgres-versions`). Each has a name and a port of its own, so
+# that no run of xtask takes it for its own. The addresses of the PostgreSQL started
+# last are the ones the job's later steps see. The credentials are the tests' own, of a
+# database that lives for one job on the runner's loopback interface.
 set -euo pipefail
 
 POSTGRES=fvoci-test-postgres
 POSTGRES_PORT=15434
-POSTGRES_IMAGE='postgres:18@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a'
+POSTGRES_IMAGE='postgres:18@sha256:64c8b0d31e4ab6ea665e8426ea406a94bf52de3c05b3a4a8bf713704eefa9328'
+POSTGRES_17_IMAGE='postgres:17@sha256:97fb53376be3e4fb1a8a61421daa69dcc3bf2fa39bda3259f5245f9a455af1a9'
+POSTGRES_19_IMAGE='postgres:19@sha256:4ea94de574c17f0372722806c949757050fbb1cd7648410fe45d6bba275cc00e'
 S3=fvoci-test-s3
 S3_PORT=18333
 S3_BUCKET=fvoci-test
-S3_IMAGE='chrislusf/seaweedfs:latest@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15'
+S3_IMAGE='chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9'
 
 # Tries a command every half second until it succeeds, for 90 seconds by the clock.
 wait_for() {
@@ -31,22 +41,38 @@ wait_for() {
   return 1
 }
 
+# PostgreSQL of the major $1 from the image $2, named $3 on the port $4 unless the
+# environment names another.
 postgres() {
-  docker run --detach --name "$POSTGRES" \
+  local major=$1 image=$2
+  local name=${FVOCI_TEST_PG_CONTAINER:-$3} port=${FVOCI_TEST_PG_PORT:-$4} version
+  if ! [[ $port =~ ^[1-9][0-9]{0,4}$ ]] || ((port > 65535)); then
+    echo "FVOCI_TEST_PG_PORT is no port: $port" >&2
+    return 2
+  fi
+  docker run --detach --name "$name" \
     --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD=fvoci-test --env POSTGRES_DB=fvoci \
-    --shm-size 1073741824 --publish "127.0.0.1:$POSTGRES_PORT:5432" \
-    "$POSTGRES_IMAGE" -c max_connections=300
+    --shm-size 1073741824 --publish "127.0.0.1:$port:5432" \
+    "$image" -c max_connections=300
   # Over TCP: while the image makes a new database it answers on the socket only.
-  wait_for "$POSTGRES" docker exec "$POSTGRES" \
+  wait_for "$name" docker exec "$name" \
     pg_isready --host 127.0.0.1 --username postgres --dbname fvoci
+  # The server the image runs, which the tests take for the major asked for.
+  version=$(docker exec "$name" psql --username postgres --dbname fvoci \
+    --tuples-only --no-align --command 'SHOW server_version_num')
+  if ! [[ $version =~ ^[0-9]+$ ]] || ((version / 10000 != major)); then
+    echo "$name runs PostgreSQL $version, not $major" >&2
+    return 1
+  fi
+  echo "$name: PostgreSQL $version on port $port"
   # The role the tests connect as: no superuser, held by row-level security, and able
   # to make the schemas that are its test databases.
-  docker exec "$POSTGRES" psql --username postgres --dbname fvoci \
+  docker exec "$name" psql --username postgres --dbname fvoci \
     --set ON_ERROR_STOP=1 --quiet --command "
       CREATE ROLE fvoci LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE
         PASSWORD 'fvoci-test';
       GRANT CREATE ON DATABASE fvoci TO fvoci;"
-  local at="localhost:$POSTGRES_PORT/fvoci?sslmode=disable"
+  local at="localhost:$port/fvoci?sslmode=disable"
   {
     echo "FVOCI_STORE_TEST_CONN_STRING=postgres://fvoci:fvoci-test@$at"
     echo "FVOCI_STORE_TEST_SUPERUSER_CONN_STRING=postgres://postgres:fvoci-test@$at"
@@ -73,7 +99,9 @@ s3() {
 
 for service in "$@"; do
   case $service in
-    postgres) postgres ;;
+    postgres) postgres 18 "$POSTGRES_IMAGE" "$POSTGRES" "$POSTGRES_PORT" ;;
+    postgres-17) postgres 17 "$POSTGRES_17_IMAGE" "$POSTGRES-17" 15417 ;;
+    postgres-19) postgres 19 "$POSTGRES_19_IMAGE" "$POSTGRES-19" 15419 ;;
     s3) s3 ;;
     *)
       echo "unknown service: $service" >&2

@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::block_derived::{self, Refreshing};
 use crate::blocks::{self, Paging};
 use crate::body_versions::BodyWrite;
-use crate::db::{Dialect, Id, Param, Scope, Sql};
+use crate::db::{Dialect, Id, Param, RowLock, Scope, Sql};
 use crate::notification_noting::Telling;
 use crate::trash::{
     self, block_from_json, block_not_in_trash, from_json, take_blocks_out_of_trash,
@@ -270,9 +270,7 @@ impl Store {
                     Err(error) => return Err(error),
                 };
                 entries.push(DeletedDiaryEntry {
-                    date: entry_date(&block)
-                        .map(|date| date.to_string())
-                        .unwrap_or_default(),
+                    date: entry_date(&block).map_or_default(|date| date.to_string()),
                     mood: entry_mood(&block),
                     id: block.id,
                     deleted_at: row.int(2)?,
@@ -584,10 +582,7 @@ async fn entry_of_day(
 ) -> Result<Option<String>, StoreError> {
     let mut sql = scope.sql("SELECT entry_id FROM diary_days WHERE container_id = ");
     sql.bind(Id(diary_id)).push_bind(" AND day = ", day);
-    match scope.fetch_optional(sql).await? {
-        Some(row) => Ok(Some(row.id(0)?)),
-        None => Ok(None),
-    }
+    scope.first(sql).await
 }
 
 /// Checks that the diary of `entry`, which is held, has room for one more entry.
@@ -595,10 +590,7 @@ async fn check_room(scope: &mut Scope<'_>, entry: &Block, limit: u32) -> Result<
     let mut sql =
         scope.sql("SELECT CAST(COUNT(*) AS BIGINT) FROM diary_days WHERE container_id = ");
     sql.bind(Id(&entry.container_id));
-    let entries = match scope.fetch_optional(sql).await? {
-        Some(row) => row.int(0)?,
-        None => 0,
-    };
+    let entries: i64 = scope.first(sql).await?.unwrap_or(0);
     if entries >= i64::from(limit) {
         return Err(StoreError::InvalidBlock {
             id: entry.id.clone(),
@@ -648,17 +640,18 @@ async fn check_space(
     workspace_id: &str,
     coming: u32,
 ) -> Result<(), StoreError> {
-    scope.record_lock(crate::db::LockRank::Workspace, workspace_id);
     let mut sql = scope.sql(
         "SELECT o.kind FROM workspaces AS w JOIN organizations AS o ON o.id = w.org_id \
          WHERE w.id = ",
     );
     sql.bind(Id(workspace_id));
-    if scope.dialect() == Dialect::Postgres {
-        // One diary is put down in a workspace at a time: the count below is of what
-        // is there when this one is.
-        sql.push(" FOR NO KEY UPDATE OF w");
-    }
+    // One diary is put down in a workspace at a time: the count below is of what
+    // is there when this one is.
+    sql.push_lock(scope.row_lock(
+        crate::db::LockRank::Workspace,
+        workspace_id,
+        RowLock::NoKeyUpdate.of("w"),
+    ));
     let of_own_space = match scope.fetch_optional(sql).await? {
         Some(row) => directory::org_kind(&row, 0)? == OrgKind::Personal,
         None => false,
@@ -670,10 +663,7 @@ async fn check_space(
         scope.sql("SELECT CAST(COUNT(*) AS BIGINT) FROM containers WHERE workspace_id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND kind = ", ContainerKind::Diary.as_str());
-    let diaries = match scope.fetch_optional(sql).await? {
-        Some(row) => row.int(0)?,
-        None => 0,
-    };
+    let diaries: i64 = scope.first(sql).await?.unwrap_or(0);
     if diaries.saturating_add(i64::from(coming)) > i64::from(DIARIES_PER_SPACE) {
         return Err(ContainerError::TooManyDiaries {
             limit: DIARIES_PER_SPACE,

@@ -15,10 +15,10 @@ use serde_json::Value;
 use crate::blocks::{self, BLOCK_COLUMNS, OLDEST_FIRST, fetch_blocks, insert_blocks, patch_block};
 use crate::body_versions::{self, BodyWrite};
 use crate::comment_versions::EDITED_AT_COLUMN;
-use crate::db::{Dialect, Id, Scope};
+use crate::db::{Dialect, FromRow, Id, LockRank, RowLock, Scope};
 use crate::error::StoreError;
 use crate::file_refs::NewBodyFiles;
-use crate::files::{self, FILE_COLUMNS, file_from_row};
+use crate::files::{self, FILE_COLUMNS};
 use crate::loose_objects;
 use crate::notification_noting::Telling;
 use crate::trash::{self, with_tree_of};
@@ -148,8 +148,7 @@ impl Store {
             }
             let definitions = containers::find_container(scope, board_id)
                 .await?
-                .map(|b| b.card_properties)
-                .unwrap_or_default();
+                .map_or_default(|b| b.card_properties);
             card_values::keep_cards_of_board(scope, &mut blocks, board_id, &definitions).await?;
             for file in staged_files {
                 if !loose_objects::record_written(scope, file).await? {
@@ -262,6 +261,8 @@ impl Store {
         self.transaction(async |scope| {
             lock_live_board(scope, board_id).await?;
             verify_live_board_cards_or_templates(scope, board_id, card_ids).await?;
+            // Every card's tree before the first goes: each then holds what it holds.
+            trash::hold_trees_of(scope, card_ids).await?;
             let mut deleted = Vec::new();
             for card_id in card_ids {
                 deleted.extend(trash::delete_block(scope, card_id, user_id).await?);
@@ -276,10 +277,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Refused`] for invalid/duplicate `card_ids` or a trashed
-    /// block belonging to another container, [`StoreError::NotFound`] if the board or any
-    /// requested card is not in the trash, and [`StoreError::NotRestorable`] if a card
-    /// cannot be restored.
+    /// Returns [`StoreError::Refused`] for invalid/duplicate `card_ids` or a block in the
+    /// board's trash that is no card, [`StoreError::NotFound`] if the board or any
+    /// requested card is not in the board's trash (one in another board's is none, as
+    /// one of no identifier is), and [`StoreError::NotRestorable`] if a card cannot be
+    /// restored.
     pub async fn batch_restore_cards(
         &self,
         board_id: &str,
@@ -292,17 +294,20 @@ impl Store {
             verify_trashed_board_cards(scope, board_id, card_ids).await?;
             let mut restored = Vec::new();
             let mut restored_ids = HashSet::new();
+            // Made again once all are back: each account is held once, in order.
+            let mut reactions = trash::KeptReactions::default();
             for card_id in card_ids {
                 if restored_ids.contains(card_id.as_str()) {
                     continue;
                 }
-                let family = trash::undelete_block(scope, card_id, user_id).await?;
+                let family = trash::undelete_block(scope, card_id, user_id, &mut reactions).await?;
                 for block in family {
                     if restored_ids.insert(block.id.clone()) {
                         restored.push(block);
                     }
                 }
             }
+            reactions.make_again(scope).await?;
             Ok(restored)
         })
         .await
@@ -550,11 +555,7 @@ async fn board_org_id(scope: &mut Scope<'_>, board_id: &str) -> Result<String, S
          WHERE c.id = ",
     );
     sql.bind(Id(board_id));
-    scope
-        .fetch_optional(sql)
-        .await?
-        .ok_or_else(|| StoreError::not_found("board"))?
-        .id(0)
+    scope.one::<String>(sql, "board").await
 }
 
 async fn referenced_board_files(
@@ -571,12 +572,7 @@ async fn referenced_board_files(
         .push(" AND name IN (")
         .bind_list(names.iter().map(String::as_str))
         .push(") ORDER BY created_at, id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(file_from_row)
-        .collect()
+    scope.all(sql).await
 }
 
 fn validate_card_id_batch(card_ids: &[String]) -> Result<(), Refusals> {
@@ -734,25 +730,28 @@ async fn verify_live_board_cards_or_templates(
     Ok(())
 }
 
+/// Checks that each of `card_ids` names a card in the trash of `board_id`. A block in
+/// another board's trash is not found, as one of no identifier is: what is in a trash
+/// the caller may not see is not told apart from what is not there.
 async fn verify_trashed_board_cards(
     scope: &mut Scope<'_>,
     board_id: &str,
     card_ids: &[String],
 ) -> Result<(), StoreError> {
-    let mut sql =
-        scope.sql("SELECT id, container_id, block_type FROM deleted_blocks WHERE id IN (");
-    sql.bind_list(card_ids.iter().map(|id| Id(id))).push(")");
-    let rows = scope.fetch_all(sql).await?;
-    if rows.len() != card_ids.len() {
+    let mut sql = scope.sql("SELECT block_type FROM deleted_blocks WHERE container_id = ");
+    sql.bind(Id(board_id))
+        .push(" AND id IN (")
+        .bind_list(card_ids.iter().map(|id| Id(id)))
+        .push(")");
+    let types: Vec<String> = scope.all(sql).await?;
+    if types.len() != card_ids.len() {
         return Err(StoreError::NotAllFound {
             entity: "deleted card",
             ids: card_ids.to_vec(),
         });
     }
-    for row in &rows {
-        let container_id = row.id(1)?;
-        let block_type = row.text(2)?;
-        if container_id != board_id || (!block_type.is_empty() && block_type != "card") {
+    for block_type in &types {
+        if !block_type.is_empty() && block_type != "card" {
             let mut refused = Refusals::new();
             refused.refuse(
                 "cardIds",
@@ -982,9 +981,7 @@ async fn lock_board_file(
     } else {
         sql.push_bind(" AND name = ", file_id);
     }
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR KEY SHARE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Container, board_id, RowLock::KeyShare));
     let Some(row) = scope.fetch_optional(sql).await? else {
         let mut refused = Refusals::new();
         refused.refuse(
@@ -994,5 +991,5 @@ async fn lock_board_file(
         );
         return Err(refused.into());
     };
-    file_from_row(&row)
+    FileRecord::from_row(&row)
 }

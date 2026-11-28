@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use fvoci_model::PublicLinkChange;
 use fvoci_model::{
-    Block, Container, ContainerMember, ContainerVisibility, LoginRequest, RegisterRequest, User,
+    Container, ContainerMember, ContainerVisibility, LoginRequest, RegisterRequest, User,
     Workspace, new_id,
 };
 use fvoci_server::app::App;
@@ -1102,26 +1102,6 @@ impl Client {
             .await
     }
 
-    /// `InsertBlocks` on a board of the test workspace (`TEST_WORKSPACE_ID`).
-    pub(crate) async fn insert_blocks(&self, board_id: &str, blocks: &[Block]) -> ApiResponse {
-        self.insert_blocks_in(TEST_WORKSPACE_ID, board_id, blocks)
-            .await
-    }
-
-    /// `InsertBlocks` on a board of the workspace.
-    pub(crate) async fn insert_blocks_in(
-        &self,
-        workspace_id: &str,
-        board_id: &str,
-        blocks: &[Block],
-    ) -> ApiResponse {
-        self.post(
-            &format!("/w/{workspace_id}/boards/{board_id}/blocks"),
-            &blocks,
-        )
-        .await
-    }
-
     /// `AddMemberToBoard` on a board of the test workspace (`TEST_WORKSPACE_ID`).
     pub(crate) async fn add_member(&self, member: &ContainerMember) -> ApiResponse {
         self.add_member_in(TEST_WORKSPACE_ID, member).await
@@ -1337,7 +1317,7 @@ impl ApiResponse {
         assert!(kind.is_some(), "a kind of problem the server lists: {body}");
         assert_eq!(
             body["title"],
-            kind.map(|kind| kind.title).unwrap_or_default(),
+            kind.map_or_default(|kind| kind.title),
             "the title of the type: {body}"
         );
         assert!(body["detail"].is_string(), "the detail: {body}");

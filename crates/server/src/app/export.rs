@@ -15,7 +15,7 @@ use std::io::{BufWriter, Write as _};
 use std::path::Path;
 
 use futures_util::StreamExt as _;
-use fvoci_model::{ArchiveHeader, Container, ContainerKind};
+use fvoci_model::{ArchiveHeader, Block, Container, ContainerKind};
 use serde::Serialize;
 use tokio::fs;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -25,7 +25,7 @@ use super::container_copies::counted_as;
 use super::doomed::Doomed;
 use crate::auth::now_millis;
 use crate::auth::secret::new_secret;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 use crate::metrics::ContainerWork;
 
 /// The archive format version this server writes. An archive's lines carry when each
@@ -87,6 +87,19 @@ impl ExportedArchive {
         }
     }
 
+    /// The archive written to the file at `path`, opened from its start.
+    pub(super) async fn open(path: Doomed) -> Result<Self, AppError> {
+        let file = fs::File::open(path.path())
+            .await
+            .map_err(|error| io_error(&error))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|error| io_error(&error))?
+            .len();
+        Ok(Self::new(file, size, path))
+    }
+
     /// Closes the file and removes it, and waits for that.
     pub(crate) async fn remove(self) {
         let Self {
@@ -124,29 +137,29 @@ impl App {
             })?);
         }
 
-        let directory = self.config().tmp_dir().join(EXPORTS_DIR);
-        fs::create_dir_all(&directory)
-            .await
-            .map_err(|error| io_error(&error))?;
-        // Removed however the export ends, also when its request is dropped meanwhile: the
-        // file stays while it is sent, and goes with the archive.
-        let path = Doomed::file(directory.join(format!("{}.fvoci", new_secret())));
+        let path = self.new_export_file("fvoci").await?;
         self.write_archive(path.path(), workspace_id, &containers)
             .await?;
-        let file = fs::File::open(path.path())
-            .await
-            .map_err(|error| io_error(&error))?;
-        let size = file
-            .metadata()
-            .await
-            .map_err(|error| io_error(&error))?
-            .len();
+        let archive = ExportedArchive::open(path).await?;
         // Counted once the archive is there to be sent, whatever becomes of its download.
         for container in &containers {
             self.metrics()
                 .container_copied(ContainerWork::Export, counted_as(container.kind));
         }
-        Ok(ExportedArchive::new(file, size, path))
+        Ok(archive)
+    }
+
+    /// A new file of an export, with `extension`, in the temporary directory of exports.
+    /// It is removed however the export ends, also when its request is dropped
+    /// meanwhile: it stays while it is sent, and goes with the archive.
+    pub(super) async fn new_export_file(&self, extension: &str) -> Result<Doomed, AppError> {
+        let directory = self.config().tmp_dir().join(EXPORTS_DIR);
+        fs::create_dir_all(&directory)
+            .await
+            .map_err(|error| io_error(&error))?;
+        Ok(Doomed::file(
+            directory.join(format!("{}.{extension}", new_secret())),
+        ))
     }
 
     /// Writes the archive of `containers` to a new file at `path`.
@@ -156,12 +169,7 @@ impl App {
         workspace_id: &str,
         containers: &[Container],
     ) -> Result<(), AppError> {
-        let file = fs::File::create(path)
-            .await
-            .map_err(|error| io_error(&error))?
-            .into_std()
-            .await;
-        let mut writer = ArchiveWriter::new(file);
+        let mut writer = ArchiveWriter::create(path).await?;
         writer.start_entry("version.json").await?;
         let header = ArchiveHeader {
             version: ARCHIVE_VERSION,
@@ -186,7 +194,10 @@ impl App {
         container: &Container,
         workspace_id: &str,
     ) -> Result<(), AppError> {
-        let blocks = self.blocks_for_container(&container.id).await?;
+        // An archive line is a block as the contract has it, which shows no number a
+        // card template keeps.
+        let stored = self.blocks_for_container(&container.id).await?;
+        let blocks: Vec<Block> = stored.into_iter().map(Block::outward).collect();
         // Two blocks may name the same file: it is written once, as an entry of an
         // archive has a name of its own.
         let mut files = Vec::new();
@@ -204,7 +215,11 @@ impl App {
         let mut written = Vec::new();
         let mut missing_files = Vec::new();
         for filename in files {
-            if self.write_file(writer, &container.id, &filename).await? {
+            let entry = format!("{}/{filename}", container.id);
+            if self
+                .write_file(writer, &container.id, &filename, &entry)
+                .await?
+            {
                 written.push(filename);
             } else {
                 missing_files.push(filename);
@@ -270,24 +285,22 @@ impl App {
         Ok(names)
     }
 
-    /// Writes a board file as its own archive entry, and returns whether it did: a file
-    /// without a record or without its object gets no entry.
-    async fn write_file(
+    /// Writes the file `filename` of the board as the entry `entry` of the archive, and
+    /// returns whether it did: a file without a record or without its object gets no
+    /// entry.
+    pub(super) async fn write_file(
         &self,
         writer: &mut ArchiveWriter,
         container_id: &str,
         filename: &str,
+        entry: &str,
     ) -> Result<bool, AppError> {
-        let mut stream = match self.open_stored_file(container_id, filename).await {
-            Ok(Some(stream)) => stream,
-            // Gone between the lookup and the read, as when it is collected meanwhile.
-            Ok(None) => return Ok(false),
-            Err(error) if error.is_not_found() => return Ok(false),
-            Err(error) => return Err(error),
+        let opened = self.open_stored_file(container_id, filename).await;
+        // Gone between the lookup and the read, as when it is collected meanwhile.
+        let Some(mut stream) = opened.found()?.flatten() else {
+            return Ok(false);
         };
-        writer
-            .start_entry(&format!("{container_id}/{filename}"))
-            .await?;
+        writer.start_entry(entry).await?;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .map_err(|error| AppError::internal(format_args!("cannot read file: {error}")))?;
@@ -302,7 +315,7 @@ type Zip = ZipWriter<BufWriter<std::fs::File>>;
 
 /// Writes an archive to a file. The writing and the compression are done off the
 /// runtime's workers, a chunk at a time.
-struct ArchiveWriter {
+pub(super) struct ArchiveWriter {
     /// The writer, away while a chunk is written; none after a failure. Boxed: it is
     /// large, and held across every wait of the export.
     zip: Option<Box<Zip>>,
@@ -311,15 +324,21 @@ struct ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    fn new(file: std::fs::File) -> Self {
-        Self {
+    /// A writer of an archive in a new file at `path`.
+    pub(super) async fn create(path: &Path) -> Result<Self, AppError> {
+        let file = fs::File::create(path)
+            .await
+            .map_err(|error| io_error(&error))?
+            .into_std()
+            .await;
+        Ok(Self {
             zip: Some(Box::new(ZipWriter::new(BufWriter::new(file)))),
             pending: Vec::new(),
-        }
+        })
     }
 
     /// Starts a new entry, compressed with DEFLATE.
-    async fn start_entry(&mut self, name: &str) -> Result<(), AppError> {
+    pub(super) async fn start_entry(&mut self, name: &str) -> Result<(), AppError> {
         self.flush().await?;
         let name = name.to_owned();
         self.blocking(move |zip| {
@@ -333,7 +352,7 @@ impl ArchiveWriter {
     }
 
     /// Writes bytes to the current entry.
-    async fn write(&mut self, bytes: &[u8]) -> Result<(), AppError> {
+    pub(super) async fn write(&mut self, bytes: &[u8]) -> Result<(), AppError> {
         self.pending.extend_from_slice(bytes);
         if self.pending.len() >= WRITE_CHUNK_BYTES {
             self.flush().await?;
@@ -380,7 +399,7 @@ impl ArchiveWriter {
     }
 
     /// Ends the archive: its directory, and what is buffered.
-    async fn finish(mut self) -> Result<(), AppError> {
+    pub(super) async fn finish(mut self) -> Result<(), AppError> {
         self.flush().await?;
         let zip = self
             .zip
@@ -433,8 +452,40 @@ fn io_error(error: &std::io::Error) -> AppError {
 
 /// Whether a name a block shows can be the stored name of a file, and so an entry of the
 /// container's directory: one path segment, and not a name the archive itself uses.
-fn is_stored_name(name: &str) -> bool {
+pub(super) fn is_stored_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains(['/', '\\'])
         && !matches!(name, "." | ".." | "container.jsonl" | "version.json")
+}
+
+/// The day (UTC) of `millis`, milliseconds since the Unix epoch: `YYYY-MM-DD`.
+pub(crate) fn utc_day(millis: i64) -> String {
+    let (year, month, day) = civil_date(millis.div_euclid(86_400_000));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// The moment `millis` in UTC, to the second: `YYYY-MM-DDTHH:MM:SSZ`.
+pub(crate) fn utc(millis: i64) -> String {
+    let seconds = millis.div_euclid(1000).rem_euclid(86_400);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        utc_day(millis),
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
+}
+
+/// The year, month and day of the day `days` after 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_date(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
 }

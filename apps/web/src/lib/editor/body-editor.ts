@@ -8,6 +8,7 @@ import type { Snippet } from 'svelte';
 import type { Awareness } from 'y-protocols/awareness';
 import type { Doc } from 'yjs';
 
+import type { BoardViewHost } from './board-view-read.ts';
 import type { SuggestionEntry } from './extensions.ts';
 import type { ReferenceDrawing } from './reference-chip.ts';
 import type { DocNode } from './schema.ts';
@@ -66,6 +67,13 @@ export interface BodyEditorProps {
    * shows as what the reader may not see, and none can be put.
    */
   references?: BodyReferences;
+  /**
+   * The body may show board views (that of a card, a page or a unit), drawn
+   * and put in by this (board-view.ts). Without it the body shows none to be
+   * read, `/` offers none, and a pasted one is no block: a comment's, a
+   * diary entry's.
+   */
+  boardViews?: BoardViewHost | undefined;
   /**
    * Uploads a file for the body (pasted, dropped or chosen through the slash
    * menu; a picture becomes an image, any other file a file block) and gives

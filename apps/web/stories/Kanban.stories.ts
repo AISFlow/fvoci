@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/svelte';
 import { expect, waitFor } from 'storybook/test';
 import { WINDOW_FROM } from '$lib/features/views/kanban/column-window.ts';
 import ViewSample from './ViewSample.svelte';
-import { clickStory, storyElement } from './interactions.ts';
+import { clickStory, selectTwo, storyElement } from './interactions.ts';
 
 const meta = {
   title: 'Views/Kanban',
@@ -62,5 +62,15 @@ export const OpenCard: Story = {
         'example-card-1',
       ),
     );
+  },
+};
+
+export const Selected: Story = {
+  play: async ({ canvasElement }) => {
+    await selectTwo(canvasElement, {
+      first: '[data-card="example-card-1"]',
+      menu: '[data-card-menu="example-card-1"]',
+      second: '[data-card="example-card-2"]',
+    });
   },
 };

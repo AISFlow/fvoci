@@ -25,9 +25,10 @@ const body = (text: string) => ({
 
 async function revise(api: APIRequestContext, path: string, text: string): Promise<void> {
   const split = path.lastIndexOf('/');
-  const read = await api.get(path.slice(0, split), { params: { blockId: path.slice(split + 1) } });
+  const read = await api.get(path.slice(0, split));
   expect(read.ok(), await read.text()).toBe(true);
-  const [current] = (await read.json()) as Schemas['Block'][];
+  const id = path.slice(split + 1);
+  const current = ((await read.json()) as Schemas['Block'][]).find((one) => one.id === id);
   if (!current) throw new Error('the comment was not returned');
   const response = await api.patch(path, { data: { body: body(text), readAt: current.updatedAt } });
   expect(response.ok(), await response.text()).toBe(true);
@@ -53,23 +54,15 @@ test('a departed writer of an earlier revision is named when the comment history
     data: { userId: writerId, role: 'admin' },
   });
   expect(added.ok(), await added.text()).toBe(true);
-  const posted = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        parentId: board.cards['A conversation'],
-        type: 'comment',
-        title: '',
-        fields: {},
-        createdAt: 1,
-        updatedAt: 1,
-        body: body('Original words'),
-      },
-    ],
-  });
+  const posted = await api.post(
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${board.cards['A conversation'] ?? ''}/comments`,
+    {
+      data: { body: body('Original words') },
+    },
+  );
   expect(posted.ok(), await posted.text()).toBe(true);
-  const [comment] = (await posted.json()) as Schemas['Block'][];
-  const path = `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${comment?.id ?? ''}`;
+  const comment = (await posted.json()) as Schemas['Block'];
+  const path = `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${comment.parentId}/comments/${comment.id}`;
   await revise(writer, path, 'Words from the departed writer');
   await revise(api, path, 'Current words');
   const admin = await signedIn(base, ADMIN);
@@ -114,20 +107,9 @@ test('a departed comment author is named without opening the comment history', a
   });
   expect(added.ok(), await added.text()).toBe(true);
   const posted = await writer.post(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${board.cards['Kept conversation'] ?? ''}/comments`,
     {
-      data: [
-        {
-          containerId: board.boardId,
-          parentId: board.cards['Kept conversation'],
-          type: 'comment',
-          title: '',
-          fields: {},
-          createdAt: 1,
-          updatedAt: 1,
-          body: body('Words that remain after leaving'),
-        },
-      ],
+      data: { body: body('Words that remain after leaving') },
     },
   );
   expect(posted.ok(), await posted.text()).toBe(true);

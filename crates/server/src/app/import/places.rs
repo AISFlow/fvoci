@@ -491,8 +491,7 @@ mod tests {
     fn refusal(kind: ContainerKind, blocks: Blocks<'_>) -> String {
         check(&of("w", kind, blocks), LIMITS)
             .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default()
+            .map_or_default(|error| error.to_string())
     }
 
     #[test]

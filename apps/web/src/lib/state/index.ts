@@ -7,6 +7,7 @@
  */
 export {
   BackendError,
+  CARD_BATCH_LIMIT,
   isBackendError,
   isConflict,
   isOwnSpace,
@@ -76,6 +77,7 @@ export type {
 } from './import-types.ts';
 export type { Registered } from './account-types.ts';
 export { BoardStore, type CardDrop } from './board.svelte.ts';
+export { clearCardsProperty, setCardsProperty } from './board-bulk.ts';
 export { addViewAtEnd, duplicateView, moveView } from './view-moves.ts';
 export { type Shareable } from './member-writes.ts';
 export { boardPresence } from './board-presence.svelte.ts';
@@ -86,6 +88,7 @@ export type {
   BodyVersions,
   KeptBodyVersion,
 } from './body-versions.ts';
+export { ACTIVITY_PAGE, type CardActivityKind, type CardActivityLine } from './activity-types.ts';
 export { CardPreviews } from './card-previews.svelte.ts';
 export { type CommentEdit } from './card-parts.ts';
 export { CardStore } from './card.svelte.ts';
@@ -243,6 +246,9 @@ export { administers, isGuest, peopleOf, providePeople, type PeopleAccess } from
 export { OrganizationNames, organizationNames } from './organization-names.svelte.ts';
 export { BlockWatch } from './block-watch.svelte.ts';
 export type { WatchedKind, Watches } from './watch-types.ts';
+export { MAX_FAVORITES } from './favorite-types.ts';
+export type { Favorite, FavoriteKind, Favorites } from './favorite-types.ts';
+export { WorkspaceFavorites, workspaceFavorites } from './workspace-favorites.svelte.ts';
 export {
   copyOutPlace,
   copyPlaces,
@@ -264,6 +270,14 @@ export {
   ReferenceTitles,
   type ReferencePlaces,
 } from './reference-titles.svelte.ts';
+export {
+  boardsToShow,
+  embeddedBoards,
+  EmbeddedBoards,
+  viewsOfBoard,
+  RELEASE_AFTER_MS,
+  type HeldBoard,
+} from './embedded-board.svelte.ts';
 export type { LinkedBlock } from './references.ts';
 export { noteMembership, readerOf } from './memberships.svelte.ts';
 export {
@@ -296,6 +310,8 @@ export {
   Trash,
   type TrashStatus,
 } from './trash.svelte.ts';
+export { nextCardNotices, type NextCardNotice } from './next-cards.svelte.ts';
+export { setBoardDoneRule, setBoardDueProperty } from './board-rules.ts';
 export {
   TimeTracker,
   timeTracker,

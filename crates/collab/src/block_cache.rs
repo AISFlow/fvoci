@@ -2,7 +2,8 @@
 //!
 //! A `ProseMirror`/`TipTap` body lives under the root `XmlFragment("default")` as a flat
 //! sequence of independent top-level block elements (`paragraph`, `heading`, lists,
-//! `blockquote`, `codeBlock`, `horizontalRule`, `image`, `file`, `blockMath`, `table`).
+//! `blockquote`, `codeBlock`, `horizontalRule`, `image`, `file`, `blockMath`, `table`,
+//! `details`, `callout`).
 //! Ordinary edits mutate only a handful of those blocks. Storing a compact summary per
 //! live top-level block (keyed by its immutable Yjs [`ID`], with no retained
 //! `serde_json::Value` tree) lets [`crate::BodyDoc::take_in_place`] project, validate,
@@ -11,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use fvoci_model::{BODY_MAX_BYTES, BODY_MAX_NODES, Body, BodyError};
+use fvoci_model::{BODY_MAX_BOARD_VIEWS, BODY_MAX_BYTES, BODY_MAX_NODES, Body, BodyError};
 use serde_json::json;
 use yrs::branch::Branch;
 use yrs::{
@@ -54,6 +55,8 @@ pub(crate) struct BlockSummary {
     /// Whether any `tableRow` inside this block contains an empty `XmlText` child,
     /// which `repair::Survey::row` deletes during a repair even though `project` skips it.
     pub(crate) has_empty_row_text: bool,
+    /// The board views in this block: the block itself, or those of what a toggle hides.
+    pub(crate) board_views: u32,
 }
 
 /// A validated block's summary together with any file IDs it references.
@@ -70,8 +73,8 @@ pub(crate) struct BlockEntry {
 ///   the root fragment `FIELD` (`parent_sub` is `None`).
 /// - `blocks.len() == root.len(&txn)` (so the root holds no `XmlText`, `XmlFragment`, or
 ///   non-XML countable item).
-/// - `total_nodes`, `total_json_bytes`, and `file_ids` match the exact sums/entries over
-///   `blocks`.
+/// - `total_nodes`, `total_board_views`, `total_json_bytes`, and `file_ids` match the
+///   exact sums/entries over `blocks`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BlockCache {
     blocks: BTreeMap<ID, BlockSummary>,
@@ -79,6 +82,7 @@ pub(crate) struct BlockCache {
     /// least one `image` or `file` node. Empty for text-only documents (zero allocation).
     file_ids: HashMap<ID, Box<[String]>>,
     total_nodes: u64,
+    total_board_views: u64,
     total_json_bytes: u64,
 }
 
@@ -117,6 +121,9 @@ impl BlockCache {
     pub(crate) fn upsert(&mut self, id: ID, entry: BlockEntry) {
         if let Some(old) = self.blocks.insert(id, entry.summary) {
             self.total_nodes = self.total_nodes.saturating_sub(u64::from(old.nodes));
+            self.total_board_views = self
+                .total_board_views
+                .saturating_sub(u64::from(old.board_views));
             self.total_json_bytes = self
                 .total_json_bytes
                 .saturating_sub(u64::from(old.json_bytes));
@@ -124,6 +131,9 @@ impl BlockCache {
         self.total_nodes = self
             .total_nodes
             .saturating_add(u64::from(entry.summary.nodes));
+        self.total_board_views = self
+            .total_board_views
+            .saturating_add(u64::from(entry.summary.board_views));
         self.total_json_bytes = self
             .total_json_bytes
             .saturating_add(u64::from(entry.summary.json_bytes));
@@ -138,6 +148,9 @@ impl BlockCache {
     pub(crate) fn remove(&mut self, id: &ID) {
         if let Some(old) = self.blocks.remove(id) {
             self.total_nodes = self.total_nodes.saturating_sub(u64::from(old.nodes));
+            self.total_board_views = self
+                .total_board_views
+                .saturating_sub(u64::from(old.board_views));
             self.total_json_bytes = self
                 .total_json_bytes
                 .saturating_sub(u64::from(old.json_bytes));
@@ -221,6 +234,7 @@ impl BlockCache {
         check_totals(DocTotals {
             blocks: self.blocks.len(),
             nodes: self.total_nodes,
+            board_views: self.total_board_views,
             json_bytes: self.total_json_bytes,
             is_empty_doc: self.is_empty_document(),
         })
@@ -386,6 +400,12 @@ impl BlockCache {
         self.len() == root_len && (root_len == 0 || root.first_child().is_some())
     }
 
+    /// How many board views the cached blocks have, matching [`Body::board_view_count`].
+    #[must_use]
+    pub(crate) fn board_views(&self) -> u64 {
+        self.total_board_views
+    }
+
     /// Returns the deduplicated stored file names referenced by `image` and `file` nodes
     /// in exact document order, matching [`Body::file_ids`].
     #[must_use]
@@ -444,6 +464,7 @@ pub(crate) fn project_and_validate_block<T: ReadTxn>(
                 json_bytes: u32::try_from(EMPTY_PARAGRAPH_BYTES).unwrap_or(u32::MAX),
                 is_empty_paragraph: true,
                 has_empty_row_text,
+                board_views: 0,
             },
             file_ids: Box::new([]),
         }),
@@ -456,6 +477,7 @@ pub(crate) fn project_and_validate_block<T: ReadTxn>(
                     json_bytes: u32::try_from(block_bytes).unwrap_or(u32::MAX),
                     is_empty_paragraph: false,
                     has_empty_row_text,
+                    board_views: u32::try_from(body.board_view_count()).unwrap_or(u32::MAX),
                 },
                 file_ids,
             })
@@ -479,11 +501,13 @@ fn document_json_bytes(sum_block_bytes: u64, block_count: usize) -> u64 {
 pub(crate) struct DocTotals {
     pub(crate) blocks: usize,
     pub(crate) nodes: u64,
+    pub(crate) board_views: u64,
     pub(crate) json_bytes: u64,
     pub(crate) is_empty_doc: bool,
 }
 
-/// Enforces `BODY_MAX_NODES` and `BODY_MAX_BYTES` in the exact order of [`Body::parse`].
+/// Enforces `BODY_MAX_NODES`, `BODY_MAX_BOARD_VIEWS` and `BODY_MAX_BYTES` in the exact
+/// order of [`Body::parse`].
 pub(crate) fn check_totals(totals: DocTotals) -> Result<(), BodyError> {
     if totals.blocks == 0 {
         return Ok(());
@@ -491,6 +515,9 @@ pub(crate) fn check_totals(totals: DocTotals) -> Result<(), BodyError> {
     let max_nodes = u64::try_from(BODY_MAX_NODES).unwrap_or(u64::MAX);
     if 1_u64.saturating_add(totals.nodes) > max_nodes {
         return Err(BodyError::TooManyNodes);
+    }
+    if totals.board_views > u64::try_from(BODY_MAX_BOARD_VIEWS).unwrap_or(u64::MAX) {
+        return Err(BodyError::TooManyBoardViews);
     }
     if totals.is_empty_doc {
         return Ok(());
@@ -820,6 +847,7 @@ mod tests {
                     json_bytes: 40,
                     is_empty_paragraph: false,
                     has_empty_row_text: false,
+                    board_views: 0,
                 },
                 file_ids: vec!["bogus.png".to_owned()].into_boxed_slice(),
             },

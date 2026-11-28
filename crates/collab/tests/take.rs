@@ -300,12 +300,10 @@ fn random_refused_in_place_updates_rebuild_to_exact_prior_bytes() {
                 expected.repair.body,
                 "seed {seed} step {step}: body"
             );
-            let expected_files: Vec<String> = expected
-                .repair
-                .body
-                .as_ref()
-                .map(|body| body.file_ids().into_iter().map(str::to_owned).collect())
-                .unwrap_or_default();
+            let expected_files: Vec<String> =
+                expected.repair.body.as_ref().map_or_default(|body| {
+                    body.file_ids().into_iter().map(str::to_owned).collect()
+                });
             assert_eq!(
                 changed.doc.file_ids(),
                 expected_files,
@@ -1212,4 +1210,78 @@ fn body_doc_settle_verifies_canonical_and_non_canonical_and_preserves_doc_on_err
         expected_body,
         "live doc stays intact after state_bytes settle failure"
     );
+}
+
+/// A board view of the `n`th view.
+fn board_view(n: usize) -> Value {
+    json!({"type": "boardView", "attrs": {"viewId": format!("01930000-0000-7000-8000-{:012x}", 0xc001 + n)}})
+}
+
+/// Where a board view is appended: at the root, or in the toggle that is its first child.
+#[derive(Debug, Clone, Copy)]
+enum Within {
+    Root,
+    Toggle,
+}
+
+/// The update of a board view of the `n`th view appended `within`.
+fn board_view_added(doc: &Doc, n: usize, within: Within) -> Vec<u8> {
+    let view_id = format!("01930000-0000-7000-8000-{:012x}", 0xc001 + n);
+    edit(doc, |txn, root| {
+        let view = match within {
+            Within::Root => root.push_back(txn, XmlElementPrelim::empty("boardView")),
+            Within::Toggle => {
+                let Some(XmlOut::Element(toggle)) = root.get(txn, 0) else {
+                    panic!("a toggle first");
+                };
+                let Some(XmlOut::Element(content)) = toggle.get(txn, 1) else {
+                    panic!("what the toggle hides");
+                };
+                content.push_back(txn, XmlElementPrelim::empty("boardView"))
+            }
+        };
+        view.insert_attribute(txn, "viewId", view_id);
+    })
+}
+
+/// A body shows at most ten board views, counted over the whole document: the tenth is
+/// taken, in the document or in a toggle, and counted; an eleventh is refused, not
+/// repaired, whether the document is taken whole or in place.
+#[test]
+fn an_eleventh_board_view_is_refused() {
+    let mut blocks = vec![json!({"type": "details", "content": [
+        {"type": "detailsSummary", "content": [{"type": "text", "text": "views"}]},
+        {"type": "detailsContent", "content": [board_view(0)]},
+    ]})];
+    blocks.extend((1..9).map(board_view));
+    let body = body_of(&json!({"type": "doc", "content": blocks}));
+    assert_eq!(body.board_view_count(), 9);
+    let doc = from_body(&body);
+    for within in [Within::Root, Within::Toggle] {
+        let tenth = board_view_added(&doc, 9, within);
+        let taken = take_update(&doc, &tenth, &ROOMY).expect("the tenth is taken");
+        let body = taken.repair.body.clone().expect("a body");
+        assert_eq!(body.board_view_count(), 10, "{within:?}");
+        assert_eq!(BodyDoc::from_body(Some(&body)).board_views(), 10);
+        let eleventh = board_view_added(&taken.doc, 10, within);
+        assert_eq!(
+            take_update(&taken.doc, &eleventh, &ROOMY).map(|_| ()),
+            Err(TakeError::Body(BodyError::TooManyBoardViews)),
+            "{within:?}"
+        );
+        let state = state_of(&taken.doc);
+        let changes = state_counts(&state).expect("counts").changes;
+        let opened = BodyDoc::from_state(&state, &ROOMY).expect("opened").doc;
+        assert_eq!(opened.board_views(), 10);
+        let Err(BodyTakeError::Untouched { error: refused, .. } | BodyTakeError::Dirty(refused)) =
+            opened.take_in_place(None, changes, &eleventh, &ROOMY)
+        else {
+            panic!("an eleventh board view is taken in place");
+        };
+        assert_eq!(
+            refused,
+            TakeError::Body(BodyError::TooManyBoardViews),
+            "{within:?}"
+        );
+    }
 }

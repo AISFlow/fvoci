@@ -23,7 +23,7 @@ use fvoci_model::{ContainerMember, ContainerRole, WorkspaceMember, WorkspaceRole
 use crate::Store;
 use crate::audit::{self, AuditEntry};
 use crate::containers::{delete_member, find_member, lock_container, save_member};
-use crate::db::{Dialect, Id, LockRank, Row, Scope};
+use crate::db::{FromRow, Id, LockRank, Row, RowLock, Scope};
 use crate::error::StoreError;
 use crate::trash::{self, TrashedRoles};
 use crate::{members, org_admin, person_names};
@@ -71,12 +71,7 @@ impl Store {
                 .push_bind(" AND t.org_id = ", scope.org()?)
                 .push(" AND t.deleted_at IS NULL")
                 .push(" ORDER BY wm.created_at, wm.user_id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(member_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -98,12 +93,7 @@ impl Store {
                 .push_bind(" AND t.org_id = ", scope.org()?)
                 .push(" AND t.deleted_at IS NULL")
                 .push_bind(" AND wm.user_id = ", Id(user_id));
-            scope
-                .fetch_optional(sql)
-                .await?
-                .as_ref()
-                .map(member_from_row)
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -298,32 +288,44 @@ async fn remove(
     crate::unit_reviews::forget_user_in_workspace(scope, workspace_id, user_id).await?;
     crate::container_team_membership::remove_workspace_teams(scope, workspace_id, user_id).await?;
     crate::api_tokens::forget_workspace_of_user(scope, workspace_id, user_id).await?;
+    crate::favorites::forget_user_in_workspace(scope, workspace_id, user_id).await?;
     let mut sql = scope.sql("DELETE FROM workspace_members WHERE workspace_id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
     scope.execute(sql).await?;
     // A workspace guest is never in `organization_members`: once removed from their last
     // workspace in this organization, they can no longer leave the organization, so wipe
-    // their time entries in it (including any active timer) to prevent orphans. Hold the
-    // user's row first to serialize with concurrent `start_time_entry` / `create_time_entry`.
+    // what they leave in it to prevent orphans: their time entries (including any active
+    // timer) and their reactions, those its trash keeps too, as a leaving takes them
+    // (`reactions::forget_user_in_organization`). Hold the user's row first to serialize
+    // with concurrent `start_time_entry` / `create_time_entry` and `add_reaction`.
     crate::users::hold_user_for_cleanup(scope, user_id).await?;
+    if !in_organization(scope, user_id).await? {
+        let mut sql = scope.sql("DELETE FROM time_entries WHERE user_id = ");
+        sql.bind(Id(user_id))
+            .push_bind(" AND org_id = ", scope.org()?);
+        scope.execute(sql).await?;
+        crate::reactions::forget_user_in_organization(scope, user_id).await?;
+    }
+    Ok(Some(MembershipChange::Done { taken_over }))
+}
+
+/// Whether `user_id` is still in the scope's organization: a member of it, or of one of
+/// its workspaces.
+async fn in_organization(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, StoreError> {
     let org = scope.org()?;
-    let mut sql = scope.sql("DELETE FROM time_entries WHERE user_id = ");
+    let mut sql = scope.sql("SELECT 1 FROM organization_members WHERE user_id = ");
     sql.bind(Id(user_id))
         .push_bind(" AND org_id = ", org.clone())
-        .push(" AND NOT EXISTS (SELECT 1 FROM organization_members WHERE user_id = ")
-        .bind(Id(user_id))
-        .push_bind(" AND org_id = ", org.clone())
         .push(
-            ") AND NOT EXISTS (SELECT 1 FROM workspace_members AS wm \
-               JOIN workspaces AS w ON w.id = wm.workspace_id WHERE wm.user_id = ",
+            " UNION ALL SELECT 1 FROM workspace_members AS wm \
+             JOIN workspaces AS w ON w.id = wm.workspace_id WHERE wm.user_id = ",
         )
         .bind(Id(user_id))
         .push_bind(" AND w.org_id = ", org)
         .push(&scope.same_organization(&[("wm", "w")]))
-        .push(")");
-    scope.execute(sql).await?;
-    Ok(Some(MembershipChange::Done { taken_over }))
+        .push(" LIMIT 1");
+    scope.exists(sql).await
 }
 
 /// The members of a workspace `t` of an organization; the workspace's identifier and
@@ -336,16 +338,18 @@ const SELECT_MEMBERS: &str = concat!(
      JOIN users AS u ON u.id = wm.user_id WHERE wm.workspace_id = "
 );
 
-fn member_from_row(row: &Row) -> Result<WorkspaceMember, StoreError> {
-    Ok(WorkspaceMember {
-        user_id: row.id(0)?,
-        username: row.text(1)?,
-        display_name: row.text(2)?,
-        name: person_names::name_from_row(row, 6)?,
-        role: role_from(&row.text(3)?)?,
-        created_at: row.int(4)?,
-        joined_as_org_admin: row.bool(5)?,
-    })
+impl FromRow for WorkspaceMember {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(WorkspaceMember {
+            user_id: row.id(0)?,
+            username: row.text(1)?,
+            display_name: row.text(2)?,
+            name: person_names::name_from_row(row, 6)?,
+            role: role_from(&row.text(3)?)?,
+            created_at: row.int(4)?,
+            joined_as_org_admin: row.bool(5)?,
+        })
+    }
 }
 
 fn role_from(text: &str) -> Result<WorkspaceRole, StoreError> {
@@ -367,7 +371,7 @@ pub(crate) async fn is_workspace_here(
     sql.bind(Id(workspace_id))
         .push_bind(" AND org_id = ", scope.org()?)
         .push(" AND deleted_at IS NULL");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Holds a workspace in use of the scope's organization against other changes of who
@@ -378,15 +382,12 @@ pub(crate) async fn hold_workspace(
     scope: &mut Scope<'_>,
     workspace_id: &str,
 ) -> Result<bool, StoreError> {
-    scope.record_lock(LockRank::Workspace, workspace_id);
     let mut sql = scope.sql("SELECT id FROM workspaces WHERE id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND org_id = ", scope.org()?)
         .push(" AND deleted_at IS NULL");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR NO KEY UPDATE");
-    }
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    sql.push_lock(scope.row_lock(LockRank::Workspace, workspace_id, RowLock::NoKeyUpdate));
+    scope.exists(sql).await
 }
 
 /// Holds every board of the workspace the user has a role on, in the order of their
@@ -446,16 +447,14 @@ pub(crate) async fn held_role(
     workspace_id: &str,
     user_id: &str,
 ) -> Result<Option<WorkspaceRole>, StoreError> {
-    scope.record_lock(
-        LockRank::WorkspaceMembers,
-        &format!("{workspace_id}:{user_id}"),
-    );
     let mut sql = scope.sql("SELECT role FROM workspace_members WHERE workspace_id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
+    sql.push_lock(scope.row_lock(
+        LockRank::WorkspaceMembers,
+        &format!("{workspace_id}:{user_id}"),
+        RowLock::Update,
+    ));
     match scope.fetch_optional(sql).await? {
         Some(row) => role_from(&row.text(0)?).map(Some),
         None => Ok(None),
@@ -473,7 +472,7 @@ pub(crate) async fn is_only_administrator(
         .push_bind(" AND user_id <> ", Id(user_id))
         .push_bind(" AND role = ", WorkspaceRole::Admin.as_str())
         .push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_none())
+    Ok(!scope.exists(sql).await?)
 }
 
 /// Makes `by` the admin of each of `containers`, which are held, that `user_id` is the only

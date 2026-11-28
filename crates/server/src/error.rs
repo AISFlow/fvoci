@@ -530,6 +530,18 @@ impl AppError {
         self
     }
 
+    /// Says that the members the store refused of the block `block_id` are under `at`, a
+    /// JSON Pointer: for a request that carries one block apart from the rest, as a
+    /// board's first view. Any other error is left as it is.
+    #[must_use]
+    pub fn of_block(mut self, block_id: &str, at: &str) -> Self {
+        if matches!(&self.subject, Some(Subject::Block(block)) if block == block_id) {
+            self.subject = None;
+            return self.under(at);
+        }
+        self
+    }
+
     /// Says that what was refused is no member of the request body: for what is
     /// checked of something the request only names, as an archive is by its upload.
     /// The words of the error still say what is wrong.
@@ -887,8 +899,10 @@ impl From<SubscriptionError> for AppError {
 
 mod account_errors;
 mod model_errors;
+mod or_missing;
 mod reason;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use or_missing::OrMissing;
 pub use reason::Reason;

@@ -243,12 +243,18 @@ export function patchCardOrStored(
       parentId: card.parentId,
       title: card.title,
       icon: card.fields.icon,
+      recurrence: card.fields.recurrence ?? null,
       updatedProperties: card.fields.properties,
     }),
     {
       send: () => backend.patchCard(store.boardId, cardId, patch, quiet ? { quiet } : undefined),
       read: async () => {
-        const { body: _body, ...card } = await backend.card(store.boardId, cardId);
+        // Its reactions are the open card's, read with it there.
+        const {
+          body: _body,
+          reactions: _reactions,
+          ...card
+        } = await backend.card(store.boardId, cardId);
         return card;
       },
       own,

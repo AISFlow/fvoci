@@ -380,8 +380,10 @@
                   onclick={() => {
                     resetImportSession();
                     onOpenRecords();
-                  }}>{m.audit_title()}</Button
+                  }}
                 >
+                  {m.audit_title()}
+                </Button>
               </div>
               <p class="text-xs text-muted-foreground">{m.audit_description()}</p>
             </section>

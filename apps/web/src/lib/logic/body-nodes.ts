@@ -44,8 +44,8 @@ export const DIFF_MARK = 'diff';
  */
 export type InlineChange = 'added' | 'removed' | 'format' | 'break';
 
-/** The kinds of block whose content is inline. */
-export const TEXTBLOCKS = new Set(['paragraph', 'heading', 'codeBlock']);
+/** The kinds of block whose content is inline (a toggle's summary is one). */
+export const TEXTBLOCKS = new Set(['paragraph', 'heading', 'codeBlock', 'detailsSummary']);
 
 /** The kinds of node that are one thing and not text: each counts as one word. */
 const ATOMS = new Set([

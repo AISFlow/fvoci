@@ -7,12 +7,18 @@
  * their switch of comments on (`notifyComments`).
  *
  * What happens to one card or page within an hour of the first of it joins
- * that notification, counted, by the latest, and unread again. Mentions and
- * cards given tell nothing here: the server's tests hold those.
+ * that notification, counted, by the latest, and unread again, back in the
+ * inbox if it was put away. Mentions and cards given tell nothing here: the
+ * server's tests hold those.
  */
 import { notifies } from '../../logic/notify-settings.ts';
 import type { Paging } from '../trash-reads.ts';
-import type { Notification, NotificationKind, Notifications } from '../notification-types.ts';
+import type {
+  Notification,
+  NotificationFilter,
+  NotificationKind,
+  Notifications,
+} from '../notification-types.ts';
 
 import { settingsOf } from './account.ts';
 import { reads } from './container-access.ts';
@@ -40,6 +46,8 @@ export interface StoredNotification {
   createdAt: number;
   updatedAt: number;
   readAt: number;
+  /** When it was put away; 0 (or left out) while it is in the inbox. */
+  archivedAt?: number;
 }
 
 /**
@@ -106,6 +114,7 @@ export function noteComment(world: World, comment: StoredBlock): void {
       if (!same.doers.includes(comment.createdBy)) same.doers.push(comment.createdBy);
       same.updatedAt = now;
       same.readAt = 0;
+      same.archivedAt = 0;
     } else {
       theirs.push({
         id: world.newId(),
@@ -214,11 +223,21 @@ export class MemoryNotifications implements Notifications {
     return this.#world.notifications.get(this.#userId) ?? [];
   }
 
-  async list(paging: Paging = { page: 0, perPage: 50 }): Promise<Notification[]> {
+  async list(
+    paging: Paging = { page: 0, perPage: 50 },
+    filter: NotificationFilter = {},
+  ): Promise<Notification[]> {
     await this.#enter();
-    const newest = [...this.#theirs].sort((a, b) => b.updatedAt - a.updatedAt);
+    const taken = this.#theirs.filter(
+      (one) =>
+        (one.archivedAt ?? 0) > 0 === (filter.archived ?? false) &&
+        (!filter.unread || one.readAt === 0) &&
+        (!filter.kind || (one.kind ?? 'comment') === filter.kind),
+    );
+    const newest = taken.sort((a, b) => b.updatedAt - a.updatedAt);
     const start = paging.page * paging.perPage;
-    return newest.slice(start, start + paging.perPage).map((one) => this.#shown(one));
+    const shown = newest.slice(start, start + paging.perPage).map((one) => this.#shown(one));
+    return filter.kind ? shown.filter((one) => one.subject !== null) : shown;
   }
 
   async unread(): Promise<number> {
@@ -245,23 +264,63 @@ export class MemoryNotifications implements Notifications {
     if (read.length > 0) this.#world.tellUsers([this.#userId], { kind: 'notifications' });
   }
 
+  async markUnread(notificationId: string): Promise<void> {
+    await this.#change(notificationId, (one) => {
+      one.readAt = 0;
+      one.archivedAt = 0;
+    });
+  }
+
+  async archive(notificationId: string): Promise<void> {
+    const now = this.#world.now();
+    await this.#change(notificationId, (one) => {
+      if (one.readAt === 0) one.readAt = Math.max(now, one.updatedAt);
+      if (!one.archivedAt) one.archivedAt = now;
+    });
+  }
+
+  async unarchive(notificationId: string): Promise<void> {
+    await this.#change(notificationId, (one) => {
+      one.archivedAt = 0;
+    });
+  }
+
+  async archiveRead(): Promise<void> {
+    await this.#enter();
+    const now = this.#world.now();
+    const archived = this.#theirs.filter((one) => one.readAt !== 0 && !one.archivedAt);
+    for (const one of archived) one.archivedAt = now;
+    if (archived.length > 0) this.#world.tellUsers([this.#userId], { kind: 'notifications' });
+  }
+
+  /** Changes one of the reader's, and tells them; 404 for one that is not theirs, or none. */
+  async #change(notificationId: string, change: (one: StoredNotification) => void): Promise<void> {
+    await this.#enter();
+    const one = this.#theirs.find((each) => each.id === notificationId);
+    if (!one) fail(404, 'no such notification');
+    change(one);
+    this.#world.tellUsers([this.#userId], { kind: 'notifications' });
+  }
+
   /** A notification as its reader is told it now: nothing of what they do not read. */
   #shown(one: StoredNotification): Notification {
     const world = this.#world;
     const { id, createdAt, updatedAt, readAt } = one;
+    const archivedAt = one.archivedAt ?? 0;
     if (one.kind === 'meeting_upcoming') {
       const container = world.containers.get(one.containerId);
       const meeting = (world.courseMeetings.get(one.containerId) ?? []).find(
         (each) => each.id === one.blockId,
       );
       if (!container || !meeting || !reads(world, this.#userId, container.id)) {
-        return { id, createdAt, updatedAt, readAt, subject: null };
+        return { id, createdAt, updatedAt, readAt, archivedAt, subject: null };
       }
       return {
         id,
         createdAt,
         updatedAt,
         readAt,
+        archivedAt,
         subject: {
           kind: 'meeting_upcoming',
           actorId: '',
@@ -280,13 +339,14 @@ export class MemoryNotifications implements Notifications {
     if (one.kind === 'added_to_container') {
       const container = world.containers.get(one.containerId);
       if (!container || !reads(world, this.#userId, container.id)) {
-        return { id, createdAt, updatedAt, readAt, subject: null };
+        return { id, createdAt, updatedAt, readAt, archivedAt, subject: null };
       }
       return {
         id,
         createdAt,
         updatedAt,
         readAt,
+        archivedAt,
         subject: {
           kind: 'added_to_container',
           actorId: one.actorId,
@@ -306,7 +366,7 @@ export class MemoryNotifications implements Notifications {
     const block = world.blocks.get(one.blockId);
     const container = world.containers.get(block?.containerId ?? '');
     if (!block || !container || !reads(world, this.#userId, container.id)) {
-      return { id, createdAt, updatedAt, readAt, subject: null };
+      return { id, createdAt, updatedAt, readAt, archivedAt, subject: null };
     }
     const comment = one.commentId ? world.blocks.get(one.commentId) : undefined;
     const kind = one.kind ?? 'comment';
@@ -333,6 +393,6 @@ export class MemoryNotifications implements Notifications {
             ? comment.id
             : '',
     };
-    return { id, createdAt, updatedAt, readAt, subject };
+    return { id, createdAt, updatedAt, readAt, archivedAt, subject };
   }
 }

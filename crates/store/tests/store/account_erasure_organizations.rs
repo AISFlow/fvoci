@@ -588,6 +588,53 @@ async fn the_instances_own_organization_does_not_go_with_an_account() {
     test.teardown().await;
 }
 
+/// An account that is alone in two organizations takes both along: the erasing waits
+/// for whoever is on the way into either, the providers of both before the links of
+/// either, as the order of the locks has them.
+#[tokio::test]
+async fn an_account_alone_in_two_organizations_takes_both_along() {
+    if common::db_type() != DbType::Postgres {
+        return;
+    }
+    let test = common::setup().await;
+    let system = test.system();
+    let operator = common::user(&system, "operator").await;
+    system
+        .execute_unchecked(&format!(
+            "UPDATE users SET is_admin = true WHERE id = '{operator}'"
+        ))
+        .await
+        .expect("set");
+    founder(&test).await;
+    let leaver = common::user(&test, "leaver").await;
+    let mut alone = Vec::new();
+    for name in ["First alone", "Second alone"] {
+        let (org, workspace) = common::organization(&system, name).await;
+        let store = test.for_org(&org).expect("an organization");
+        store
+            .add_organization_member(&leaver, OrgRole::Admin)
+            .await
+            .expect("its administrator");
+        store
+            .add_workspace_member(&workspace, &leaver, WorkspaceRole::Admin)
+            .await
+            .expect("let in");
+        link_by(&store, &workspace, &leaver, name).await;
+        alone.push(org);
+    }
+
+    erase(&test, &leaver, Erasing::AtOnce, T0).await;
+    let left = system
+        .texts_unchecked(&format!(
+            "SELECT CAST(id AS TEXT) FROM organizations WHERE id IN ('{}', '{}')",
+            alone[0], alone[1]
+        ))
+        .await
+        .expect("read");
+    assert_eq!(left, NOBODY, "both went with the account");
+    test.teardown().await;
+}
+
 /// An organization that is out of use to go with one account is not taken along, nor
 /// put back in use, by the erasing of another that has something left in it: it is
 /// the first's to go with.

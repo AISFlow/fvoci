@@ -3,10 +3,10 @@
  * and rows. The document holds each cell's two spans and nothing else of its
  * look (`schema.ts`): no widths, no alignment.
  *
- * A table stands only in the document itself, not among the blocks of a
- * quote, a list entry or a cell, so that no table is in another: a cell
- * holds blocks, and so does a list entry in a cell. Its grid is filled when
- * it is stored (`table-grid.ts`).
+ * A table stands only in the document itself and in what a toggle hides
+ * (details.ts), not among the blocks of a quote, a list entry, a callout or
+ * a cell, so that no table is in another: a cell holds blocks, and so does a
+ * list entry in a cell. Its grid is filled when it is stored (`table-grid.ts`).
  *
  * The table plugin pads a table that does not fill its grid after a change.
  * Here it does so after the reader's own change only, and only while no
@@ -26,17 +26,18 @@ import { fromShared } from './shared-place.ts';
 import { isPastLimits, tablePaste } from './table-paste.ts';
 import { allowedSpan, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS } from './table-grid.ts';
 
-/** The group of what stands only in the document itself. */
-const DOCUMENT_ONLY = 'documentBlock';
+/** The group of what stands only in the document itself and in what a toggle hides. */
+export const DOCUMENT_ONLY = 'documentBlock';
 
-/** The document: blocks, and tables. */
+/** The document: blocks, and tables, toggles and callouts. */
 export const BodyDocument = Document.extend({ content: `(block | ${DOCUMENT_ONLY})+` });
 
-/** The tables of a document, which stand only in it. */
+/** The tables of a document, in it and in its toggles (in no table, list or quote). */
 function tablesOf(doc: DocumentNode): DocumentNode[] {
   const tables: DocumentNode[] = [];
-  doc.forEach((node) => {
+  doc.descendants((node) => {
     if (node.type.spec.tableRole === 'table') tables.push(node);
+    return node.type.name === 'details' || node.type.name === 'detailsContent';
   });
   return tables;
 }

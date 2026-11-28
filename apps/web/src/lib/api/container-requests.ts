@@ -21,7 +21,7 @@ import {
   containerOf,
   containerPatchOf,
   memberOf,
-  newBoardAndViewOf,
+  newBoardOf,
   publicLinkOf,
   viewOf,
   type Schemas,
@@ -55,47 +55,22 @@ export class ServerContainers {
     draft: BoardDraft,
     firstView: ViewDraft,
   ): Promise<{ board: Container; view: BoardView }> {
-    if (draft.scaffold) {
-      const request: Schemas['NewBoard'] = {
-        visibility: draft.visibility ?? 'private',
-        title: draft.title,
-        description: draft.description ?? '',
-        icon: draft.icon ?? '',
-        scaffold: true,
-      };
-      const rawBoard = await this.#deps.inWorkspace<Schemas['Container']>(
-        '/boards',
-        {},
-        { method: 'POST', json: request },
-        workspaceId,
-      );
-      const board = containerOf(rawBoard);
-      this.#deps.learnPlaces([board]);
-      const blocks = await this.#deps.inWorkspace<Schemas['Block'][]>(
-        '/boards/{boardId}/blocks',
-        { boardId: board.id },
-        { query: { type: 'view' } },
-        workspaceId,
-      );
-      const rawView = blocks[0];
-      if (!rawView) throw new BackendError(500, { detail: 'the server made no view' });
-      const view = viewOf(rawView);
-      this.#deps.learnView(view);
-      return { board, view };
-    }
-    const request = newBoardAndViewOf(draft, firstView);
-    const made = await this.#deps.inWorkspace<Schemas['ContainersAndBlocks']>(
-      '/containers-and-blocks',
+    const rawBoard = await this.#deps.inWorkspace<Schemas['Container']>(
+      '/boards',
       {},
-      { method: 'POST', json: request },
+      { method: 'POST', json: newBoardOf(draft, firstView) },
       workspaceId,
     );
-    const [rawBoard] = made.containers;
-    const rawView = made.blocks.find((block) => block.type === 'view');
-    if (!rawBoard || !rawView) throw new BackendError(500, { detail: 'the server made no board' });
     const board = containerOf(rawBoard);
-    const view = viewOf(rawView);
     this.#deps.learnPlaces([board]);
+    const [rawView] = await this.#deps.inWorkspace<Schemas['Block'][]>(
+      '/boards/{boardId}/views',
+      { boardId: board.id },
+      {},
+      workspaceId,
+    );
+    if (!rawView) throw new BackendError(500, { detail: 'the server made no view' });
+    const view = viewOf(rawView);
     this.#deps.learnView(view);
     return { board, view };
   }

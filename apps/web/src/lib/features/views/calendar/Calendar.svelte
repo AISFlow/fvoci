@@ -392,10 +392,14 @@
           onpick={pick}
           onmove={(by: number) => void move(by)}
         />
-        <!-- Room at the bottom for the round "New" of a folded header, which would cover the last line. -->
+        <!--
+          Room at the bottom for the round "New" of a folded header, which would cover the last line.
+          The two cards' room is the list's own, above that room (content-box): a low window, a
+          header with a row of quick filters, still has the list clear of "New" when scrolled down.
+        -->
         <div
           class={[
-            'flex min-h-36 flex-1 flex-col border-t',
+            'box-content flex min-h-36 flex-1 flex-col border-t',
             board.canEdit ? 'pb-[calc(var(--safe-bottom)+5rem)]' : 'pb-(--safe-bottom)',
           ]}
         >

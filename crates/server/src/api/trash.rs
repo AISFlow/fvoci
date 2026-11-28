@@ -24,7 +24,7 @@ pub(super) fn routes() -> OpenApiRouter<App> {
 /// The deleted cards of a board
 ///
 /// One page of the board's cards that are in the trash, each with its identifier, its
-/// title, when it was deleted and by whom; `restoreBlock` brings one back until the
+/// title, when it was deleted and by whom; `batchRestoreCards` brings one back until the
 /// trash is emptied of it. A card that went with the block it was on (another card, a
 /// view) comes back with that block, and is not listed. For the board's editors. The
 /// last deleted first; the pages cut that order.

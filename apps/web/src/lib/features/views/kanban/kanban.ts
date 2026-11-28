@@ -1,7 +1,8 @@
 /**
  * What the kanban works out without a page: the names its columns go by
- * while dragging, where a drop lands, which cards a click selects, and what
- * a view's lists of columns become when one is hidden, shown or moved.
+ * while dragging, where a drop lands, and what a view's lists of columns
+ * become when one is hidden, shown or moved. Which cards a click selects is
+ * the views' (../selection.svelte.ts).
  */
 import { moveItems, type ListOrder } from '$lib/logic/drop-target.ts';
 import type { BoardGroup } from '$lib/logic/group.ts';
@@ -65,9 +66,6 @@ export function listsAfterDrop(
   }));
 }
 
-/** What a press on a card asks for: the card opened, taken into the selection, or the range up to it. */
-export type Activation = 'open' | 'toggle' | 'range';
-
 /**
  * The "…" button of a card on a board or in a gallery: a plain element with
  * the ghost icon button's classes instead of a component wrapper per card.
@@ -81,29 +79,6 @@ export interface MoveTarget {
   name: string;
   /** The card is in it now. */
   current: boolean;
-}
-
-/** A selection with one card taken in, or taken out when it was in. */
-export function toggled(selected: readonly string[], cardId: string): string[] {
-  return selected.includes(cardId) ? selected.filter((id) => id !== cardId) : [...selected, cardId];
-}
-
-/**
- * A selection grown by a range: every card from `anchor` to `cardId` in the
- * order the board shows them (column by column, top to bottom). Without an
- * anchor on the board the card alone is added.
- */
-export function withRange(
-  order: readonly string[],
-  selected: readonly string[],
-  anchor: string | undefined,
-  cardId: string,
-): string[] {
-  const from = anchor === undefined ? -1 : order.indexOf(anchor);
-  const to = order.indexOf(cardId);
-  if (to === -1) return [...selected];
-  const range = from === -1 ? [cardId] : order.slice(Math.min(from, to), Math.max(from, to) + 1);
-  return [...selected, ...range.filter((id) => !selected.includes(id))];
 }
 
 /** What a view says about its columns. */

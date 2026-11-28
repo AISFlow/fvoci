@@ -2,6 +2,8 @@
  * What the property components are given. They take values and callbacks
  * only: nothing here reads a store or talks to a server.
  */
+import type { Snippet } from 'svelte';
+
 import type { Presentation } from '$lib/components/picker-surface/presentation.ts';
 import type { PersonName } from '$lib/logic/person-names.ts';
 import type { Regional } from '$lib/logic/regional.ts';
@@ -90,6 +92,8 @@ export interface PropertyValueProps extends OptionCallbacks, ReaderContext {
    * a loop is not offered. A loop that is there already is only shown.
    */
   preventLoops?: boolean;
+  /** More of a date's picker, under its switches: how a card repeats, under its due date. */
+  dateExtra?: Snippet | undefined;
   /** Puts a text on the clipboard; defaults to the browser's clipboard. */
   copyText?: (text: string) => void | Promise<void>;
   /**

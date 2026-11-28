@@ -27,12 +27,13 @@ const EVERY: Paging = Paging {
 
 /// The tables that hold who is where, and what they follow, counted together: what a
 /// refused leaving leaves as it was.
-const PLACES: [&str; 7] = [
+const PLACES: [&str; 8] = [
     "organization_members",
     "workspace_members",
     "container_members",
     "team_members",
     "subscriptions",
+    "reactions",
     "invitations",
     "audit_log",
 ];
@@ -106,7 +107,7 @@ async fn course_with_progress(
         )
         .await
         .expect("unit stored")
-        .unit;
+        .first;
     store
         .upsert_unit_progress(
             &course.id,
@@ -266,6 +267,13 @@ async fn places_of(test: &TestStore, org_id: &str, user_id: &str) -> Vec<String>
             ),
         ),
         (
+            "reactions",
+            format!(
+                "user_id = '{user_id}' AND block_id IN \
+                 (SELECT id FROM blocks WHERE container_id IN ({of_org_boards}))"
+            ),
+        ),
+        (
             "unit_progress",
             format!("user_id = '{user_id}' AND container_id IN ({of_org_boards})"),
         ),
@@ -346,6 +354,9 @@ async fn placed_everywhere(test: &TestStore) -> Placed {
     let (founders, founders_card) = board_of(test, &workspace, &founder).await;
     follow(test, &their_card, &leaver).await;
     follow(test, &founders_card, &leaver).await;
+    test.add_reaction(&founders_card, &leaver, &"👍".parse().expect("an emoji"))
+        .await
+        .expect("reacted");
     course_with_progress(test, &workspace, &founder, &leaver, "org-pos").await;
     let team = test
         .create_team(&workspace, "Design", &founder)
@@ -477,6 +488,7 @@ async fn whoever_leaves_has_nothing_left_in_the_organization_but_what_they_wrote
             "container_members: 0",
             "team_members: 0",
             "subscriptions: 0",
+            "reactions: 0",
             "unit_progress: 0",
             "exam_scores: 0",
             "unit_reviews: 0",
@@ -790,6 +802,7 @@ async fn an_account_without_a_password_cannot_leave_but_can_be_removed() {
             "container_members: 0",
             "team_members: 0",
             "subscriptions: 0",
+            "reactions: 0",
             "unit_progress: 0",
             "exam_scores: 0",
             "unit_reviews: 0",
@@ -856,6 +869,7 @@ async fn an_administrator_removes_a_member_completely_and_records_audit() {
             "container_members: 0",
             "team_members: 0",
             "subscriptions: 0",
+            "reactions: 0",
             "unit_progress: 0",
             "exam_scores: 0",
             "unit_reviews: 0",

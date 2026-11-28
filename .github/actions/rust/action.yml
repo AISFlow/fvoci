@@ -21,7 +21,7 @@ runs:
     - name: Install the toolchain
       shell: bash
       env:
-        TOOLCHAIN: 1.99.1
+        TOOLCHAIN: 1.100.0
       run: |
         rustup toolchain install "$TOOLCHAIN" --profile minimal \
           --component clippy,rustfmt --no-self-update

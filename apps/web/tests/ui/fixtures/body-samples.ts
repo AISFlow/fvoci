@@ -92,6 +92,14 @@ export const SAMPLES: Record<'everything', DocNode> = {
         text(' 를 씁니다.'),
       ),
       { type: 'blockMath', attrs: { latex: '\\int_0^1 x^2 \\, dx = \\frac{1}{3}' } },
+      {
+        type: 'details',
+        content: [
+          { type: 'detailsSummary', content: [text('접어 둔 답')] },
+          { type: 'detailsContent', content: [paragraph(text('펼치면 보입니다.'))] },
+        ],
+      },
+      { type: 'callout', attrs: { tone: 'tip' }, content: [paragraph(text('알아 두면 좋은 점.'))] },
     ],
   },
 };

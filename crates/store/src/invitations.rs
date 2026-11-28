@@ -19,14 +19,14 @@ use fvoci_model::{
 use crate::accounts::{self, Which};
 use crate::audit::{self, AuditEntry};
 use crate::containers::{find_member, save_member};
-use crate::db::{Dialect, Id, OptId, Param, Row, Scope, Sql};
+use crate::db::{FromRow, Id, LockRank, OptId, Param, Row, RowLock, Scope, Sql};
 use crate::error::{StoreError, Taken};
 use crate::link_locks::{self, Turn};
 use crate::trash::{self, TrashedRoles};
 use crate::{Standing, Store, signups};
 use fvoci_model::InstanceRole;
 
-/// The columns of an invitation, in the order [`invitation_from_row`] reads them.
+/// The columns of an invitation, in the order [`Invitation::from_row`] reads them.
 const COLUMNS: &str = "id, workspace_id, role, container_id, container_role, created_by, created_at, \
                        expires_at, max_uses, uses, parent_id, recipient";
 /// [`COLUMNS`] of the table as `i`.
@@ -200,8 +200,7 @@ impl Store {
                 )
                 .push([") RETURNING ", COLUMNS]);
             // An insert that returns no row has failed already.
-            let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-            invitation_from_row(&row)
+            scope.first(sql).await?.ok_or(StoreError::NoRows)
         })
         .await
     }
@@ -223,12 +222,7 @@ impl Store {
     ) -> Result<Option<Invitation>, StoreError> {
         self.with_conn(async |scope| {
             let sql = select_live_by_token(scope, token_hash, now, replacing)?;
-            scope
-                .fetch_optional(sql)
-                .await?
-                .as_ref()
-                .map(invitation_from_row)
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -254,12 +248,7 @@ impl Store {
                 sql.push_bind(" AND i.created_by = ", Id(user_id));
             }
             sql.push(" ORDER BY i.created_at DESC, i.id DESC");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(invitation_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -335,12 +324,7 @@ impl Store {
                 .push_bind(" AND i.token_hash = ", token_hash)
                 .push_bind(" AND i.revoked_at = ", 0_i64)
                 .push_bind(" AND i.expires_at > ", now);
-            scope
-                .fetch_optional(sql)
-                .await?
-                .as_ref()
-                .map(invitation_from_row)
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -436,10 +420,9 @@ pub(crate) async fn hold_live_link(
     // What the link hangs from before the link, its invitation and membership: the
     // acceptor's role then stays what was read until its write.
     let sql = select_live_by_token(scope, token_hash, now, browser)?;
-    let Some(row) = scope.fetch_optional(sql).await? else {
+    let Some(link) = scope.first::<Invitation>(sql).await? else {
         return Ok(Err(Acceptance::Unavailable));
     };
-    let link = invitation_from_row(&row)?;
     if !link_locks::hold_for_letting_in(scope, &link, turn).await? {
         return Ok(Err(Acceptance::Unavailable));
     }
@@ -447,13 +430,10 @@ pub(crate) async fn hold_live_link(
     // it is live still, and its workspace still invites guests if it is for one.
     let mut sql = select_live_by_token(scope, token_hash, now, browser)?;
     push_invites(&mut sql);
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE OF i");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
+    sql.push_lock(scope.row_lock(LockRank::Invitation, &link.id, RowLock::Update.of("i")));
+    let Some(link) = scope.first::<Invitation>(sql).await? else {
         return Ok(Err(Acceptance::Unavailable));
     };
-    let link = invitation_from_row(&row)?;
     if !inviter_still(scope, &link, found).await? {
         return Ok(Err(Acceptance::InviterChanged));
     }
@@ -594,10 +574,12 @@ pub(crate) async fn inviter_still(
     trash::hold_deleted_containers(scope, &link.workspace_id).await?;
     let mut sql = scope.sql("SELECT role FROM workspace_members WHERE workspace_id = ");
     sql.bind(Id(&link.workspace_id))
-        .push_bind(" AND user_id = ", Id(&link.created_by));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE");
-    }
+        .push_bind(" AND user_id = ", Id(&link.created_by))
+        .push_lock(scope.row_lock(
+            LockRank::WorkspaceMembers,
+            &format!("{}:{}", link.workspace_id, link.created_by),
+            RowLock::Share,
+        ));
     let role =
         match scope.fetch_optional(sql).await? {
             Some(row) => Some(row.text(0)?.parse::<WorkspaceRole>().map_err(|error| {
@@ -646,7 +628,7 @@ async fn let_in_as_guest(
     let mut sql = scope.sql("SELECT 1 FROM workspace_members WHERE workspace_id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         forget_container_roles(scope, workspace_id, user_id).await?;
     }
     let joined = accounts::join_workspace(
@@ -772,35 +754,37 @@ pub(crate) fn push_live(sql: &mut Sql, now: i64) {
     push_live_but_for(sql, now, None);
 }
 
-pub(crate) fn invitation_from_row(row: &Row) -> Result<Invitation, StoreError> {
-    let corrupt = |column: &'static str| {
-        move |error: fvoci_model::UnknownRole| StoreError::Corrupt {
-            column,
-            reason: error.to_string(),
-        }
-    };
-    let container_id = row.id(3)?;
-    let container_role = row.text(4)?;
-    let max_uses = row.int(8)?;
-    Ok(Invitation {
-        id: row.id(0)?,
-        workspace_id: row.id(1)?,
-        role: row.text(2)?.parse().map_err(corrupt("role"))?,
-        container_id: (!container_id.is_empty()).then_some(container_id),
-        container_role: if container_role.is_empty() {
-            None
-        } else {
-            Some(container_role.parse().map_err(corrupt("container_role"))?)
-        },
-        created_by: row.id(5)?,
-        created_at: row.int(6)?,
-        expires_at: row.int(7)?,
-        // No link may be used zero times: a column without a number is one without
-        // such an end.
-        max_uses: (max_uses > 0).then_some(max_uses),
-        uses: row.int(9)?,
-        parent_id: Some(row.id(10)?).filter(|id| !id.is_empty()),
-        recipient: Some(row.text(11)?).filter(|recipient| !recipient.is_empty()),
-        token: None,
-    })
+impl FromRow for Invitation {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let corrupt = |column: &'static str| {
+            move |error: fvoci_model::UnknownRole| StoreError::Corrupt {
+                column,
+                reason: error.to_string(),
+            }
+        };
+        let container_id = row.id(3)?;
+        let container_role = row.text(4)?;
+        let max_uses = row.int(8)?;
+        Ok(Invitation {
+            id: row.id(0)?,
+            workspace_id: row.id(1)?,
+            role: row.text(2)?.parse().map_err(corrupt("role"))?,
+            container_id: (!container_id.is_empty()).then_some(container_id),
+            container_role: if container_role.is_empty() {
+                None
+            } else {
+                Some(container_role.parse().map_err(corrupt("container_role"))?)
+            },
+            created_by: row.id(5)?,
+            created_at: row.int(6)?,
+            expires_at: row.int(7)?,
+            // No link may be used zero times: a column without a number is one without
+            // such an end.
+            max_uses: (max_uses > 0).then_some(max_uses),
+            uses: row.int(9)?,
+            parent_id: Some(row.id(10)?).filter(|id| !id.is_empty()),
+            recipient: Some(row.text(11)?).filter(|recipient| !recipient.is_empty()),
+            token: None,
+        })
+    }
 }

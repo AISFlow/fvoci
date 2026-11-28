@@ -54,6 +54,7 @@
     cards = NO_CARDS,
     onOpenCard,
     preventLoops = false,
+    dateExtra,
   }: PropertyValueProps = $props();
 
   const type = $derived(template.type);
@@ -148,6 +149,7 @@
     {presentation}
     startOpen={open}
     onChange={change}
+    extra={dateExtra}
   />
 {:else if type === 'person' || type === 'multiPerson'}
   <PersonProperty

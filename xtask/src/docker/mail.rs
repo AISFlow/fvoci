@@ -542,8 +542,7 @@ fn check_request(keys: &Keys, provider: Provider, request: &str) -> Result<()> {
         .lines()
         .filter_map(|line| line.split_once(':'))
         .find(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
-        .map(|(_, value)| value.trim())
-        .unwrap_or_default();
+        .map_or_default(|(_, value)| value.trim());
     ensure!(
         given.contains(&authorization),
         "{provider:?}: the message's Authorization does not carry the keys given"

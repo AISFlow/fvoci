@@ -53,8 +53,10 @@
     data-testid="sso-former-end"
     onclick={() => {
       confirming = true;
-    }}>{m.org_sso_former_end()}</Button
+    }}
   >
+    {m.org_sso_former_end()}
+  </Button>
 </section>
 
 <ConfirmDialog

@@ -76,7 +76,7 @@ async fn a_guest_opens_only_the_boards_it_was_invited_to() {
     // `/containers`.
     for (under, path) in [
         ("containers", ""),
-        ("boards", "/blocks"),
+        ("boards", "/views"),
         ("boards", "/cards"),
         ("containers", "/members"),
     ] {

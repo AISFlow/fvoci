@@ -57,10 +57,12 @@ it('names the writer of a kept comment revision, including its readable trash hi
     block.modifiedBy = backend.userId;
   }
   const comment = await other.createComment(board.id, card.id, text('Earlier'));
-  await backend.patchComment(board.id, comment.id, {
-    body: text('Current'),
-    readAt: comment.updatedAt,
-  });
+  await backend.patchComment(
+    board.id,
+    comment.id,
+    { body: text('Current'), readAt: comment.updatedAt },
+    card.id,
+  );
   const stored = world.blocks.get(comment.id);
   assert(stored);
   stored.createdBy = backend.userId;
@@ -71,7 +73,7 @@ it('names the writer of a kept comment revision, including its readable trash hi
   );
   const ids = [other.userId];
   expect((await backend.usersById(world.workspace.id, ids)).map((user) => user.id)).toEqual(ids);
-  await backend.deleteBlock(board.id, comment.id);
+  await backend.deleteComment(board.id, card.id, comment.id);
   expect((await backend.usersById(world.workspace.id, ids)).map((user) => user.id)).toEqual(ids);
   world.commentVersions.delete(comment.id);
   expect(await backend.usersById(world.workspace.id, ids)).toEqual([]);

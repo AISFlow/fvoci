@@ -3,8 +3,8 @@
 use axum::body::Bytes;
 use axum::extract::Path;
 use fvoci_model::{
-    Block, BlockType, BodyChange, BodyVersion, BodyVersionContent, Card, CardError, CardPatch,
-    CompactCard, KeptBodyVersion, RefusalReason, Refusals,
+    Block, BlockType, BodyVersion, BodyVersionContent, Card, CardPatch, CardWithReactions,
+    CompactCard, KeptBodyVersion,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -24,17 +24,17 @@ use super::query::{DisableNotifyQuery, QueryParams, int_param, paging_from_strin
 use super::workspace::InWorkspace;
 use super::{Delegated, Read, Write};
 
-use super::blocks::BLOCK_FIELDS;
 use super::body_versions::{
-    get_body_version, keep_body_version, list_body_versions, restore_body_version,
+    body_version_of, body_versions_of, keep_body_version_of, restore_body_version_of,
 };
-use super::{ApiResult, TRUE, created, json_response};
+use super::items::{CardItem, ItemOf};
+use super::{ApiResult, BLOCK_FIELDS, TRUE, created, json_response};
 use super::{decode_with_document, require_container_permission, require_permission_through};
 use crate::app::{
-    App, CardPreviews, CardsFilter, CardsOrder, CardsUnder, ChangeNotification, body_of_markdown,
+    App, CREATE_CARD_DENIED, CardPreviews, CardsFilter, CardsOrder, CardsUnder, ChangeNotification,
+    NewCardRequest, PATCH_CARD_DENIED, Reached,
 };
-use crate::auth::now_millis;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 use crate::permissions::ContainerPermission;
 
 /// How a card's body is given (`format`).
@@ -46,10 +46,12 @@ pub(super) enum BodyFormatValue {
     Markdown,
 }
 
+/// The query of what is read with its body as `format` says (`getCard`, `getPage`,
+/// `getUnit`).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct CardQuery {
-    format: BodyFormatValue,
+pub(super) struct BodyQuery {
+    pub(super) format: BodyFormatValue,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,29 +154,6 @@ pub(super) fn routes() -> OpenApiRouter<App> {
 ///
 /// The path names a card and no board. So for a user who may not read the card's board
 /// there is no such card, and neither is there for anyone if the block is no card.
-/// Where a request sent the body it writes: `/bodyMarkdown` if it sent Markdown.
-fn body_member(markdown: Option<&String>) -> &'static str {
-    if markdown.is_some() {
-        "/bodyMarkdown"
-    } else {
-        "/body"
-    }
-}
-
-/// Refuses a request that sends a body both as `body` and as `bodyMarkdown`.
-fn refuse_both_bodies(body: &BodyChange) -> Result<(), AppError> {
-    if body.is_keep() {
-        return Ok(());
-    }
-    let mut refused = Refusals::new();
-    refused.refuse(
-        "bodyMarkdown",
-        RefusalReason::Invalid,
-        "a body is sent as body or as bodyMarkdown, not as both",
-    );
-    Err(refused.into())
-}
-
 pub(super) async fn card_with_permission(
     app: &App,
     user_id: &str,
@@ -182,17 +161,28 @@ pub(super) async fn card_with_permission(
     permission: ContainerPermission,
     denial: &str,
 ) -> Result<Block, AppError> {
+    let (_, block) = card_reached(app, user_id, card_id, permission, denial).await?;
+    Ok(block)
+}
+
+/// The card's board as the user reached it and the card, as [`card_with_permission`]
+/// finds them: for a route that writes the card, which the board's [`Reached`] is asked
+/// for.
+pub(super) async fn card_reached(
+    app: &App,
+    user_id: &str,
+    card_id: &str,
+    permission: ContainerPermission,
+    denial: &str,
+) -> Result<(Reached, Block), AppError> {
     const WHAT: &str = "card";
-    let block = match app.block(card_id).await {
-        Ok(block) => block,
-        Err(error) if error.is_not_found() => return Err(AppError::not_found(WHAT)),
-        Err(error) => return Err(error),
-    };
-    require_permission_through(app, user_id, &block.container_id, permission, denial, WHAT).await?;
+    let block = app.block(card_id).await.or_missing(WHAT)?;
+    let on = app.reach(user_id, &block.container_id).await?;
+    on.require_through(permission, denial, WHAT)?;
     if block.block_type != BlockType::Card {
         return Err(AppError::not_found(WHAT));
     }
-    Ok(block)
+    Ok((on, block))
 }
 
 /// Make a card
@@ -204,6 +194,11 @@ pub(super) async fn card_with_permission(
 /// `null`, or omitted makes a top-level card. Template cards (`isTemplate: true`) cannot
 /// have a parent or sub-cards. Invalid parents or cycles answer 400 at `/parentId`
 /// (depth > 3 with reason `card_too_deep` and `limit: 3`).
+///
+/// `recurrence` makes the card repeat, only on a board with a `doneWhen` and a
+/// `dueDatePropertyId`: elsewhere 400 at `/recurrence` with reason
+/// `recurrence_needs_board_rules`.
+/// A template keeps its recurrence and makes no next card.
 ///
 /// The value of a card relation property (of the `type` `relation`) is `null` or a list
 /// of relation link objects (`{"card": "<cardId>", "kind": "fs" | "ss" | "ff" | "sf",
@@ -217,7 +212,7 @@ pub(super) async fn card_with_permission(
 /// (a block of the board that is no card), `relation_cycle` (ordering dependencies form
 /// a cycle on the board) or `relation_card_not_found`: no card of that
 /// identifier on the board, which is also the answer for a card of another board. Every
-/// write of a card checks so (`patchCard`, the block routes, `createContainersAndBlocks`)
+/// write of a card checks so (`createCard`, `patchCard`, `batchPatchCards`)
 /// the values it changes, and does not ask again for a card that a value named before.
 #[utoipa::path(
     post,
@@ -250,49 +245,48 @@ pub(super) async fn create_card_from(
     body: &Bytes,
     notification: ChangeNotification,
 ) -> Result<Card, AppError> {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        board_id,
-        ContainerPermission::ManageCards,
-        "access denied to create card",
-    )
-    .await?;
-    let (mut card, document): (Card, _) = decode_with_document(body)?;
-    // Everything of the request's shape that is refused, before the store is asked.
-    let mut refused: Refusals = card.check_request().err().unwrap_or_default();
-    if !card.board_id.is_empty() && card.board_id != board_id {
-        refused.refuse(
-            "boardId",
-            RefusalReason::Invalid,
-            CardError::BoardIdMismatch.to_string(),
-        );
-    }
-    refused.into_result()?;
-    let body_at = body_member(card.body_markdown.as_ref());
-    card.body = match card.body_markdown.take() {
-        Some(markdown) => {
-            refuse_both_bodies(&document)?;
-            body_of_markdown(None, &markdown)?.into_body()
-        }
-        None => document.into_body(),
-    };
-    (card.has_complex_blocks, card.complex_blocks) = (None, None);
-    ws.app
-        .check_body_files(board_id, card.body.as_ref())
-        .await
-        .map_err(|error| error.moved("/body", body_at))?;
-    board_id.clone_into(&mut card.board_id);
-    card.populate(now_millis());
-    card.validate().map_err(AppError::bad_request)?;
+    let on = ws.app.reach(&ws.caller.user_id, board_id).await?;
+    // Asked before the body is read, as every route asks.
+    on.require(ContainerPermission::ManageCards, CREATE_CARD_DENIED)?;
+    let (card, document): (Card, _) = decode_with_document(body)?;
+    create_card_as(ws, &on, NewCardRequest { card, document }, notification).await
+}
 
+/// Makes the card `request` describes on the board `board_id`, as `createCard` does with
+/// the body it read: for what writes as the route does.
+///
+/// # Errors
+///
+/// As `createCard` answers.
+pub(super) async fn create_card_with(
+    ws: &InWorkspace,
+    board_id: &str,
+    request: NewCardRequest,
+    notification: ChangeNotification,
+) -> Result<Card, AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, board_id).await?;
+    create_card_as(ws, &on, request, notification).await
+}
+
+/// Makes the card `request` describes on the board `on` reached ([`App::create_card_on`]),
+/// for `createCard` and for what writes as it does.
+///
+/// # Errors
+///
+/// As `createCard` answers.
+pub(super) async fn create_card_as(
+    ws: &InWorkspace,
+    on: &Reached,
+    request: NewCardRequest,
+    notification: ChangeNotification,
+) -> Result<Card, AppError> {
     // What the store refuses of the card's values it names as the block's `fields`.
     let card = ws
         .app
-        .create_card(card, board_id, user_id, notification)
+        .create_card_on(on, request, notification)
         .await
         .map_err(|error| error.moved(BLOCK_FIELDS, "/properties"))?;
+    let (board_id, user_id) = (on.container_id(), on.user_id());
     tracing::debug!(board_id, card_id = %card.id, user_id, "CreateCard");
     Ok(card)
 }
@@ -402,6 +396,10 @@ fn previews_of(query: &CardsListQuery) -> CardPreviews {
 /// top level; left out keeps its current parent), checked for cycles and maximum depth 3
 /// including any sub-cards below it (400 at `/parentId`, `card_too_deep` when depth > 3).
 ///
+/// `recurrence` is checked as `createCard` says (`null` makes the card stop repeating). The
+/// change that makes a card that repeats done makes its next card in the same write, once:
+/// the card names it in `recurredTo` and hands it the recurrence.
+///
 /// `bodyMarkdown` writes the body whole from Markdown, as `getCard` with
 /// `format=markdown` reads it: refused with 409 `complex_blocks_use_append` while the body
 /// has blocks its Markdown does not hold as they are. With a personal API token a body
@@ -440,58 +438,85 @@ pub(super) async fn patch_card_from(
     notification: ChangeNotification,
 ) -> Result<Card, AppError> {
     let user_id = ws.caller.user_id.as_str();
-    let card = card_with_permission(
-        &ws.app,
-        user_id,
-        card_id,
-        ContainerPermission::ManageCards,
-        "access denied to patch card",
-    )
-    .await?;
+    let editing = ContainerPermission::ManageCards;
+    let (on, card) = card_reached(&ws.app, user_id, card_id, editing, PATCH_CARD_DENIED).await?;
     // The block, read to check the permission, is the card as it was.
     let (mut patch, document): (CardPatch, _) = decode_with_document(body)?;
     patch.body = document;
-    let body_at = body_member(patch.body_markdown.as_ref());
-    if let Some(markdown) = patch.body_markdown.take() {
-        refuse_both_bodies(&patch.body)?;
-        patch.body = body_of_markdown(card.body.as_ref(), &markdown)?;
-    }
-    // Everything of the request's shape that is refused, before the store is asked.
-    patch.check_request()?;
-    ws.app
-        .check_body_files(&card.container_id, patch.body.new_body())
-        .await
-        .map_err(|error| error.moved("/body", body_at))?;
+    patch_card_as(ws, &on, &card, patch, notification).await
+}
 
+/// Changes the card `card_id` as `patch` says, as `patchCard` does with the body it read:
+/// for what writes as the route does.
+///
+/// # Errors
+///
+/// As `patchCard` answers.
+pub(super) async fn patch_card_with(
+    ws: &InWorkspace,
+    card_id: &str,
+    patch: CardPatch,
+    notification: ChangeNotification,
+) -> Result<Card, AppError> {
+    let user_id = ws.caller.user_id.as_str();
+    let editing = ContainerPermission::ManageCards;
+    let (on, card) = card_reached(&ws.app, user_id, card_id, editing, PATCH_CARD_DENIED).await?;
+    patch_card_as(ws, &on, &card, patch, notification).await
+}
+
+/// Changes `card` of the board `on` reached as `patch` says ([`App::patch_card_on`]),
+/// as the agent of the caller's token if one writes, for `patchCard` and for what
+/// writes as it does.
+///
+/// # Errors
+///
+/// As `patchCard` answers.
+pub(super) async fn patch_card_as(
+    ws: &InWorkspace,
+    on: &Reached,
+    card: &Block,
+    patch: CardPatch,
+    notification: ChangeNotification,
+) -> Result<Card, AppError> {
     let patched = ws
         .app
-        .patch_card(&patch, &card.id, user_id, notification, ws.caller.agent())
+        .patch_card_on(on, card, patch, notification, ws.caller.agent())
         .await
         .map_err(|error| error.moved(BLOCK_FIELDS, "/updatedProperties"))?;
+    let user_id = on.user_id();
     tracing::debug!(board_id = %patched.board_id, card_id = %patched.id, user_id, "PatchCard");
     Ok(patched)
 }
 
 /// A card
 ///
-/// For the members of the card's board. To a user who is no member of it there is no
-/// such card.
+/// For the members of the card's board, with its `reactions` where it has any. To a
+/// user who is no member of it there is no such card.
 #[utoipa::path(
     get,
     path = "/w/{workspaceId}/cards/{cardId}",
     operation_id = "getCard",
     tag = tag::CARDS,
     params(MemberWorkspaceId, CardId, BodyFormat),
-    responses((status = 200, description = "The card.", body = Card)),
+    responses((status = 200, description = "The card.", body = CardWithReactions)),
 )]
 async fn handle_get_card(
     Delegated(ws, ..): Delegated<Read, InWorkspace>,
     Path((_, card_id)): Path<(String, String)>,
-    QueryParams(query): QueryParams<CardQuery>,
+    QueryParams(query): QueryParams<BodyQuery>,
 ) -> ApiResult {
-    Ok(json_response(
-        &card_read(&ws, &card_id, query.format).await?,
-    ))
+    let card = card_read(&ws, &card_id, query.format).await?;
+    Ok(json_response(&with_its_reactions(&ws, card).await?))
+}
+
+/// The card with the reactions to it, as `getCard` gives it.
+///
+/// # Errors
+///
+/// Returns the store's error.
+async fn with_its_reactions(ws: &InWorkspace, card: Card) -> Result<CardWithReactions, AppError> {
+    let reactions = ws.app.reactions_to(&card.id).await?;
+    Ok(CardWithReactions { card, reactions })
 }
 
 /// The card `card_id`, with its body as `format` says, as `getCard` gives it.
@@ -538,15 +563,14 @@ pub(super) async fn card_read(
     operation_id = "getCardByNumber",
     tag = tag::CARDS,
     params(MemberWorkspaceId, BoardId, CardNumber),
-    responses((status = 200, description = "The card.", body = Card)),
+    responses((status = 200, description = "The card.", body = CardWithReactions)),
 )]
 async fn handle_get_card_by_number(
     Delegated(ws, ..): Delegated<Read, InWorkspace>,
     Path((_, board_id, number)): Path<(String, String, String)>,
 ) -> ApiResult {
-    Ok(json_response(
-        &card_by_number_read(&ws, &board_id, &number).await?,
-    ))
+    let card = card_by_number_read(&ws, &board_id, &number).await?;
+    Ok(json_response(&with_its_reactions(&ws, card).await?))
 }
 
 /// The card of the board `board_id` that has `number`, as `getCardByNumber` gives it.
@@ -585,8 +609,8 @@ pub(super) async fn card_by_number_read(
 /// The server keeps the body of a card as a version each time it changed: when the
 /// last of those who wrote it since the newest version leaves it, at an interval
 /// while it is edited on (its setting `collab_version_minutes`, ten minutes unless
-/// set otherwise), and before and after a write of the whole body (`patchCard` and the
-/// block routes). The newest first, each with when it was kept and who wrote the body
+/// set otherwise), and before and after a write of the whole body (`patchCard`). The
+/// newest first, each with when it was kept and who wrote the body
 /// up to it, without the bodies (`getCardBodyVersion`). The server keeps the newest
 /// of them (its setting `collab_body_versions`, fifty unless set otherwise), so the
 /// numbers may leave the lowest out. Empty for a card whose body never changed since
@@ -603,19 +627,9 @@ pub(super) async fn card_by_number_read(
     responses((status = 200, description = "The versions, the newest first.", body = Vec<BodyVersion>)),
 )]
 async fn handle_get_card_body_versions(
-    Delegated(ws, ..): Delegated<Read, InWorkspace>,
-    Path((_, card_id)): Path<(String, String)>,
+    Delegated(card, ..): Delegated<Read, ItemOf<CardItem>>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let card = card_with_permission(
-        &ws.app,
-        user_id,
-        &card_id,
-        ContainerPermission::View,
-        "access denied to fetch card",
-    )
-    .await?;
-    list_body_versions(&ws.app, &card.id).await
+    body_versions_of(card).await
 }
 
 /// Keep a card's body as a version now
@@ -643,22 +657,8 @@ async fn handle_get_card_body_versions(
     params(MemberWorkspaceId, CardId),
     responses((status = 200, description = "What became of the body.", body = KeptBodyVersion)),
 )]
-async fn handle_keep_card_body_version(
-    ws: InWorkspace,
-    Path((_, card_id)): Path<(String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let card = card_with_permission(
-        &ws.app,
-        user_id,
-        &card_id,
-        ContainerPermission::ManageCards,
-        "access denied to keep a version of the card's body",
-    )
-    .await?;
-    let kept = keep_body_version(&ws.app, &card.id).await?;
-    tracing::debug!(card_id = %card.id, user_id, outcome = ?kept.outcome, "KeepCardBodyVersion");
-    Ok(json_response(&kept))
+async fn handle_keep_card_body_version(card: ItemOf<CardItem>) -> ApiResult {
+    keep_body_version_of(card).await
 }
 
 /// A version kept of a card's body
@@ -675,19 +675,9 @@ async fn handle_keep_card_body_version(
     responses((status = 200, description = "The version.", body = BodyVersionContent)),
 )]
 async fn handle_get_card_body_version(
-    Delegated(ws, ..): Delegated<Read, InWorkspace>,
-    Path((_, card_id, version)): Path<(String, String, String)>,
+    Delegated(card, ..): Delegated<Read, ItemOf<CardItem>>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let card = card_with_permission(
-        &ws.app,
-        user_id,
-        &card_id,
-        ContainerPermission::View,
-        "access denied to fetch card",
-    )
-    .await?;
-    get_body_version(&ws.app, &card.id, &version).await
+    body_version_of(card).await
 }
 
 /// Go back to a version of a card's body
@@ -709,26 +699,6 @@ async fn handle_get_card_body_version(
     params(MemberWorkspaceId, CardId, BodyVersionNumber),
     responses((status = 200, description = "The card as it is now.", body = Card)),
 )]
-async fn handle_restore_card_body_version(
-    ws: InWorkspace,
-    Path((_, card_id, version)): Path<(String, String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let card = card_with_permission(
-        &ws.app,
-        user_id,
-        &card_id,
-        ContainerPermission::ManageCards,
-        "access denied to restore a version of the card's body",
-    )
-    .await?;
-    let block = restore_body_version(&ws.app, &card, &version, user_id).await?;
-    let restored = ws.app.card_of_block(&block).await?;
-    tracing::debug!(
-        board_id = %restored.board_id,
-        card_id = %restored.id,
-        user_id,
-        "RestoreCardBodyVersion"
-    );
-    Ok(json_response(&restored))
+async fn handle_restore_card_body_version(card: ItemOf<CardItem>) -> ApiResult {
+    restore_body_version_of(card).await
 }

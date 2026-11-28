@@ -221,12 +221,13 @@ async fn a_comment_an_agent_writes_names_its_token_and_one_a_person_writes_does_
     th.teardown().await;
 }
 
-/// What a writer sends of the name through the block routes is no one's word: setting it,
-/// dropping it, or making a comment with it changes nothing.
+/// What a writer sends of the name is no one's word: the comment routes take no member
+/// for it (400) when it is set, dropped, or sent with a new comment, and the names stay
+/// as they were.
 #[tokio::test]
 async fn what_a_writer_sends_of_an_agents_name_on_a_comment_changes_nothing() {
     let th = Setup::native().start().await.init_basic().await;
-    let (board_id, card, comments) = a_card_to_comment_on(&th).await;
+    let (_, _, comments) = a_card_to_comment_on(&th).await;
     let agent = agent_writing(&th, &th.client).await;
     let text = paragraphs(&["a word"]);
     let by_agent: Value = agent
@@ -245,40 +246,26 @@ async fn what_a_writer_sends_of_an_agents_name_on_a_comment_changes_nothing() {
             json!({"updatedFields": {"agentTokenName": "forged"}}),
         ),
     ] {
-        th.client
-            .patch(
-                &crate::blocks::block_path(&board_id, &id_of(comment)),
-                &patch,
-            )
-            .await
-            .check_no_content();
+        let response = th
+            .client
+            .patch(&format!("{comments}/{}", id_of(comment)), &patch)
+            .await;
+        response.check_bad_request();
     }
-    let on_card = fvoci_model::Block {
-        id: id_of(&card),
-        container_id: board_id.clone(),
-        ..fvoci_model::Block::default()
-    };
-    let mut forged = crate::blocks::child_of(&on_card, fvoci_model::BlockType::Comment, "");
-    forged.body = fvoci_model::Body::parse(text).expect("a body");
-    forged
-        .fields
-        .insert("agentTokenName".to_owned(), json!("forged"));
-    let forged = crate::blocks::insert_one(&th.client, &forged).await;
-    assert!(
-        !forged.fields.contains_key("agentTokenName"),
-        "{:?}",
-        forged.fields
-    );
+    let forged = th
+        .client
+        .post(
+            &comments,
+            &json!({"body": text, "fields": {"agentTokenName": "forged"}}),
+        )
+        .await;
+    forged.check_bad_request();
     let listed: Vec<Value> = th.client.get(&comments).await.ok_json();
     let names: Vec<&Value> = listed
         .iter()
         .map(|comment| &comment["fields"]["agentTokenName"])
         .collect();
-    assert_eq!(
-        names,
-        [&json!("agent"), &Value::Null, &Value::Null],
-        "{listed:?}"
-    );
+    assert_eq!(names, [&json!("agent"), &Value::Null], "{listed:?}");
 
     th.teardown().await;
 }

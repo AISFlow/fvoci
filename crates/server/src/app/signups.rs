@@ -688,8 +688,7 @@ fn waiting(
         custom_name: user.name.custom_name.clone(),
         password_hash: user.password_hash.clone(),
         language: Language::written_in(language)
-            .map(Language::tag)
-            .unwrap_or_default()
+            .map_or_default(Language::tag)
             .to_owned(),
         start,
         browser_hash: token_digest(marker.secret()),

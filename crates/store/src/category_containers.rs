@@ -152,7 +152,7 @@ impl Store {
                 .bind(Id(category_id))
                 .push_bind(" AND user_id = ", Id(user_id))
                 .push_bind(" AND workspace_id = ", Id(workspace_id));
-            if scope.fetch_optional(cat_sql).await?.is_none() {
+            if !scope.exists(cat_sql).await? {
                 return Err(StoreError::not_found(format_args!(
                     "category ID={category_id}"
                 )));
@@ -177,12 +177,7 @@ impl Store {
                 cur_sql
                     .bind(Id(category_id))
                     .push(" ORDER BY sort_order, container_id");
-                let mut ordered: Vec<String> = scope
-                    .fetch_all(cur_sql)
-                    .await?
-                    .iter()
-                    .map(|row| row.id(0))
-                    .collect::<Result<_, _>>()?;
+                let mut ordered: Vec<String> = scope.all(cur_sql).await?;
                 ordered.retain(|id| id != container_id);
                 let pos = target_index.min(ordered.len());
                 ordered.insert(pos, container_id.to_owned());

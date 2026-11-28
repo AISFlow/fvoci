@@ -21,7 +21,8 @@ export function countTasks(node: DocNode): { total: number; checked: number } {
   return count;
 }
 
-const TEXT_BLOCKS = new Set(['paragraph', 'heading', 'codeBlock']);
+/** The blocks that are a line each; a toggle's summary is one, whether it is open or not. */
+const TEXT_BLOCKS = new Set(['paragraph', 'heading', 'codeBlock', 'detailsSummary']);
 
 const latexOf = (node: DocNode): string =>
   typeof node.attrs?.latex === 'string' ? node.attrs.latex : '';
@@ -31,7 +32,8 @@ const latexOf = (node: DocNode): string =>
  * for search, previews and notifications. `mentionLabel` names a mentioned
  * user; a reference gives nothing, as on the server. A formula gives its source: inside a line where it stands in one, on
  * a line of its own when it is a block. A diagram is a code block and gives
- * its source like any other code.
+ * its source like any other code. A toggle gives its summary as a line,
+ * then what it hides: folded is how a reader sees it, not what it says.
  */
 export function plainText(
   node: DocNode,

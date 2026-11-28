@@ -11,7 +11,7 @@ use fvoci_model::{
 };
 use serde_json::Value;
 
-use crate::db::{Id, Param, Scope, SqlFragment};
+use crate::db::{Dialect, Id, Param, Scope, SqlFragment};
 use crate::error::StoreError;
 use crate::file_refs::{self, NewBodyFiles};
 use crate::search_outbox;
@@ -163,15 +163,18 @@ pub(crate) async fn forget_block(
         }
         scope.execute(sql).await?;
     }
+    // A card's activity names its organization on PostgreSQL alone: a SQLite database
+    // holds one, and its rows name none (schema/sqlite/0002_card_events.sql).
+    let mut events = scope.sql("DELETE FROM card_events WHERE card_id = ");
+    events.changing_no_access().bind(Id(block_id));
+    if let Some(org) = org.filter(|_| scope.dialect() == Dialect::Postgres) {
+        events.push_bind(" AND org_id = ", org);
+    }
+    scope.execute(events).await?;
 
     let mut refs = scope.sql("DELETE FROM file_refs WHERE block_id = ");
     refs.bind(Id(block_id)).push(" RETURNING name");
-    let mut names = scope
-        .fetch_all(refs)
-        .await?
-        .iter()
-        .map(|row| row.text(0))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut names: Vec<String> = scope.all(refs).await?;
     if !names.is_empty() {
         names.sort_unstable();
         names.dedup();
@@ -192,6 +195,8 @@ pub(crate) async fn forget_gone_blocks(scope: &mut Scope<'_>) -> Result<(), Stor
     unit_progress::forget_gone_blocks(scope).await?;
     unit_reviews::forget_gone_blocks(scope).await?;
     forget_gone_card_due_notices(scope).await?;
+    crate::favorites::forget_gone_targets(scope).await?;
+    crate::card_events::forget_gone_cards(scope).await?;
     file_refs::forget_gone_blocks(scope).await?;
     file_refs::mark(scope, None).await
 }
@@ -258,10 +263,7 @@ async fn resolve_container_org_id(
          WHERE c.id = ",
     );
     sql.bind(Id(container_id));
-    match scope.fetch_optional(sql).await? {
-        Some(row) => row.id(0),
-        None => Ok(String::new()),
-    }
+    Ok(scope.first(sql).await?.unwrap_or_default())
 }
 
 async fn sync_one_card_derived(
@@ -341,10 +343,5 @@ async fn existing_user_ids(
     let mut sql = scope.sql("SELECT id FROM users WHERE id IN (");
     sql.bind_list(user_ids.iter().copied().map(Id))
         .push(") ORDER BY id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect()
+    scope.all(sql).await
 }

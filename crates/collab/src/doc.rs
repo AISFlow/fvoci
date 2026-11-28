@@ -438,8 +438,20 @@ impl BodyDoc {
         to_body(&self.doc)
             .ok()
             .flatten()
-            .map(|body| body.file_ids().into_iter().map(str::to_owned).collect())
-            .unwrap_or_default()
+            .map_or_default(|body| body.file_ids().into_iter().map(str::to_owned).collect())
+    }
+
+    /// How many board views the document has (matching [`Body::board_view_count`]): from
+    /// the block cache when it is populated, as [`BodyDoc::file_ids`] reads, and
+    /// otherwise by projecting the document.
+    #[must_use]
+    pub fn board_views(&self) -> u64 {
+        if let Some(cache) = &self.cache {
+            return cache.blocks.board_views();
+        }
+        to_body(&self.doc).ok().flatten().map_or(0, |body| {
+            u64::try_from(body.board_view_count()).unwrap_or(u64::MAX)
+        })
     }
 }
 

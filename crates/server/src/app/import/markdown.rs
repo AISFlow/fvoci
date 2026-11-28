@@ -7,7 +7,7 @@
 //! local images or files are emitted only when an [`AssetResolver`] confirms they exist
 //! inside the uploaded bundle.
 
-use fvoci_model::{BODY_MAX_BYTES, BODY_MAX_NODES, TABLE_MAX_COLUMNS, TABLE_MAX_ROWS, is_id};
+use fvoci_model::{BODY_MAX_BYTES, BODY_MAX_NODES, is_id};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 use serde_json::{Map, Value, json};
 
@@ -25,6 +25,8 @@ use super::summary::{ImportWarningCode, truncate_chars};
 use crate::error::AppError;
 
 mod fvoci;
+mod table;
+mod toggles;
 pub(crate) use fvoci::fvoci_markdown_to_blocks;
 
 /// Early cap on raw inline/cell items before merging to prevent unbounded vector growth.
@@ -64,12 +66,14 @@ fn convert(
         ));
     }
     let clean = markdown.strip_prefix('\u{FEFF}').unwrap_or(markdown);
+    // GitHub's alerts (`> [!NOTE]`) are callouts.
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM
         | dialect;
     let parser = Parser::new_ext(clean, options);
-    let mut state = Converter::new(context, max_depth, resolver);
+    let mut state = Converter::new(context, max_depth, resolver, options);
     for event in parser {
         state.handle(event)?;
     }
@@ -100,6 +104,20 @@ enum Frame {
         inlines: Vec<InlineItem>,
     },
     BlockQuote(Vec<Value>),
+    /// A GitHub alert where a callout may stand, of its tone.
+    Callout {
+        tone: &'static str,
+        blocks: Vec<Value>,
+    },
+    /// The lines of a block of HTML, read when it ends ([`toggles`]).
+    Html(String),
+    /// A toggle opened by `<details>`: `kept` where a toggle may stand, its summary
+    /// once read, and the blocks it hides. One that is not kept is read as its parts.
+    Details {
+        kept: bool,
+        summary: Option<Vec<Value>>,
+        blocks: Vec<Value>,
+    },
     CodeBlock {
         language: Option<String>,
         text: String,
@@ -137,6 +155,8 @@ enum Frame {
 
 struct Converter<'r> {
     context: BodyContext,
+    /// What the Markdown is read with, for the summary of a toggle too.
+    options: Options,
     max_depth: usize,
     container_depth: usize,
     node_count: usize,
@@ -149,9 +169,15 @@ struct Converter<'r> {
 }
 
 impl<'r> Converter<'r> {
-    fn new(context: BodyContext, max_depth: usize, resolver: &'r mut dyn AssetResolver) -> Self {
+    fn new(
+        context: BodyContext,
+        max_depth: usize,
+        resolver: &'r mut dyn AssetResolver,
+        options: Options,
+    ) -> Self {
         Self {
             context,
+            options,
             max_depth,
             container_depth: 0,
             node_count: 1, // Count the root `doc` node.
@@ -244,6 +270,12 @@ impl<'r> Converter<'r> {
                 self.push_block(json!({"type": "horizontalRule"}));
                 Ok(())
             }
+            Event::Html(html) if matches!(self.frames.last(), Some(Frame::Html(_))) => {
+                if let Some(Frame::Html(lines)) = self.frames.last_mut() {
+                    lines.push_str(&html);
+                }
+                Ok(())
+            }
             Event::Html(html) | Event::InlineHtml(html) => {
                 let trimmed = html.trim();
                 if !trimmed.is_empty() {
@@ -271,11 +303,8 @@ impl<'r> Converter<'r> {
         match tag {
             Tag::Paragraph => self.push_frame(Frame::Paragraph(Vec::new()))?,
             Tag::Heading { level, .. } => self.start_heading(level)?,
-            Tag::BlockQuote(_) => {
-                self.enter_container()?;
-                self.flush_list_item_inlines()?;
-                self.push_frame(Frame::BlockQuote(Vec::new()))?;
-            }
+            Tag::BlockQuote(kind) => self.start_quote(kind)?,
+            Tag::HtmlBlock => self.push_frame(Frame::Html(String::new()))?,
             Tag::CodeBlock(kind) => self.start_code_block(kind)?,
             Tag::List(start) => {
                 self.enter_container()?;
@@ -387,10 +416,14 @@ impl<'r> Converter<'r> {
         match tag {
             TagEnd::Paragraph => self.finish_paragraph()?,
             TagEnd::Heading(_) => self.finish_heading()?,
-            TagEnd::BlockQuote(_) => self.finish_blockquote()?,
+            TagEnd::BlockQuote(_) => self.finish_quote()?,
+            TagEnd::HtmlBlock => self.finish_html()?,
             TagEnd::CodeBlock => self.finish_code_block()?,
             TagEnd::List(_) => self.finish_list()?,
-            TagEnd::Item => self.finish_list_item()?,
+            TagEnd::Item => {
+                self.close_toggles()?;
+                self.finish_list_item()?;
+            }
             TagEnd::Table => self.finish_table()?,
             TagEnd::TableHead | TagEnd::TableRow => self.finish_table_row(),
             TagEnd::TableCell => self.finish_table_cell(),
@@ -442,7 +475,7 @@ impl<'r> Converter<'r> {
         Ok(())
     }
 
-    fn finish_blockquote(&mut self) -> Result<(), AppError> {
+    pub(super) fn finish_blockquote(&mut self) -> Result<(), AppError> {
         self.leave_container();
         let Some(Frame::BlockQuote(blocks)) = self.frames.pop() else {
             return Ok(());
@@ -562,95 +595,6 @@ impl<'r> Converter<'r> {
             None => json!({"type": "bulletList", "content": content}),
         };
         self.push_block(list_node);
-        Ok(())
-    }
-
-    fn finish_table_row(&mut self) {
-        let Some(Frame::TableRow { is_header, cells }) = self.frames.pop() else {
-            return;
-        };
-        if let Some(Frame::Table { rows, .. }) = self.frames.last_mut() {
-            rows.push(TableRowDraft { is_header, cells });
-        }
-    }
-
-    fn finish_table_cell(&mut self) {
-        let Some(Frame::TableCell(inlines)) = self.frames.pop() else {
-            return;
-        };
-        if let Some(Frame::TableRow { cells, .. }) = self.frames.last_mut() {
-            cells.push(inlines);
-        }
-    }
-
-    fn finish_table(&mut self) -> Result<(), AppError> {
-        self.leave_container();
-        let Some(Frame::Table {
-            has_alignment,
-            rows,
-        }) = self.frames.pop()
-        else {
-            return Ok(());
-        };
-        if has_alignment {
-            self.note(
-                ImportWarningCode::MarkdownDegraded,
-                "table column alignment is not preserved",
-            );
-        }
-        let width = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
-        let at_doc_root = matches!(self.frames.last(), Some(Frame::Root(_)));
-        let fits_grid = at_doc_root
-            && width > 0
-            && width <= usize::from(TABLE_MAX_COLUMNS)
-            && !rows.is_empty()
-            && rows.len() <= usize::from(TABLE_MAX_ROWS);
-
-        if !fits_grid {
-            self.note(
-                ImportWarningCode::MarkdownDegraded,
-                "table nested in a block or exceeding 200x20 limits converted to paragraphs",
-            );
-            for row in rows {
-                let mut combined = Vec::new();
-                for (index, cell) in row.cells.into_iter().enumerate() {
-                    if index > 0 {
-                        self.bump_text_bytes(3)?;
-                        self.bump_raw_inline()?;
-                        combined.push(InlineItem::Node(json!({"type": "text", "text": " | "})));
-                    }
-                    combined.extend(cell);
-                }
-                for block in self.split_inlines_to_blocks(combined)? {
-                    self.push_block(block);
-                }
-            }
-            return Ok(());
-        }
-
-        self.bump_nodes(1 + rows.len())?;
-        let mut table_rows = Vec::with_capacity(rows.len());
-        for row in rows {
-            let cell_type = if row.is_header {
-                "tableHeader"
-            } else {
-                "tableCell"
-            };
-            let mut row_cells = Vec::with_capacity(width);
-            let mut iter = row.cells.into_iter();
-            for _ in 0..width {
-                let inlines = iter.next().unwrap_or_default();
-                let mut cell_blocks = self.split_inlines_to_blocks(inlines)?;
-                if cell_blocks.is_empty() {
-                    self.bump_nodes(1)?;
-                    cell_blocks.push(json!({"type": "paragraph"}));
-                }
-                self.bump_nodes(1)?;
-                row_cells.push(json!({"type": cell_type, "content": cell_blocks}));
-            }
-            table_rows.push(json!({"type": "tableRow", "content": row_cells}));
-        }
-        self.push_block(json!({"type": "table", "content": table_rows}));
         Ok(())
     }
 
@@ -876,7 +820,12 @@ impl<'r> Converter<'r> {
     fn push_inline(&mut self, item: InlineItem) -> Result<(), AppError> {
         if matches!(
             self.frames.last(),
-            Some(Frame::Root(_) | Frame::BlockQuote(_))
+            Some(
+                Frame::Root(_)
+                    | Frame::BlockQuote(_)
+                    | Frame::Callout { .. }
+                    | Frame::Details { .. }
+            )
         ) {
             let added = match &item {
                 InlineItem::BlockBreak(_) => 1,
@@ -895,7 +844,12 @@ impl<'r> Converter<'r> {
                     ..
                 },
             ) => inlines.push(item),
-            Some(Frame::Root(blocks) | Frame::BlockQuote(blocks)) => match item {
+            Some(
+                Frame::Root(blocks)
+                | Frame::BlockQuote(blocks)
+                | Frame::Callout { blocks, .. }
+                | Frame::Details { blocks, .. },
+            ) => match item {
                 InlineItem::BlockBreak(block) => blocks.push(block),
                 InlineItem::Node(node) => {
                     blocks.push(json!({"type": "paragraph", "content": [node]}));
@@ -908,7 +862,11 @@ impl<'r> Converter<'r> {
 
     fn push_block(&mut self, block: Value) {
         if let Some(
-            Frame::Root(blocks) | Frame::BlockQuote(blocks) | Frame::ListItem { blocks, .. },
+            Frame::Root(blocks)
+            | Frame::BlockQuote(blocks)
+            | Frame::Callout { blocks, .. }
+            | Frame::Details { blocks, .. }
+            | Frame::ListItem { blocks, .. },
         ) = self.frames.last_mut()
         {
             blocks.push(block);
@@ -965,6 +923,7 @@ impl<'r> Converter<'r> {
     }
 
     fn finish(mut self) -> Result<MarkdownBlocks, AppError> {
+        self.close_toggles()?;
         if let Some(Frame::Root(nodes)) = self.frames.drain(..).next() {
             Ok(MarkdownBlocks {
                 nodes,

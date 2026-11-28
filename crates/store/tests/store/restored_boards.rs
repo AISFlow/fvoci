@@ -54,14 +54,13 @@ async fn category_order(
         .expect("the categories")
         .into_iter()
         .find(|entry| entry.category.id == category_id)
-        .map(|entry| {
+        .map_or_default(|entry| {
             entry
                 .container_metadata
                 .into_iter()
                 .map(|board| board.container_id)
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// Stores a board of the workspace made by the user and returns its identifier.

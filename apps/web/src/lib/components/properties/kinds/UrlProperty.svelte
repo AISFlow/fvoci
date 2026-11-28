@@ -113,8 +113,10 @@
         title={value}
         onclick={(event) => {
           event.stopPropagation();
-        }}>{value}</a
+        }}
       >
+        {value}
+      </a>
     {:else}
       <span class="min-w-0 truncate px-2 py-1.5" title={value}>{value}</span>
     {/if}
@@ -157,7 +159,7 @@
     <span class="sr-only" role="status">{copied ? m['URLProperty.copiedLink']() : ''}</span>
   </span>
 {:else if placeholder !== ''}
-  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground"
-    >{placeholder}</span
-  >
+  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground">
+    {placeholder}
+  </span>
 {/if}

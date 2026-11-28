@@ -483,8 +483,7 @@ async fn token(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Stri
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+        .map_or_default(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn id_token(shared: &Shared, person: &Person, forgery: Forgery, nonce: &str) -> String {

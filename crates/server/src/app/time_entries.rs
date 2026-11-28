@@ -16,7 +16,7 @@ use fvoci_store::{NewStoredTimeEntry, TimeEntryFilter, TimeEntryPatchOutcome, Ti
 use super::sso::Asker;
 use super::{App, ListPage};
 use crate::auth::now_millis;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 
 /// Filters passed from the HTTP layer to [`App::list_time_entries`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -343,11 +343,7 @@ async fn resolve_block_target(
     container_id: Option<&str>,
     block_id: &str,
 ) -> Result<ResolvedTarget, AppError> {
-    let block = match ws_app.block(block_id).await {
-        Ok(block) => block,
-        Err(error) if error.is_not_found() => return Err(AppError::not_found("target")),
-        Err(error) => return Err(error),
-    };
+    let block = ws_app.block(block_id).await.or_missing("target")?;
     if container_id.is_some_and(|cid| block.container_id != cid) {
         return Err(AppError::not_found("target"));
     }

@@ -62,6 +62,7 @@ impl Telling {
         match scope.notes() {
             Noting::Named => Self::Written,
             Noting::Quietly => Self::Quiet,
+            #[cfg(feature = "test-util")]
             Noting::Nobody => Self::Nobody,
         }
     }
@@ -84,8 +85,7 @@ fn assigned_before<'b>(
     before
         .and_then(|before| before.fields.get("properties"))
         .and_then(Value::as_object)
-        .map(|values| assigned_users(values, definitions).into_iter().collect())
-        .unwrap_or_default()
+        .map_or_default(|values| assigned_users(values, definitions).into_iter().collect())
 }
 
 /// Notes whom the write of `block` by `writer` newly names, in the transaction of the
@@ -135,13 +135,11 @@ pub(crate) async fn note_named(
     }
     let mentioned_before: BTreeSet<&str> = before
         .and_then(|before| before.body.as_ref())
-        .map(|body| body.mention_ids().into_iter().collect())
-        .unwrap_or_default();
+        .map_or_default(|body| body.mention_ids().into_iter().collect());
     let mentioned: Vec<&str> = block
         .body
         .as_ref()
-        .map(|body| body.mention_ids())
-        .unwrap_or_default()
+        .map_or_default(|body| body.mention_ids())
         .into_iter()
         .filter(|user| !mentioned_before.contains(user))
         .collect();

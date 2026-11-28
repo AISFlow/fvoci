@@ -85,7 +85,7 @@ test.describe('a wiki looked after', () => {
     await sidebar(page)
       .getByRole('button', { name: 'Menu of the wiki Handbook', exact: true })
       .click();
-    await page.getByRole('menuitem', { name: 'Export the wiki' }).click();
+    await page.getByRole('menuitem', { name: 'As a .fvoci archive' }).click();
     const archive = testInfo.outputPath('wiki.fvoci');
     await (await saving).saveAs(archive);
     await showSidebar(page);

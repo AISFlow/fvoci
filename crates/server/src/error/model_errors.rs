@@ -16,6 +16,7 @@ impl From<BlockError> for AppError {
             BlockError::BodyNotAllowed
             | BlockError::BodyFileNotOfContainer
             | BlockError::FileBlockInComment
+            | BlockError::BoardViewNotAllowed
             | BlockError::BodyTooLarge => Self::bad_request(error).with_field("body"),
             BlockError::NulInTitle => Self::bad_request(error).with_field("title"),
             BlockError::InvalidCardField { .. }
@@ -44,13 +45,15 @@ impl From<BlockError> for AppError {
                 .with_reason(Reason::CardTooDeep)
                 .with_limit(u64::from(limit))
                 .with_field("parentId"),
+            BlockError::RecurrenceNeedsBoardRules => Self::bad_request(error)
+                .with_reason(Reason::RecurrenceNeedsBoardRules)
+                .with_field("recurrence"),
             BlockError::TooManyPages { limit } => Self::bad_request(error)
                 .with_reason(Reason::TooManyPages)
                 .with_limit(u64::from(limit)),
             BlockError::InvalidRelation(error) => Self::from(error),
             BlockError::TypeNotCurrent
             | BlockError::TypeChanges
-            | BlockError::CardByBlocks
             | BlockError::PageByBlocks
             | BlockError::PageOffWiki
             | BlockError::NotPageOnWiki

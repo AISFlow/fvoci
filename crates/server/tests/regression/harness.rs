@@ -159,17 +159,6 @@ pub(crate) fn string_member(value: &Value, member: &str) -> String {
         .to_owned()
 }
 
-/// The identifier of the object with the given title in a JSON list.
-#[track_caller]
-pub(crate) fn id_by_title(list: &Value, title: &str) -> String {
-    let items = list.as_array().expect("a JSON list");
-    let item = items
-        .iter()
-        .find(|item| item["title"] == title)
-        .unwrap_or_else(|| panic!("nothing titled {title:?} in {list}"));
-    string_member(item, "id")
-}
-
 /// What a request carries.
 #[derive(Debug, Clone)]
 pub(crate) enum Payload {

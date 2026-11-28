@@ -98,12 +98,7 @@ async fn record_in_organizations_of(
         .push(" AND o.deleted_at IS NULL AND o.is_system = false")
         .push_bind(" AND o.kind = ", OrgKind::Shared.as_str())
         .push(" ORDER BY m.org_id");
-    let organizations = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<Vec<_>, _>>()?;
+    let organizations: Vec<String> = scope.all(sql).await?;
     for org_id in &organizations {
         let entry =
             AuditEntry::by(&AuditActor::ServerOperator, "", action, org_id).with_subject(user_id);

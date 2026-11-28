@@ -14,11 +14,11 @@
   import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
   import { tick } from 'svelte';
 
+  import BoardDueRules from '$lib/components/board-rules/BoardDueRules.svelte';
   import IconButton from '$lib/components/icon-button/IconButton.svelte';
   import { m } from '$lib/i18n/paraglide/messages.js';
-  import { doneChoices as doneChoicesOf, doneChoiceValue } from '$lib/logic/done-rule.ts';
-  import type { BoardView } from '$lib/logic/wire.ts';
-  import type { BoardStore } from '$lib/state/index.ts';
+  import type { BoardView, DoneRule } from '$lib/logic/wire.ts';
+  import { setBoardDoneRule, setBoardDueProperty, type BoardStore } from '$lib/state/index.ts';
   import { Switch } from '$lib/ui/switch/index.js';
 
   import { propertyToggles, withPropertyVisible, type PropertyToggle } from './view-fields.ts';
@@ -80,31 +80,6 @@
       'showProperty',
     );
   }
-
-  const dateProperties = $derived(
-    (board.board?.cardProperties ?? []).filter((prop) => prop.type === 'date'),
-  );
-  const doneChoices = $derived(doneChoicesOf(board.board?.cardProperties ?? []));
-  const selectedDoneValue = $derived(doneChoiceValue(board.board?.doneWhen));
-
-  function changeDueProperty(value: string): void {
-    void board.changeBoard((current) => {
-      const next = { ...current };
-      if (value) next.dueDatePropertyId = value;
-      else delete next.dueDatePropertyId;
-      return next;
-    }, 'changeBoard');
-  }
-
-  function changeDoneRule(value: string): void {
-    const chosen = doneChoices.find((item) => item.value === value);
-    void board.changeBoard((current) => {
-      const next = { ...current };
-      if (chosen) next.doneWhen = chosen.rule;
-      else delete next.doneWhen;
-      return next;
-    }, 'changeBoard');
-  }
 </script>
 
 <p class="sr-only" aria-live="polite">{told}</p>
@@ -155,43 +130,16 @@
     </li>
   {/each}
 </ul>
-{#if board.canManageProperties && board.board && !board.board.isTemplate && (dateProperties.length > 0 || doneChoices.length > 0)}
-  <div class="grid gap-2 border-t p-2 text-xs" data-testid="board-today-rules">
-    {#if dateProperties.length > 0}
-      <label class="grid gap-1">
-        <span class="font-medium text-muted-foreground">{m.view_due_date_property()}</span>
-        <select
-          class="h-8 rounded-md border border-input-border bg-background px-2 text-base md:text-xs"
-          data-testid="board-due-date-property"
-          value={board.board.dueDatePropertyId ?? ''}
-          onchange={(e) => {
-            changeDueProperty(e.currentTarget.value);
-          }}
-        >
-          <option value="">{m.view_due_date_auto()}</option>
-          {#each dateProperties as prop (prop.id)}
-            <option value={prop.id}>{prop.name}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
-    {#if doneChoices.length > 0}
-      <label class="grid gap-1">
-        <span class="font-medium text-muted-foreground">{m.view_done_when()}</span>
-        <select
-          class="h-8 rounded-md border border-input-border bg-background px-2 text-base md:text-xs"
-          data-testid="board-done-when"
-          value={selectedDoneValue}
-          onchange={(e) => {
-            changeDoneRule(e.currentTarget.value);
-          }}
-        >
-          <option value="">{m.view_done_none()}</option>
-          {#each doneChoices as choice (choice.value)}
-            <option value={choice.value}>{choice.label}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
-  </div>
+{#if board.canManageProperties && board.board && !board.board.isTemplate}
+  <BoardDueRules
+    properties={board.board.cardProperties}
+    dueDatePropertyId={board.board.dueDatePropertyId}
+    doneWhen={board.board.doneWhen}
+    onDueProperty={(propertyId: string | undefined) => {
+      setBoardDueProperty(board, propertyId);
+    }}
+    onDoneRule={(rule: DoneRule | undefined) => {
+      setBoardDoneRule(board, rule);
+    }}
+  />
 {/if}

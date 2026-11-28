@@ -19,7 +19,12 @@ use crate::workspaces::another_organization;
 const MCP: &str = "/mcp";
 
 /// The tools that write.
-const WRITES: [&str; 3] = ["save_card", "save_page_or_unit", "post_comment"];
+const WRITES: [&str; 4] = [
+    "save_card",
+    "save_cards",
+    "save_page_or_unit",
+    "post_comment",
+];
 
 /// Sends one JSON-RPC message to the server as `client`.
 pub(crate) async fn send(client: &Client, message: &Value) -> ApiResponse {
@@ -263,7 +268,7 @@ async fn a_token_that_reads_is_told_of_no_tool_that_writes_and_is_refused_one_it
     let writer = agent_of(&ts, &ts.client, "write", &[TEST_WORKSPACE_ID]).await;
 
     let read = tool_names(&reader).await;
-    assert_eq!(read.len(), 10, "{read:?}");
+    assert_eq!(read.len(), 11, "{read:?}");
     assert!(
         WRITES
             .iter()
@@ -271,7 +276,7 @@ async fn a_token_that_reads_is_told_of_no_tool_that_writes_and_is_refused_one_it
         "{read:?}"
     );
     let written = tool_names(&writer).await;
-    assert_eq!(written.len(), 13, "{written:?}");
+    assert_eq!(written.len(), 15, "{written:?}");
     assert!(
         WRITES
             .iter()
@@ -292,6 +297,11 @@ async fn a_token_that_reads_is_told_of_no_tool_that_writes_and_is_refused_one_it
             "post_comment",
             json!({"workspaceId": TEST_WORKSPACE_ID, "kind": "card",
                    "containerId": board.id, "itemId": board.id, "markdown": "forced"}),
+        ),
+        (
+            "save_cards",
+            json!({"workspaceId": TEST_WORKSPACE_ID, "boardId": board.id,
+                   "cardIds": [board.id], "properties": {}}),
         ),
     ] {
         let problem = refused(&reader, tool, &arguments).await;

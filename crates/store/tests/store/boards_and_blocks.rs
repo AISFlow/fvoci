@@ -1,14 +1,16 @@
-//! Integration tests for atomic multi-board and block creation, patching, deletion, and
+//! Integration tests for atomic multi-board and block creation, deletion, and
 //! duplication. Every identifier is generated, referenced workspaces and users are stored
 //! first, and atomic rollback assertions run on both SQLite and PostgreSQL.
 
 use fvoci_model::{
     BLOCK_TITLE_MAX_CHARS, Block, BlockError, BlockPatch, BlockType, Container, ContainerKinds,
-    ContainerMember, ContainerPatch, ContainerVisibility, ContainersAndBlocks,
-    ContainersAndBlocksError, DeleteContainersAndBlocks, PatchContainersAndBlocks, is_id, new_id,
+    ContainerMember, ContainerVisibility, ContainersAndBlocks, DeleteContainersAndBlocks, is_id,
+    new_id,
 };
 use fvoci_model::{DuplicateAs, PublicContainers};
-use fvoci_store::{BlockFilter, CopyChanges, CopyTitles, NewBodyFiles, Store, StoreError};
+use fvoci_store::{
+    BlockFilter, CopyChanges, CopyTitles, Creator, NewContainers, Store, StoreError,
+};
 
 use crate::common;
 
@@ -164,9 +166,13 @@ async fn create_containers_and_blocks() {
             blocks: vec![new_card(&block1, &board1), new_card(&block2, &board2)],
         };
 
-        test.create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
-            .await
-            .expect("the boards and blocks are created");
+        test.create_containers(
+            NewContainers::whole(&mut new_bab).creator(Creator::Nobody),
+            &user_id,
+        )
+        .await
+        .map_err(StoreError::from)
+        .expect("the boards and blocks are created");
         assert_eq!(new_bab.containers.len(), 3, "got {:?}", new_bab.containers);
         assert_eq!(new_bab.blocks.len(), 2, "got {:?}", new_bab.blocks);
 
@@ -196,8 +202,9 @@ async fn create_containers_and_blocks() {
         };
 
         let members = test
-            .create_containers_and_blocks_with_admin(&mut new_bab, &user_id)
+            .create_containers(NewContainers::whole(&mut new_bab), &user_id)
             .await
+            .map_err(StoreError::from)
             .expect("the boards, blocks and admins are created");
         assert_eq!(new_bab.containers.len(), 3, "got {:?}", new_bab.containers);
         assert_eq!(new_bab.blocks.len(), 2, "got {:?}", new_bab.blocks);
@@ -244,8 +251,12 @@ async fn create_containers_and_blocks() {
         };
 
         let error = test
-            .create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
+            .create_containers(
+                NewContainers::whole(&mut new_bab).creator(Creator::Nobody),
+                &user_id,
+            )
             .await
+            .map_err(StoreError::from)
             .expect_err("a block without a board is rejected");
         assert!(
             matches!(
@@ -259,8 +270,9 @@ async fn create_containers_and_blocks() {
         );
 
         let error = test
-            .create_containers_and_blocks_with_admin(&mut new_bab, &user_id)
+            .create_containers(NewContainers::whole(&mut new_bab), &user_id)
             .await
+            .map_err(StoreError::from)
             .expect_err("a block without a board is rejected");
         assert!(
             matches!(error, StoreError::InvalidBlock { .. }),
@@ -306,237 +318,24 @@ async fn create_containers_and_blocks() {
         };
 
         let error = test
-            .create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
+            .create_containers(
+                NewContainers::whole(&mut new_bab).creator(Creator::Nobody),
+                &user_id,
+            )
             .await
+            .map_err(StoreError::from)
             .expect_err("a block with an oversized title is rejected");
         assert!(is_title_size_limit_exceeded(&error), "got {error:?}");
 
         let error = test
-            .create_containers_and_blocks_with_admin(&mut new_bab, &user_id)
+            .create_containers(NewContainers::whole(&mut new_bab), &user_id)
             .await
+            .map_err(StoreError::from)
             .expect_err("a block with an oversized title is rejected");
         assert!(is_title_size_limit_exceeded(&error), "got {error:?}");
     }
 
     test.teardown().await;
-}
-
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "sequential batch-creation cases share one store fixture"
-)]
-async fn patch_containers_and_blocks() {
-    let test = common::setup().await;
-    let workspace_id = common::workspace(&test).await;
-    let user_id = common::user(&test, "user").await;
-
-    // Cases share their board and block identifiers across sequential steps.
-    let [board1_id, board2_id, board3_id] = new_ids();
-    let [block1_id, block2_id] = new_ids();
-
-    // "on failure, nothing should be saved"
-    {
-        let initial_title = "initial title";
-        let new_title = "new title";
-
-        let mut board = Container {
-            title: initial_title.to_owned(),
-            ..new_board(&board1_id, &workspace_id, ContainerVisibility::Open)
-        };
-        test.insert_container(&mut board, &user_id)
-            .await
-            .expect("the board is inserted");
-
-        let mut block = Block {
-            id: block1_id.clone(),
-            container_id: board1_id.clone(),
-            title: initial_title.to_owned(),
-            ..Block::default()
-        };
-        test.insert_block(&mut block, &user_id)
-            .await
-            .expect("the block is inserted");
-
-        // apply the patches; the second block does not exist yet
-        let title_patch = BlockPatch {
-            title: Some(new_title.to_owned()),
-            ..BlockPatch::default()
-        };
-        let pbab = PatchContainersAndBlocks {
-            container_ids: vec![board1_id.clone()],
-            container_patches: vec![ContainerPatch {
-                title: Some(new_title.to_owned()),
-                ..ContainerPatch::default()
-            }],
-            block_ids: vec![block1_id.clone(), block2_id.clone()],
-            block_patches: vec![title_patch.clone(), title_patch],
-        };
-
-        let error = test
-            .patch_containers_and_blocks(&pbab, &user_id)
-            .await
-            .expect_err("the second block does not exist");
-        assert!(error.is_not_found(), "got {error:?}");
-
-        // check that things have not changed
-        let r_board = test
-            .get_container(&board1_id)
-            .await
-            .expect("the board exists");
-        assert_eq!(initial_title, r_board.title, "the board patch is undone");
-
-        let r_block = test.get_block(&block1_id).await.expect("the block exists");
-        assert_eq!(initial_title, r_block.title, "the block patch is undone");
-    }
-
-    // "should apply block size limits"
-    patch_over_the_block_size_limits(&test, &workspace_id, &user_id, &board1_id, &block1_id).await;
-
-    // "patch boards and blocks"
-    {
-        let mut new_bab = ContainersAndBlocks {
-            containers: vec![
-                Container {
-                    description: "initial description".to_owned(),
-                    ..new_board(&board1_id, &workspace_id, ContainerVisibility::Open)
-                },
-                new_board(&board2_id, &workspace_id, ContainerVisibility::Private),
-                Container {
-                    title: "initial title".to_owned(),
-                    ..new_board(&board3_id, &workspace_id, ContainerVisibility::Open)
-                },
-            ],
-            blocks: vec![
-                Block {
-                    title: "initial title".to_owned(),
-                    ..new_card(&block1_id, &board1_id)
-                },
-                new_card(&block2_id, &board2_id),
-            ],
-        };
-
-        test.create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
-            .await
-            .expect("the boards and blocks are created");
-        assert_eq!(new_bab.containers.len(), 3, "got {:?}", new_bab.containers);
-        assert_eq!(new_bab.blocks.len(), 2, "got {:?}", new_bab.blocks);
-
-        // apply the patches
-        let new_title = "new title";
-        let new_description = "new description";
-        let second_title = "second title";
-
-        let pbab = PatchContainersAndBlocks {
-            container_ids: vec![board3_id.clone(), board1_id.clone()],
-            container_patches: vec![
-                ContainerPatch {
-                    title: Some(new_title.to_owned()),
-                    description: Some(new_description.to_owned()),
-                    ..ContainerPatch::default()
-                },
-                ContainerPatch {
-                    description: Some(new_description.to_owned()),
-                    ..ContainerPatch::default()
-                },
-            ],
-            block_ids: vec![block1_id.clone(), block2_id.clone()],
-            block_patches: vec![
-                BlockPatch {
-                    title: Some(new_title.to_owned()),
-                    ..BlockPatch::default()
-                },
-                BlockPatch {
-                    title: Some(second_title.to_owned()),
-                    ..BlockPatch::default()
-                },
-            ],
-        };
-
-        let bab = test
-            .patch_containers_and_blocks(&pbab, &user_id)
-            .await
-            .expect("the patches are applied");
-        assert_eq!(bab.containers.len(), 2, "got {:?}", bab.containers);
-        assert_eq!(bab.blocks.len(), 2, "got {:?}", bab.blocks);
-
-        // check that things have changed
-        let board1 = test
-            .get_container(&board1_id)
-            .await
-            .expect("the board exists");
-        assert_eq!(new_description, board1.description, "board 1 is patched");
-
-        let board3 = test
-            .get_container(&board3_id)
-            .await
-            .expect("the board exists");
-        assert_eq!(new_title, board3.title, "board 3 is patched");
-        assert_eq!(new_description, board3.description, "board 3 is patched");
-
-        let block1 = test.get_block(&block1_id).await.expect("the block exists");
-        assert_eq!(new_title, block1.title, "block 1 is patched");
-
-        let block2 = test.get_block(&block2_id).await.expect("the block exists");
-        assert_eq!(second_title, block2.title, "block 2 is patched");
-
-        // Added: what comes back is what was stored, in the order of the request.
-        assert_eq!(bab.containers, [board3, board1], "the patched boards");
-        assert_eq!(bab.blocks, [block1, block2], "the patched blocks");
-    }
-
-    test.teardown().await;
-}
-
-/// The second subtest of [`patch_containers_and_blocks`]: a patch over the block size limits
-/// changes nothing.
-async fn patch_over_the_block_size_limits(
-    test: &common::TestStore,
-    workspace_id: &str,
-    user_id: &str,
-    board1_id: &str,
-    block1_id: &str,
-) {
-    let initial_title = "initial title";
-    let new_title = "A".repeat(BLOCK_TITLE_MAX_CHARS + 1);
-
-    let mut board = Container {
-        title: initial_title.to_owned(),
-        ..new_board(board1_id, workspace_id, ContainerVisibility::Open)
-    };
-    test.insert_container(&mut board, user_id)
-        .await
-        .expect("the board is inserted");
-
-    let mut block = Block {
-        id: block1_id.to_owned(),
-        container_id: board1_id.to_owned(),
-        title: initial_title.to_owned(),
-        ..Block::default()
-    };
-    test.insert_block(&mut block, user_id)
-        .await
-        .expect("the block is inserted");
-
-    // apply the patches
-    let pbab = PatchContainersAndBlocks {
-        block_ids: vec![block1_id.to_owned()],
-        block_patches: vec![BlockPatch {
-            title: Some(new_title),
-            ..BlockPatch::default()
-        }],
-        ..PatchContainersAndBlocks::default()
-    };
-
-    let error = test
-        .patch_containers_and_blocks(&pbab, user_id)
-        .await
-        .expect_err("the title is too long");
-    assert!(is_title_size_limit_exceeded(&error), "got {error:?}");
-
-    // check that things have not changed
-    let r_block = test.get_block(block1_id).await.expect("the block exists");
-    assert_eq!(initial_title, r_block.title, "the block keeps its title");
 }
 
 #[tokio::test]
@@ -686,9 +485,13 @@ async fn duplicate_container() {
         ],
     };
 
-    test.create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
-        .await
-        .expect("the boards and blocks are created");
+    test.create_containers(
+        NewContainers::whole(&mut new_bab).creator(Creator::Nobody),
+        &user_id,
+    )
+    .await
+    .map_err(StoreError::from)
+    .expect("the boards and blocks are created");
     assert_eq!(new_bab.containers.len(), 3, "got {:?}", new_bab.containers);
     assert_eq!(new_bab.blocks.len(), 3, "got {:?}", new_bab.blocks);
 
@@ -797,9 +600,13 @@ async fn duplicate_container_copies_under_new_ids_as_a_private_board_of_the_user
             },
         ],
     };
-    test.create_containers_and_blocks(&mut source, &author, NewBodyFiles::Recorded)
-        .await
-        .expect("the board and its blocks are created");
+    test.create_containers(
+        NewContainers::whole(&mut source).creator(Creator::Nobody),
+        &author,
+    )
+    .await
+    .map_err(StoreError::from)
+    .expect("the board and its blocks are created");
 
     // board -> board, same workspace
     common::works_in(&test, &workspace_id, &copier).await;
@@ -1023,65 +830,6 @@ async fn duplicate_container_copies_a_board_without_blocks() {
     test.teardown().await;
 }
 
-/// Patching returns an error instead of panicking when fewer patches than IDs are given.
-#[tokio::test]
-async fn patch_containers_and_blocks_rejects_fewer_patches_than_ids() {
-    let test = common::setup().await;
-    let workspace_id = common::workspace(&test).await;
-    let user_id = common::user(&test, "user").await;
-
-    let board_id = insert_new_board(&test, &workspace_id, &user_id).await;
-    let block_id = insert_new_block(&test, &board_id, &user_id).await;
-
-    let boards_short = PatchContainersAndBlocks {
-        container_ids: vec![board_id.clone()],
-        ..PatchContainersAndBlocks::default()
-    };
-    let error = test
-        .patch_containers_and_blocks(&boards_short, &user_id)
-        .await
-        .expect_err("there is no patch for the board");
-    assert!(
-        matches!(
-            error,
-            StoreError::InvalidContainersAndBlocks(
-                ContainersAndBlocksError::ContainerIdsAndPatchesMismatch
-            )
-        ),
-        "got {error:?}"
-    );
-
-    let blocks_short = PatchContainersAndBlocks {
-        container_ids: vec![board_id.clone()],
-        container_patches: vec![ContainerPatch {
-            title: Some("patched".to_owned()),
-            ..ContainerPatch::default()
-        }],
-        block_ids: vec![block_id],
-        block_patches: Vec::new(),
-    };
-    let error = test
-        .patch_containers_and_blocks(&blocks_short, &user_id)
-        .await
-        .expect_err("there is no patch for the block");
-    assert!(
-        matches!(
-            error,
-            StoreError::InvalidContainersAndBlocks(
-                ContainersAndBlocksError::BlockIdsAndPatchesMismatch
-            )
-        ),
-        "got {error:?}"
-    );
-    let board = test
-        .get_container(&board_id)
-        .await
-        .expect("the board exists");
-    assert_eq!(board.title, "", "the board patch was rolled back");
-
-    test.teardown().await;
-}
-
 /// Listed blocks are validated before deletion begins, so listing a child block after its
 /// parent succeeds regardless of order.
 #[tokio::test]
@@ -1257,9 +1005,13 @@ async fn create_containers_and_blocks_accepts_a_block_listed_before_its_parent()
             new_card(&card_id, &board_id),
         ],
     };
-    test.create_containers_and_blocks(&mut new_bab, &user_id, NewBodyFiles::Recorded)
-        .await
-        .expect("children listed before their parents are accepted");
+    test.create_containers(
+        NewContainers::whole(&mut new_bab).creator(Creator::Nobody),
+        &user_id,
+    )
+    .await
+    .map_err(StoreError::from)
+    .expect("children listed before their parents are accepted");
     assert_eq!(
         new_bab
             .blocks

@@ -14,7 +14,7 @@ use crate::Store;
 use crate::block_derived::{self, Before};
 use crate::blocks;
 use crate::body_versions::{self, BodyBefore, BodyWrite};
-use crate::db::{Id, OptId, Param, Row, Scope, Sql, SqlFragment};
+use crate::db::{FromRow, Id, OptId, Param, Row, Scope, Sql, SqlFragment};
 use crate::error::StoreError;
 use crate::file_refs::{self, NewBodyFiles};
 use crate::notification_noting::Telling;
@@ -166,12 +166,7 @@ impl Store {
             sql.bind(Id(block_id))
                 .push_bind(" AND seq > ", state_seq)
                 .push(" ORDER BY seq");
-            let updates = scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(logged_update)
-                .collect::<Result<_, _>>()?;
+            let updates = scope.all(sql).await?;
             Ok(Some(StoredDoc {
                 state: row.bytes(0)?,
                 state_seq,
@@ -290,10 +285,9 @@ impl Store {
             sql.push_bind(", updated_at = ", now);
             where_as_read(&mut sql, block_id, as_read);
             sql.push(" RETURNING log_end");
-            let Some(row) = scope.fetch_optional(sql).await? else {
+            let Some(new_end) = scope.first::<i64>(sql).await? else {
                 return Err(not_as_read(scope, block_id).await);
             };
-            let new_end = row.int(0)?;
             let first_seq = new_end - count + 1;
             let seqs: Vec<i64> = (first_seq..=new_end).collect();
             for (chunk_idx, chunk) in updates.chunks(UPDATE_INSERT_BATCH).enumerate() {
@@ -390,10 +384,9 @@ impl Store {
                 .push_bind(", updated_at = ", scope.now_millis());
             where_as_read(&mut sql, block_id, as_read);
             sql.push(" RETURNING epoch");
-            let Some(row) = scope.fetch_optional(sql).await? else {
+            let Some(epoch) = scope.first::<i64>(sql).await? else {
                 return Err(not_as_read(scope, block_id).await);
             };
-            let epoch = row.int(0)?;
             // The row is held from the update above: nothing is logged between it and
             // this, and the log is the one that was read.
             let mut sql = scope.sql("DELETE FROM body_updates WHERE block_id = ");
@@ -491,7 +484,7 @@ impl Store {
             let mut sql =
                 scope.sql("SELECT 1 FROM body_docs WHERE projected_seq < log_end AND block_id = ");
             sql.bind(Id(block_id));
-            Ok(scope.fetch_optional(sql).await?.is_some())
+            scope.exists(sql).await
         })
         .await
     }
@@ -559,10 +552,7 @@ impl Store {
         self.with_conn(async |scope| {
             let mut sql = scope.sql("SELECT COUNT(*) FROM body_updates WHERE block_id = ");
             sql.bind(Id(block_id));
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -602,24 +592,21 @@ impl Store {
                 .push(&scope.same_organization(&[("w", "o")]));
             condition(scope, &mut sql);
             sql.push(" ORDER BY d.block_id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| Ok((row.id(0)?, row.id(1)?)))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
 }
 
-fn logged_update(row: &Row) -> Result<LoggedUpdate, StoreError> {
-    Ok(LoggedUpdate {
-        seq: row.int(0)?,
-        bytes: row.bytes(1)?,
-        written_by: row.id(2)?,
-        written_at: row.int(3)?,
-    })
+impl FromRow for LoggedUpdate {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(LoggedUpdate {
+            seq: row.int(0)?,
+            bytes: row.bytes(1)?,
+            written_by: row.id(2)?,
+            written_at: row.int(3)?,
+        })
+    }
 }
 
 fn no_doc(block_id: &str) -> StoreError {
@@ -756,5 +743,5 @@ pub(crate) async fn has_unwritten_body(
     let mut sql =
         scope.sql("SELECT 1 FROM body_docs WHERE projected_seq < log_end AND block_id = ");
     sql.bind(Id(block_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }

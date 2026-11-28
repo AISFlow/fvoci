@@ -274,6 +274,70 @@
       "update": "ATYBAAcBB2RlZmF1bHQDBXRhYmxlBwABAAMIdGFibGVSb3cHAAEBAwl0YWJsZUNlbGwHAAECAwlibG9ja01hdGgoAAEDBWxhdGV4AXcIRSA9IG1jXjJHAQMDBGZpbGUoAAEFBmZpbGVJZAF3DDdtaW51dGVzLnBkZkcBBQMFaW1hZ2UoAAEHBmZpbGVJZAF3CjdjaGFydC5wbmcoAAEHA2FsdAF3B2EgY2hhcnRHAQcDDmhvcml6b250YWxSdWxlRwEKAwljb2RlQmxvY2sHAAELBgQAAQwKbGV0IHggPSAxOygAAQsIbGFuZ3VhZ2UBdwRydXN0RwELAwpibG9ja3F1b3RlBwABGAMJcGFyYWdyYXBoBwABGQYEAAEaBnF1b3RlZEcBGAMIdGFza0xpc3QHAAEhAwh0YXNrSXRlbQcAASIDCXBhcmFncmFwaAcAASMGBAABJARkb25lKAABIgdjaGVja2VkAXhHASEDC29yZGVyZWRMaXN0BwABKgMIbGlzdEl0ZW0HAAErAwlwYXJhZ3JhcGgHAAEsBgQAAS0FdGhpcmQoAAEqBXN0YXJ0AX0DRwEqAwpidWxsZXRMaXN0BwABNAMIbGlzdEl0ZW0HAAE1AwlwYXJhZ3JhcGgHAAE2BgQAATcEaXRlbUcBNAMJcGFyYWdyYXBoBwABPAYEAAE9AXlHAT0DCWhhcmRCcmVha0cBPwMKaW5saW5lTWF0aCgAAUAFbGF0ZXgBdwNhXjJHAUADCXJlZmVyZW5jZSgAAUICaWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGIwMDJHAUIDB21lbnRpb24oAAFEBnVzZXJJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwMkcBRAYEAAFGAnggRwE8AwdoZWFkaW5nBwABSQYEAAFKBXRpdGxlKAABSQVsZXZlbAF9AigAAQIHY29sc3BhbgF9ASgAAQIHcm93c3BhbgF9AQA="
     },
     {
+      "name": "a toggle: its summary, then what it hides",
+      "update": "AQgBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwZBbnN3ZXJHAQEDDmRldGFpbHNTdW1tYXJ5BwABCgYEAAELCFF1ZXN0aW9uAA=="
+    },
+    {
+      "name": "a toggle with an empty summary and an empty paragraph",
+      "update": "AQQBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDCXBhcmFncmFwaEcBAQMOZGV0YWlsc1N1bW1hcnkA"
+    },
+    {
+      "name": "a toggle's summary of marks, a line break, a formula, a reference and a link",
+      "update": "ARQBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwZoaWRkZW5HAQEDDmRldGFpbHNTdW1tYXJ5BwABCgYGAAELBGxpbmsEbnVsbEQBDARsaW5rRgENBGxpbmsfeyJocmVmIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS8ifUcBCwMJcmVmZXJlbmNlKAABEgJpZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYjAwMkcBEgMKaW5saW5lTWF0aCgAARQFbGF0ZXgBdwN4XjJHARQDCWhhcmRCcmVha0cBFgYEAAEXByBwbGFpbiBGARgEYm9sZARudWxsRAEfBGJvbGRGASAEYm9sZAJ7fQA="
+    },
+    {
+      "name": "a toggle holding a table, a callout and a toggle",
+      "update": "ARoBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDB2RldGFpbHMHAAECAw5kZXRhaWxzQ29udGVudAcAAQMDCXBhcmFncmFwaAcAAQQGBAABBQRkZWVwRwEDAw5kZXRhaWxzU3VtbWFyeQcAAQoGBAABCwVpbm5lckcBAgMHY2FsbG91dAcAAREDCXBhcmFncmFwaAcAARIGBAABEwN0aXAoAAERBHRvbmUBdwN0aXBHAREDBXRhYmxlBwABGAMIdGFibGVSb3cHAAEZAwl0YWJsZUNlbGwHAAEaAwlwYXJhZ3JhcGgHAAEbBgQAARwEY2VsbCgAARoHY29sc3BhbgF9ASgAARoHcm93c3BhbgF9AUcBAQMOZGV0YWlsc1N1bW1hcnkHAAEjBgQAASQFb3V0ZXIA"
+    },
+    {
+      "name": "a toggle among other blocks gives its lines between theirs",
+      "update": "AREBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVhZnRlckcBAAMHZGV0YWlscwcAAQcDDmRldGFpbHNDb250ZW50BwABCAMJcGFyYWdyYXBoBwABCQYEAAEKA3R3b0cBCQMJcGFyYWdyYXBoBwABDgYEAAEPA29uZUcBCAMOZGV0YWlsc1N1bW1hcnkHAAETBgQAARQFc2hvd25HAQcDCXBhcmFncmFwaAcAARoGBAABGwZiZWZvcmUA"
+    },
+    {
+      "name": "a toggle hides every kind of block",
+      "update": "AR8BAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDCWJsb2NrTWF0aCgAAQIFbGF0ZXgBdwF5RwECAw5ob3Jpem9udGFsUnVsZUcBBAMJY29kZUJsb2NrBwABBQYEAAEGBmxldCB4OygAAQUIbGFuZ3VhZ2UBdwRydXN0RwEFAwpibG9ja3F1b3RlBwABDgMJcGFyYWdyYXBoBwABDwYEAAEQAXFHAQ4DCHRhc2tMaXN0BwABEgMIdGFza0l0ZW0HAAETAwlwYXJhZ3JhcGgHAAEUBgQAARUBdCgAARMHY2hlY2tlZAF4RwESAwpidWxsZXRMaXN0BwABGAMIbGlzdEl0ZW0HAAEZAwlwYXJhZ3JhcGgHAAEaBgQAARsBYkcBGAMHaGVhZGluZwcAAR0GBAABHgFoKAABHQVsZXZlbAF9AkcBAQMOZGV0YWlsc1N1bW1hcnkHAAEhBgQAASIDYWxsAA=="
+    },
+    {
+      "name": "a callout of each tone",
+      "update": "ARQBAAcBB2RlZmF1bHQDB2NhbGxvdXQHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIBZCgAAQAEdG9uZQF3BmRhbmdlckcBAAMHY2FsbG91dAcAAQUDCXBhcmFncmFwaAcAAQYGBAABBwF3KAABBQR0b25lAXcEd2FybkcBBQMHY2FsbG91dAcAAQoDCXBhcmFncmFwaAcAAQsGBAABDAF0KAABCgR0b25lAXcDdGlwRwEKAwdjYWxsb3V0BwABDwMJcGFyYWdyYXBoBwABEAYEAAERAWkoAAEPBHRvbmUBdwRpbmZvAA=="
+    },
+    {
+      "name": "a callout holding a heading, a list, a quote and code",
+      "update": "ARMBAAcBB2RlZmF1bHQDB2NhbGxvdXQHAAEAAwljb2RlQmxvY2sHAAEBBgQAAQICcm1HAQEDCmJsb2NrcXVvdGUHAAEFAwlwYXJhZ3JhcGgHAAEGBgQAAQcEc2FpZEcBBQMLb3JkZXJlZExpc3QHAAEMAwhsaXN0SXRlbQcAAQ0DCXBhcmFncmFwaAcAAQ4GBAABDwN0d28oAAEMBXN0YXJ0AX0CRwEMAwdoZWFkaW5nBwABFAYEAAEVB0NhcmVmdWwoAAEUBWxldmVsAX0DKAABAAR0b25lAXcEd2FybgA="
+    },
+    {
+      "name": "a callout of an empty paragraph",
+      "update": "AQMBAAcBB2RlZmF1bHQDB2NhbGxvdXQHAAEAAwlwYXJhZ3JhcGgoAAEABHRvbmUBdwRpbmZvAA=="
+    },
+    {
+      "name": "a callout in a toggle",
+      "update": "AQoBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDB2NhbGxvdXQHAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQBZCgAAQIEdG9uZQF3BmRhbmdlckcBAQMOZGV0YWlsc1N1bW1hcnkHAAEHBgQAAQgBcwA="
+    },
+    {
+      "name": "a toggle's summary with an empty content",
+      "update": "AQQBAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDCXBhcmFncmFwaEcBAQMOZGV0YWlsc1N1bW1hcnkA"
+    },
+    {
+      "name": "a board view",
+      "update": "AQgBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQVhZnRlckcBAAMJYm9hcmRWaWV3KAABBwZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDFHAQcDCXBhcmFncmFwaAcAAQkGBAABCgZiZWZvcmUA"
+    },
+    {
+      "name": "a board view alone",
+      "update": "AQIBAAcBB2RlZmF1bHQDCWJvYXJkVmlldygAAQAGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDAxAA=="
+    },
+    {
+      "name": "a board view in a toggle, and in a toggle in that",
+      "update": "AQ4BAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzQ29udGVudAcAAQEDB2RldGFpbHMHAAECAw5kZXRhaWxzQ29udGVudAcAAQMDCWJvYXJkVmlldygAAQQGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDAxRwEDAw5kZXRhaWxzU3VtbWFyeQcAAQYGBAABBwRNb3JlRwECAwlib2FyZFZpZXcoAAEMBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwMUcBAQMOZGV0YWlsc1N1bW1hcnkHAAEOBgQAAQ8EUGxhbgA="
+    },
+    {
+      "name": "two board views of one view",
+      "update": "AQQBAAcBB2RlZmF1bHQDCWJvYXJkVmlldygAAQAGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDAxRwEAAwlib2FyZFZpZXcoAAECBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwMQA="
+    },
+    {
+      "name": "ten board views",
+      "update": "ARQBAAcBB2RlZmF1bHQDCWJvYXJkVmlldygAAQAGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDBhRwEAAwlib2FyZFZpZXcoAAECBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwOUcBAgMJYm9hcmRWaWV3KAABBAZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDhHAQQDCWJvYXJkVmlldygAAQYGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDA3RwEGAwlib2FyZFZpZXcoAAEIBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwNkcBCAMJYm9hcmRWaWV3KAABCgZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDVHAQoDCWJvYXJkVmlldygAAQwGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDA0RwEMAwlib2FyZFZpZXcoAAEOBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwM0cBDgMJYm9hcmRWaWV3KAABEAZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDJHARADCWJvYXJkVmlldygAARIGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDAxAA=="
+    },
+    {
       "name": "a text of three runs: plain, bold, plain",
       "update": "AQcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQYgcGxhaW5GAQIEYm9sZARudWxsRAEIBGJvbGRGAQkEYm9sZAJ7fUQBDQZwbGFpbiAA"
     },
@@ -1267,6 +1331,279 @@
       },
       "name": "one joins the two cells of a column while the other deletes the lower row",
       "update": "AwGAgICAEACoAgABfQEBAgAoAAEKB3Jvd3NwYW4BfQIPAQAHAQdkZWZhdWx0AwlwYXJhZ3JhcGgHAAEABgQAAQEGYmVmb3JlhwEAAwV0YWJsZQcAAQgDCHRhYmxlUm93BwABCQMJdGFibGVDZWxsBwABCgMJcGFyYWdyYXBoBwABCwYEAAEMAWGHAQoDCXRhYmxlQ2VsbAcAAQ4DCXBhcmFncmFwaAcAAQ8GBAABEAFigQEJAQAIAgEBEgkCAQAB"
+    },
+    {
+      "json": {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "a",
+                "type": "text"
+              }
+            ],
+            "type": "paragraph"
+          }
+        ],
+        "type": "doc"
+      },
+      "name": "a callout of a tone not on the list",
+      "update": "AQgBAAcBB2RlZmF1bHQDB2NhbGxvdXQHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIBcCgAAQAEdG9uZQF3BnB1cnBsZYcBAAMJcGFyYWdyYXBoBwABBQYEAAEGAWEBAQEABQ=="
+    },
+    {
+      "json": null,
+      "name": "a callout whose tone is a number",
+      "update": "AQUBAAcBB2RlZmF1bHQDB2NhbGxvdXQHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIBcCgAAQAEdG9uZQF9AgEBAQAF"
+    },
+    {
+      "json": {
+        "content": [
+          {
+            "content": [
+              {
+                "content": [
+                  {
+                    "text": "s",
+                    "type": "text"
+                  }
+                ],
+                "type": "detailsSummary"
+              },
+              {
+                "content": [
+                  {
+                    "content": [
+                      {
+                        "text": "kept",
+                        "type": "text"
+                      }
+                    ],
+                    "type": "paragraph"
+                  }
+                ],
+                "type": "detailsContent"
+              }
+            ],
+            "type": "details"
+          }
+        ],
+        "type": "doc"
+      },
+      "name": "a callout of a tone not on the list, in a toggle",
+      "update": "AQ0BAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzU3VtbWFyeQcAAQEGBAABAgFzhwEBAw5kZXRhaWxzQ29udGVudAcAAQQDB2NhbGxvdXQHAAEFAwlwYXJhZ3JhcGgHAAEGBgQAAQcBcCgAAQUEdG9uZQF3BElORk+HAQUDCXBhcmFncmFwaAcAAQoGBAABCwRrZXB0AQEBBQU="
+    },
+    {
+      "json": {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "a",
+                "type": "text"
+              }
+            ],
+            "type": "paragraph"
+          }
+        ],
+        "type": "doc"
+      },
+      "name": "a board view of a view that is no identifier",
+      "update": "AQUBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwlib2FyZFZpZXcoAAEDBnZpZXdJZAF3B3RhYmxlLTEBAQEDAg=="
+    },
+    {
+      "json": {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "a",
+                "type": "text"
+              }
+            ],
+            "type": "paragraph"
+          }
+        ],
+        "type": "doc"
+      },
+      "name": "a board view without its view",
+      "update": "AQQBAAcBB2RlZmF1bHQDCWJvYXJkVmlld4cBAAMJcGFyYWdyYXBoBwABAQYEAAECAWEBAQEAAQ=="
+    },
+    {
+      "json": {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "before",
+                "type": "text"
+              }
+            ],
+            "type": "paragraph"
+          },
+          {
+            "content": [
+              {
+                "content": [
+                  {
+                    "text": "s",
+                    "type": "text"
+                  }
+                ],
+                "type": "detailsSummary"
+              },
+              {
+                "content": [
+                  {
+                    "content": [
+                      {
+                        "content": [
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "a",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "b",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "new 0",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          }
+                        ],
+                        "type": "tableRow"
+                      },
+                      {
+                        "content": [
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "c",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "d",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "new 1",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          }
+                        ],
+                        "type": "tableRow"
+                      },
+                      {
+                        "content": [
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "e",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "content": [
+                                  {
+                                    "text": "f",
+                                    "type": "text"
+                                  }
+                                ],
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          },
+                          {
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              }
+                            ],
+                            "type": "tableCell"
+                          }
+                        ],
+                        "type": "tableRow"
+                      }
+                    ],
+                    "type": "table"
+                  }
+                ],
+                "type": "detailsContent"
+              }
+            ],
+            "type": "details"
+          }
+        ],
+        "type": "doc"
+      },
+      "name": "in a toggle, one adds a column while the other adds a row",
+      "update": "BASAgICAEACHAwUDCXRhYmxlQ2VsbAcAgICAgBAAAwlwYXJhZ3JhcGgoAICAgIAQAAdjb2xzcGFuAX0BKACAgICAEAAHcm93c3BhbgF9AQkDAIcBFwMIdGFibGVSb3cHAAMAAwl0YWJsZUNlbGwHAAMBAwlwYXJhZ3JhcGgHAAMCBgQAAwMBZYcDAQMJdGFibGVDZWxsBwADBQMJcGFyYWdyYXBoBwADBgYEAAMHAWYIAgCHARMDCXRhYmxlQ2VsbAcAAgADCXBhcmFncmFwaAcAAgEGBAACAgVuZXcgMIcBHAMJdGFibGVDZWxsBwACCAMJcGFyYWdyYXBoBwACCQYEAAIKBW5ldyAxGwEABwEHZGVmYXVsdAMJcGFyYWdyYXBoBwABAAYEAAEBBmJlZm9yZYcBAAMHZGV0YWlscwcAAQgDDmRldGFpbHNTdW1tYXJ5BwABCQYEAAEKAXOHAQkDDmRldGFpbHNDb250ZW50BwABDAMFdGFibGUHAAENAwh0YWJsZVJvdwcAAQ4DCXRhYmxlQ2VsbAcAAQ8DCXBhcmFncmFwaAcAARAGBAABEQFhhwEPAwl0YWJsZUNlbGwHAAETAwlwYXJhZ3JhcGgHAAEUBgQAARUBYocBDgMIdGFibGVSb3cHAAEXAwl0YWJsZUNlbGwHAAEYAwlwYXJhZ3JhcGgHAAEZBgQAARoBY4cBGAMJdGFibGVDZWxsBwABHAMJcGFyYWdyYXBoBwABHQYEAAEeAWQA"
     },
     {
       "json": {
@@ -2381,6 +2718,62 @@
     {
       "name": "a row that holds a paragraph beside its cell: the row goes, the table stays",
       "update": "AQ4BAAcBB2RlZmF1bHQDBXRhYmxlBwABAAMIdGFibGVSb3cHAAEBAwl0YWJsZUNlbGwHAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQBYYcBAQMIdGFibGVSb3cHAAEGAwl0YWJsZUNlbGwHAAEHAwlwYXJhZ3JhcGgHAAEIBgQAAQkBYocBBwMJcGFyYWdyYXBoBwABCwYEAAEMAWMBAQEGCA=="
+    },
+    {
+      "name": "a toggle of a summary alone",
+      "update": "AQcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdkZXRhaWxzBwABAwMOZGV0YWlsc1N1bW1hcnkHAAEEBgQAAQUBcwEBAQME"
+    },
+    {
+      "name": "a toggle of its content before its summary",
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdkZXRhaWxzBwABAwMOZGV0YWlsc0NvbnRlbnQHAAEEAwlwYXJhZ3JhcGgHAAEFBgQAAQYBY4cBBAMOZGV0YWlsc1N1bW1hcnkHAAEIBgQAAQkBcwEBAQMI"
+    },
+    {
+      "name": "a toggle whose content holds no block",
+      "update": "AQgBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdkZXRhaWxzBwABAwMOZGV0YWlsc1N1bW1hcnkHAAEEBgQAAQUBc4cBBAMOZGV0YWlsc0NvbnRlbnQBAQEDBQ=="
+    },
+    {
+      "name": "a toggle whose summary holds a paragraph",
+      "update": "AQwBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdkZXRhaWxzBwABAwMOZGV0YWlsc1N1bW1hcnkHAAEEAwlwYXJhZ3JhcGgHAAEFBgQAAQYBc4cBBAMOZGV0YWlsc0NvbnRlbnQHAAEIAwlwYXJhZ3JhcGgHAAEJBgQAAQoBYwEBAQMJ"
+    },
+    {
+      "name": "a toggle in a quote: the quote goes",
+      "update": "AQwBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwpibG9ja3F1b3RlBwABAwMHZGV0YWlscwcAAQQDDmRldGFpbHNTdW1tYXJ5BwABBQYEAAEGAXOHAQUDDmRldGFpbHNDb250ZW50BwABCAMJcGFyYWdyYXBoBwABCQYEAAEKAWMBAQEDCQ=="
+    },
+    {
+      "name": "a callout in a toggle in a callout: the outer callout goes",
+      "update": "AQ8BAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdjYWxsb3V0BwABAwMHZGV0YWlscwcAAQQDDmRldGFpbHNTdW1tYXJ5BwABBQYEAAEGAXOHAQUDDmRldGFpbHNDb250ZW50BwABCAMHY2FsbG91dAcAAQkDCXBhcmFncmFwaAcAAQoGBAABCwFjKAABCQR0b25lAXcDdGlwKAABAwR0b25lAXcEaW5mbwEBAQMM"
+    },
+    {
+      "name": "a callout that holds a table",
+      "update": "AQsBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdjYWxsb3V0BwABAwMFdGFibGUHAAEEAwh0YWJsZVJvdwcAAQUDCXRhYmxlQ2VsbAcAAQYDCXBhcmFncmFwaAcAAQcGBAABCAF4KAABAwR0b25lAXcEd2FybgEBAQMI"
+    },
+    {
+      "name": "a callout with nothing in it",
+      "update": "AQUBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdjYWxsb3V0KAABAwR0b25lAXcDdGlwAQEBAwI="
+    },
+    {
+      "name": "a board view in a callout: the callout goes",
+      "update": "AQcBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwdjYWxsb3V0BwABAwMJYm9hcmRWaWV3KAABBAZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDEoAAEDBHRvbmUBdwRpbmZvAQEBAwQ="
+    },
+    {
+      "name": "a board view in a quote: the quote goes",
+      "update": "AQYBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwpibG9ja3F1b3RlBwABAwMJYm9hcmRWaWV3KAABBAZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDEBAQEDAw=="
+    },
+    {
+      "name": "a board view in a line: the line goes",
+      "update": "AQYBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQFhhwEAAwlwYXJhZ3JhcGgHAAEDAwlib2FyZFZpZXcoAAEEBnZpZXdJZAF3JDAxOTMwMDAwLTAwMDAtNzAwMC04MDAwLTAwMDAwMDAwYzAwMQEBAQMD"
+    },
+    {
+      "name": "a board view holding a line: it goes, and the board view in the toggle stays",
+      "update": "AQwBAAcBB2RlZmF1bHQDCWJvYXJkVmlldwcAAQADCXBhcmFncmFwaAcAAQEGBAABAgF4KAABAAZ2aWV3SWQBdyQwMTkzMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMGMwMDGHAQADB2RldGFpbHMHAAEFAw5kZXRhaWxzU3VtbWFyeQcAAQYGBAABBwFzhwEGAw5kZXRhaWxzQ29udGVudAcAAQkDCWJvYXJkVmlldygAAQoGdmlld0lkAXckMDE5MzAwMDAtMDAwMC03MDAwLTgwMDAtMDAwMDAwMDBjMDAyAQEBAAU="
+    },
+    {
+      "name": "a toggle whose second part is a paragraph, in a toggle: the inner one goes",
+      "update": "AQ8BAAcBB2RlZmF1bHQDB2RldGFpbHMHAAEAAw5kZXRhaWxzU3VtbWFyeQcAAQEGBAABAgVvdXRlcocBAQMOZGV0YWlsc0NvbnRlbnQHAAEIAwlwYXJhZ3JhcGgHAAEJBgQAAQoEa2VwdIcBCQMHZGV0YWlscwcAAQ8DDmRldGFpbHNTdW1tYXJ5BwABEAYEAAERAmluhwEQAwlwYXJhZ3JhcGgHAAEUBgQAARUFbG9vc2UBAQEPDA=="
+    },
+    {
+      "name": "two people each delete one of the two lines a toggle hides: the toggle goes",
+      "update": "AQwBAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAAQAGBAABAQZiZWZvcmWHAQADB2RldGFpbHMHAAEIAw5kZXRhaWxzU3VtbWFyeQcAAQkGBAABCgFzhwEJAw5kZXRhaWxzQ29udGVudAEAAQwBAASBAQ0BAAQBAQEIDw=="
     }
   ]
 }

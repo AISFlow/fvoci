@@ -99,33 +99,18 @@ test('a board is read by its public link without signing in, and not when the li
     ).ok(),
   ).toBe(true);
   const commented = await api.post(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`,
     {
-      data: [
-        {
-          type: 'comment',
-          parentId: cardId,
-          containerId: board.boardId,
-          title: '',
-          body: { type: 'doc', content: [paragraph('The broad beans did well last year.')] },
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      ],
+      data: { body: { type: 'doc', content: [paragraph('The broad beans did well last year.')] } },
     },
   );
   expect(commented.ok()).toBe(true);
-  const table = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        type: 'view',
-        containerId: board.boardId,
-        title: 'Table of it all',
-        fields: { viewType: 'table', shownProperties: ['status', 'note'] },
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      },
-    ],
+  const table = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`, {
+    data: {
+      title: 'Table of it all',
+      viewType: 'table',
+      fields: { viewType: 'table', shownProperties: ['status', 'note'] },
+    },
   });
   expect(table.ok()).toBe(true);
   const shared = (await (

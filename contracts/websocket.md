@@ -55,7 +55,8 @@
 | `type` | 싣는 것 | 누가 받나 |
 |---|---|---|
 | `containerChanged` | `workspaceId`, `container`(`Container` 전체) | 그 워크스페이스를 구독한 연결 가운데 사용자가 보드를 읽는 사람인 것(아래 "받는 사람의 규칙") |
-| `blockChanged` | `workspaceId`, `block`(`Block`). **카드·페이지·일기 항목·단원(`BlockType::WITH_ROOM`)은 본문 대신 그 요약을 싣는다**: `block`의 `body`는 `null`이고, 곁의 `summary`가 `hasBody`·`tasksTotal`·`tasksDone`(`getCards`의 카드의 그것)과 `preview`(`getCards`의 `preview=true`가 주는 `CardPreview`)를 싣는다. 본문은 방(6절)이나 HTTP로 읽는다. 다른 블록(댓글은 본문까지 블록 전체)과 지운 블록(아래 `deleteBlock`)에는 `summary`가 없다 | 위와 같은 연결, 그리고 그 블록이나 그 블록의 부모를 `subscribeBlocks`로 따라가는 연결 |
+| `blockChanged` | `workspaceId`, `block`(`Block`). **카드·페이지·일기 항목·단원(`BlockType::WITH_ROOM`)은 본문 대신 그 요약을 싣는다**: `block`의 `body`는 `null`이고, 곁의 `summary`가 `hasBody`·`tasksTotal`·`tasksDone`(`getCards`의 카드의 그것)과 `preview`(`getCards`의 `preview=true`가 주는 `CardPreview`)를 싣는다. 본문은 방(6절)이나 HTTP로 읽는다. 다른 블록(댓글은 본문까지 블록 전체)과 지운 블록(아래 `deleteCardComment`)에는 `summary`가 없다 | 위와 같은 연결, 그리고 그 블록이나 그 블록의 부모를 `subscribeBlocks`로 따라가는 연결 |
+| `reactionsChanged` | `workspaceId`, `containerId`, `blockId`, `reactions`(`Reaction`의 목록: 그 블록의 반응 전부, 지금의 것. `getCardComments`의 `reactions`와 같은 순서. 마지막 반응을 떼면 빈 목록). 받은 클라이언트는 그 블록의 반응을 통째로 갈아 끼운다 | 그 워크스페이스를 구독한 연결 가운데 사용자가 보드를 읽는 사람인 것(`blockChanged`의 멤버 쪽과 같은 연결). **`subscribeBlocks`로 읽기 토큰만으로 따라가는 연결은 받지 않는다**: 반응은 사용자 ID다 |
 | `containerMemberChanged` | `workspaceId`, `member`(`ContainerMember`) | 그 워크스페이스를 구독한 연결 가운데 사용자가 보드를 읽는 사람인 것 |
 | `containerMemberRemoved` | `workspaceId`, `member`(`{containerId, userId}`) | 위와 같은 연결, 그리고 빠진 사용자의 연결 |
 | `userChanged` | `workspaceId`, `userId`. 이름은 싣지 않는다: 받은 클라이언트가 그 사람을 다시 읽는다(`getWorkspaceUsersById`) | 그 워크스페이스를 구독한 연결 가운데 사용자가 그 사람을 이름으로 보는 것(`permissions::sees_person`: 구성원은 모두, 손님은 같은 보드에 있는 사람). 그 사람 자신의 연결도 |
@@ -63,6 +64,7 @@
 | `containerCategoriesChanged` | `workspaceId`, `containerCategories`(`{containerId, categoryId, hidden}`의 목록). **목록은 바꾼 항목들이지 전체가 아니다**: `setContainerCategory`와 보드를 기본 카테고리에 넣는 조작은 그 카테고리의 보드 전부를, `hideContainer`·`unhideContainer`·`restoreContainer`는 항목 하나를 싣는다. 받는 쪽은 항목마다 덮어쓴다(목록으로 갈아 끼우면 보드를 잃는다) | 그 사용자의 연결 모두 |
 | `categoriesReordered` | `workspaceId`, `categoryOrder`(카테고리 ID의 새 순서) | 그 사용자의 연결 모두 |
 | `categoryContainersReordered` | `workspaceId`, `categoryId`, `containerOrder`(그 카테고리의 보드 ID의 새 순서) | 그 사용자의 연결 모두 |
+| `favoritesChanged` | `workspaceId`. 무엇이 바뀌었는지 싣지 않는다: 받은 클라이언트가 즐겨찾기를 다시 읽는다(`getFavorites`) | 즐겨찾기 주인의, 그 워크스페이스를 구독한 연결 모두 |
 | `clientConfigChanged` | `clientConfig` | 모든 연결. **지금은 보내는 곳이 없다**(서버 설정이 실행 중에 바뀌지 않는다) |
 | `workspaceSubscribed` | `workspaceId` | `subscribeWorkspace`가 수락된 그 연결 |
 | `blocksSubscribed` | `workspaceId`, `blockIds`(중복 제거·정렬된 수락 블록 ID 목록) | `subscribeBlocks`가 수락된 그 연결 |
@@ -79,7 +81,7 @@
 - "보드의 멤버"는 메시지를 보낼 때 유효한 멤버 목록이다: 직접 역할을 받은 사람과 보드에 역할이 있는 팀의 사람. 그 조직의 구성원·역할·팀·공유 상태가 바뀌면 무효화되는 캐시(조직마다 따로이고, 휴지통 비우기 같은 시스템의 집안일은 건드리지 않는다)로 검사하며 워크스페이스 역할도 다시 확인한다. 워크스페이스를 구독하지 않은 연결은 멤버여도 받지 않는다.
 - "보드를 읽는 사람"은 보드의 멤버이고, **워크스페이스에 열린 보드·열린 위키·열린 학습**이면 그 워크스페이스의 구성원(손님 아님) 모두다: 열린 보드·열린 위키·열린 학습은 참여하지 않고 읽는다(`App::container_access`와 같은 규칙). 열린 템플릿은 멤버만이다. 권한을 바꾸는 DB 쓰기가 취소되어 완료 여부를 모르면 그 뒤 60초 동안은 캐시를 쓰지 않고 보낼 때마다 저장소에서 다시 읽는다. 확인된 롤백은 이에 해당하지 않는다.
 - **카테고리의 네 메시지는 그 사용자의 연결 가운데 그 워크스페이스를 구독한 것 모두에 간다.** 같은 사용자의 다른 탭도 받는다.
-- `subscribeBlocks`로 따라가는 연결 가운데 읽기 토큰만으로 읽는 독자(세션 없는 연결, 보드의 역할이 없거나 그 워크스페이스에 없거나 세션이 그 조직을 열지 못하는 사용자)가 받는 `blockChanged`은 HTTP의 `getBlocks`가 그 독자에게 주는 모양이다: `createdBy`, `modifiedBy`, 댓글의 본문의 모든 멘션의 `userId`, 사람 속성이 가리키는 사람이 비어 있다. 요약의 미리 보기 글에는 멘션과 참조가 아무것도 내지 않는다. 사용자 ID가 가입 시각을 드러낸다. 그 보드를 멤버로 보는 사용자(보드의 역할이 있고, 그 워크스페이스에 있고, 세션이 그 조직을 연다)의 연결은 같은 링크로 따라가도 멤버가 받는 모양을 받는다.
+- `subscribeBlocks`로 따라가는 연결 가운데 읽기 토큰만으로 읽는 독자(세션 없는 연결, 보드의 역할이 없거나 그 워크스페이스에 없거나 세션이 그 조직을 열지 못하는 사용자)가 받는 `blockChanged`은 HTTP의 `getSharedBlocks`가 그 독자에게 주는 모양이다: `createdBy`, `modifiedBy`, 댓글의 본문의 모든 멘션의 `userId`, 사람 속성이 가리키는 사람이 비어 있다. 요약의 미리 보기 글에는 멘션과 참조가 아무것도 내지 않는다. 사용자 ID가 가입 시각을 드러낸다. 그 보드를 멤버로 보는 사용자(보드의 역할이 있고, 그 워크스페이스에 있고, 세션이 그 조직을 연다)의 연결은 같은 링크로 따라가도 멤버가 받는 모양을 받는다.
 - 한 연결이 워크스페이스 구독과 블록 구독을 함께 해서 두 길로 다 해당하면 메시지를 두 번 받는다(보드를 멤버로 보면 둘 다 멤버의 모양, 아니면 블록 구독의 것은 사용자 ID를 비운 모양).
 - 쓴 사람 자신의 연결도 받는다. 서버는 보낸 사람을 빼지 않는다.
 
@@ -87,17 +89,19 @@
 
 | 조작(계약의 `operationId`) | 메시지 |
 |---|---|
-| `createBoard`, `createContainersAndBlocks`, `duplicateContainer`(템플릿에서 만들기 포함), `onboard` | 새 보드마다 `containerChanged`, 블록마다 `blockChanged`, 멤버마다 `containerMemberChanged`. 템플릿이 아닌 새 보드는 만든 사람의 기본 카테고리에 들어가며 `containerCategoriesChanged`를 낸다. `onboard`는 보드를 고친 뒤 `containerChanged`를 한 번 더 낸다 |
+| `createBoard`, `duplicateContainer`(템플릿에서 만들기 포함), `onboard` | 새 보드마다 `containerChanged`, 블록마다 `blockChanged`, 멤버마다 `containerMemberChanged`. 템플릿이 아닌 새 보드는 만든 사람의 기본 카테고리에 들어가며 `containerCategoriesChanged`를 낸다. `onboard`는 보드를 고친 뒤 `containerChanged`를 한 번 더 낸다 |
 | `importArchive` | 보드·블록의 `containerChanged`·`blockChanged`이 멤버가 생기기 전에 나가 **아무도 받지 않는다**. 그 뒤 `containerMemberChanged`, `containerCategoriesChanged`, 이미지를 고친 블록의 `blockChanged` |
 | `patchContainer` | `containerChanged`. **템플릿**의 패치에 `type`이 있으면(바뀌지 않았어도) 멤버가 아닌 워크스페이스 사용자마다: 비공개면 `containerMemberRemoved`, 공개면 보기 역할의 `containerMemberChanged`. 템플릿이 아닌 보드는 종류가 바뀌어도 `containerChanged`뿐이다. 다만 **열린 보드·열린 위키·열린 학습**을 비공개로 바꾸면 멤버 아니게 읽던 사람의 연결에 `deleteContainer`와 같은 `containerChanged`(`deletedAt`이 있음)가 간다: 그 사람에게는 보드·위키·학습이 없어졌다 |
-| `patchContainersAndBlocks` | 바뀐 블록마다 `blockChanged`, 바뀐 보드마다 `containerChanged` |
 | `reorderCardProperties` | 새 순서의 `cardProperties`를 실은 `containerChanged` |
-| `deleteContainer`, `deleteContainersAndBlocks` | `containerChanged`, `container`는 `id`, `workspaceId`, `updatedAt`, `deletedAt`만 뜻이 있고 나머지는 빈 값. 받는 사람은 지우기 직전에 그 보드를 읽던 사람(멤버, 열린 보드·열린 위키·열린 학습이면 워크스페이스의 구성원도). `deleteContainersAndBlocks`는 그 앞에 블록마다 삭제 `blockChanged`(모양은 아래 `deleteBlock`)을 내는데, 이것도 그 사람들에게만 가고 `subscribeBlocks`로 따라가던 연결은 받지 않는다. 둘 다 보드의 공유 토큰으로 따라가던 블록 구독을 끝낸다(`blocksUnsubscribed`) |
+| `deleteContainer` | `containerChanged`, `container`는 `id`, `workspaceId`, `updatedAt`, `deletedAt`만 뜻이 있고 나머지는 빈 값. 받는 사람은 지우기 직전에 그 보드를 읽던 사람(멤버, 열린 보드·열린 위키·열린 학습이면 워크스페이스의 구성원도). 보드의 공유 토큰으로 따라가던 블록 구독을 끝낸다(`blocksUnsubscribed`) |
 | `restoreContainer` | 돌아온 보드의 `containerChanged` 하나, 그리고 보드를 사이드바에 다시 둔 사용자마다 그 사람의 연결에 `containerCategoriesChanged`(그 보드의 항목 하나: 원래 카테고리, 그사이 지워졌으면 기본 카테고리)와 그 카테고리의 `categoryContainersReordered`(원래 자리로 들어가며 뒤의 보드가 밀린 순서). 비공개 보드는 다시 구성원이 된 사람에게만. **함께 돌아온 블록과 멤버의 메시지는 없다** |
-| `createBlocks`, `patchBlock`, `patchBlocks`, `createCard`, `patchCard`, `duplicateBlock`, `restoreBlock` | 바뀌거나 생긴 블록마다 `blockChanged`. `restoreBlock`은 되살린 블록 하나만 알린다(함께 돌아온 아래 블록은 알리지 않는다) |
-| `deleteBlock` | `blockChanged`, `block`은 `id`, `containerId`, `type`, `updatedAt`, `deletedAt`만 뜻이 있고 나머지는 빈 값. **지운 블록 하나만** 알린다. 함께 휴지통에 간 아래 블록(카드의 댓글·첨부)은 따로 알리지 않는다 |
-| `createWiki`, `createPage`, `patchPage`, `deletePage`, `createPageComment`, `patchPageComment`, `deletePageComment`, `restorePageComment`, `restorePageBodyVersion` | 위키는 보드의 한 종류(`kind`가 `wiki`)이고 페이지는 블록(`type`이 `page`)이어서 같은 메시지가 나간다: `createWiki`는 `createBoard`와 같고(`containerChanged`의 `container.kind`가 `wiki`), `createPage`·`patchPage`는 그 페이지의 `blockChanged`(아이콘과 순서는 `fields`의 `icon`·`order`), `deletePage`는 `deleteBlock`과 같다(지운 페이지 하나만. 함께 휴지통에 간 아래 페이지와 그 댓글은 따로 알리지 않는다). 위 표의 보드 조작 가운데 위키도 받는 것(`patchContainer`, `deleteContainer`, `restoreContainer`, 멤버·팀)은 위키에도 같은 메시지를 낸다. 페이지의 댓글은 카드의 댓글과 같다: `createPageComment`·`patchPageComment`는 그 댓글(`type`이 `comment`, `parentId`가 페이지)의 `blockChanged`, `deletePageComment`는 `deleteBlock`과, `restorePageComment`는 `restoreBlock`과 같다. `restorePageBodyVersion`은 `restoreCardBodyVersion`과 같다(그 페이지의 `blockChanged`, 방에는 새 문서) |
-| `createCourse`, `createUnit`, `patchUnit`, `moveUnit`, `deleteUnit`, `restoreUnit`, `createUnitComment`, `patchUnitComment`, `deleteUnitComment`, `restoreUnitComment`, `restoreUnitBodyVersion` | 학습은 그릇의 한 종류(`kind`가 `course`)이고 장·단원은 블록(`type`이 `chapter`·`unit`)이다: `createCourse`는 `createBoard`와 같고(`containerChanged`의 `container.kind`가 `course`), `createUnit`·`patchUnit`·`moveUnit`은 그 블록과 순서가 다시 매겨진 형제의 `blockChanged`, `deleteUnit`은 `deleteBlock`과 같다(지운 장이나 단원 하나만; 함께 휴지통에 간 장 아래 단원과 단원의 댓글은 따로 알리지 않는다), `restoreUnit`은 돌아온 장·단원·댓글과 순서가 바뀐 형제의 `blockChanged`을 낸다. `patchContainer`, `deleteContainer`, `restoreContainer`, 멤버·팀 조작도 학습에 같은 메시지를 낸다. 단원의 댓글은 카드·페이지의 댓글과 같다: `createUnitComment`·`patchUnitComment`는 그 댓글(`type`이 `comment`, `parentId`가 단원)의 `blockChanged`, `deleteUnitComment`는 `deleteBlock`과, `restoreUnitComment`는 `restoreBlock`과 같다. `restoreUnitBodyVersion`은 `restoreCardBodyVersion`과 같다(그 단원의 `blockChanged`, 방에는 새 문서) |
+| `createCard`, `patchCard`, `batchPatchCards`, `duplicateCard`, `createCardComment`, `patchCardComment`, `createCardAttachment`, `createBoardView`, `patchBoardView`, `moveBoardView`, `duplicateBoardView`, `moveViewCards` | 바뀌거나 생긴 블록마다 `blockChanged`. `duplicateCard`는 사본의 블록(카드와 그 아래 첨부·하위 카드)마다, `createBoardView`·`moveBoardView`·`duplicateBoardView`는 함께 순서가 다시 매겨진 보기(`companionViews`)마다 먼저, `moveViewCards`는 보기 다음에 옮긴 카드마다 낸다 |
+| `restoreCardComment`, `restoreCardAttachment`, `restoreBoardView` | 되살린 블록 하나의 `blockChanged`(함께 돌아온 아래 블록은 알리지 않는다) |
+| `batchRestoreCards` | 되살린 카드마다 `blockChanged`, 함께 돌아온 하위 카드도. 함께 돌아온 댓글·첨부는 알리지 않는다 |
+| `deleteCardComment`, `deleteCardAttachment`, `deleteBoardView` | `blockChanged`, `block`은 `id`, `containerId`, `type`, `updatedAt`, `deletedAt`만 뜻이 있고 나머지는 빈 값. **지운 블록 하나만** 알린다 |
+| `batchDeleteCards` | 지운 카드마다, 함께 휴지통에 간 하위 카드도, `deleteCardComment`와 같은 모양의 `blockChanged`. 함께 휴지통에 간 댓글·첨부는 따로 알리지 않는다 |
+| `createWiki`, `createPage`, `patchPage`, `deletePage`, `createPageComment`, `patchPageComment`, `deletePageComment`, `restorePageComment`, `restorePageBodyVersion` | 위키는 보드의 한 종류(`kind`가 `wiki`)이고 페이지는 블록(`type`이 `page`)이어서 같은 메시지가 나간다: `createWiki`는 `createBoard`와 같고(`containerChanged`의 `container.kind`가 `wiki`), `createPage`·`patchPage`는 그 페이지의 `blockChanged`(아이콘과 순서는 `fields`의 `icon`·`order`), `deletePage`는 `deleteCardComment`와 같다(지운 페이지 하나만. 함께 휴지통에 간 아래 페이지와 그 댓글은 따로 알리지 않는다). 위 표의 보드 조작 가운데 위키도 받는 것(`patchContainer`, `deleteContainer`, `restoreContainer`, 멤버·팀)은 위키에도 같은 메시지를 낸다. 페이지의 댓글은 카드의 댓글과 같다: `createPageComment`·`patchPageComment`는 그 댓글(`type`이 `comment`, `parentId`가 페이지)의 `blockChanged`, `deletePageComment`는 `deleteCardComment`와, `restorePageComment`는 `restoreCardComment`와 같다. `restorePageBodyVersion`은 `restoreCardBodyVersion`과 같다(그 페이지의 `blockChanged`, 방에는 새 문서) |
+| `createCourse`, `createUnit`, `patchUnit`, `moveUnit`, `deleteUnit`, `restoreUnit`, `createUnitComment`, `patchUnitComment`, `deleteUnitComment`, `restoreUnitComment`, `restoreUnitBodyVersion` | 학습은 그릇의 한 종류(`kind`가 `course`)이고 장·단원은 블록(`type`이 `chapter`·`unit`)이다: `createCourse`는 `createBoard`와 같고(`containerChanged`의 `container.kind`가 `course`), `createUnit`·`patchUnit`·`moveUnit`은 그 블록과 순서가 다시 매겨진 형제의 `blockChanged`, `deleteUnit`은 `deleteCardComment`와 같다(지운 장이나 단원 하나만; 함께 휴지통에 간 장 아래 단원과 단원의 댓글은 따로 알리지 않는다), `restoreUnit`은 돌아온 장·단원·댓글과 순서가 바뀐 형제의 `blockChanged`을 낸다. `patchContainer`, `deleteContainer`, `restoreContainer`, 멤버·팀 조작도 학습에 같은 메시지를 낸다. 단원의 댓글은 카드·페이지의 댓글과 같다: `createUnitComment`·`patchUnitComment`는 그 댓글(`type`이 `comment`, `parentId`가 단원)의 `blockChanged`, `deleteUnitComment`는 `deleteCardComment`와, `restoreUnitComment`는 `restoreCardComment`와 같다. `restoreUnitBodyVersion`은 `restoreCardBodyVersion`과 같다(그 단원의 `blockChanged`, 방에는 새 문서) |
 | `addMember`, `joinContainer`, `updateMember` | `containerMemberChanged`. 이미 멤버인 사용자의 `addMember`·`joinContainer`, 멤버가 아닌 사용자의 `updateMember`는 아무것도 내지 않는다. 템플릿이 아닌 보드에 새로 든 멤버는 기본 카테고리에 들어가며 `containerCategoriesChanged`도 받는다 |
 | `removeMember`, `leaveContainer` | `containerMemberRemoved` |
 | `addTeamMember`, `removeTeamMember`, `deleteTeam`, `setContainerTeam`, `removeContainerTeam` | 역할이 바뀐 보드와 사람마다 `containerMemberRemoved`(역할이 생기거나 오른 때에도): 받은 클라이언트는 보드의 멤버를 다시 읽는다. 사람을 넣고 빼면 그 팀이 걸린 보드마다 그 사람의 것, 팀을 지우면 그 팀이 걸린 보드마다 그 팀의 사람 모두의 것, 보드의 팀 역할을 주고 바꾸고 떼면 그 보드에서 그 팀의 사람 모두의 것이다. 팀이 이미 그 역할이었거나 뗄 역할이 없었으면, 이미 팀에 있는 사람을 넣거나 팀에 없는 사람을 빼면, 또 팀이 걸린 보드나 팀의 사람이 없으면 아무것도 내지 않는다 |
@@ -106,13 +110,15 @@
 | `reorderCategories` | `categoriesReordered` |
 | `setContainerCategory`, `hideContainer`, `unhideContainer` | `containerCategoriesChanged` |
 | `reorderCategoryContainers` | `categoryContainersReordered` |
+| `putFavorite`(새로 붙였을 때), `deleteFavorite`(떼었을 때), `reorderFavorites` | `favoritesChanged`. 이미 붙어 있던 것을 다시 붙이거나 없는 것을 떼면 아무것도 내지 않는다 |
 | `setPublicLink`(끄기, 새 토큰) | 옛 토큰으로 따라가던 연결에 `blocksUnsubscribed` |
 | `patchMe` | 이름이 바뀌면 그 사람이 구성원인(손님 포함) 워크스페이스마다 `userChanged`. 바꾸는 것이 없는 요청은 아무것도 내지 않는다 |
 | `leaveOrganization` | 나간 사람의 연결 가운데 그 조직의 워크스페이스를 구독한 것에 워크스페이스마다 `workspaceUnsubscribed`(`workspace access ended`). 그 워크스페이스들의 방이 나간 사람을 다시 묻는다(`docLeft`). 나간 사람이 혼자 관리하던 보드가 워크스페이스의 다른 관리자에게 넘어가면 그 보드의 `containerMemberChanged`(새 관리자). 워크스페이스에서 사람을 뺄 때처럼 다른 사람에게 그 사람이 빠졌다는 메시지는 없다 |
+| `addReaction`, `removeReaction` | 반응이 생기거나 없어지면 그 블록의 `reactionsChanged`. 이미 있는 반응을 다시 달거나 없는 반응을 떼면 아무것도 내지 않는다. 블록은 바뀌지 않아 `blockChanged`는 없고, 알림도 없다. 따로 돌며 보내고, 보낼 때 반응을 다시 읽는다: 잇달아 단 것과 뗀 것은 늦게 읽은 것이 늦게 간다 |
 | `patchUserSettings`, `patchClientState` | 메시지 없음 |
 | `readNotification`, `readNotifications`, 알림 작업이 알림을 만들거나 늘릴 때 | 그 사용자의 연결에 `notificationsChanged`(위의 규칙) |
 
-메시지는 쓰기가 끝난 뒤 보낸다. 어떤 조작은 답하기 전에 보내고(`createContainersAndBlocks`, `createBlocks`, `createCard`, `deleteContainer`, `deleteContainersAndBlocks`, 카테고리의 메시지 모두), 나머지는 따로 돌며 보낸다. 클라이언트는 HTTP의 답과 메시지의 순서에 기대지 않는다.
+메시지는 쓰기가 끝난 뒤 보낸다. 어떤 조작은 답하기 전에 보내고(`createCard`, `deleteContainer`, 카테고리의 메시지 모두), 나머지는 따로 돌며 보낸다. 클라이언트는 HTTP의 답과 메시지의 순서에 기대지 않는다.
 
 ### 서버가 구독을 끝낼 때
 

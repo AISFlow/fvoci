@@ -101,12 +101,7 @@ pub(crate) async fn get_client_state(
 ) -> Result<BTreeMap<String, String>, StoreError> {
     let mut sql = scope.sql("SELECT key, value FROM user_client_state WHERE user_id = ");
     sql.bind(Id(user_id)).push(" ORDER BY key");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| Ok((row.text(0)?, row.text(1)?)))
-        .collect()
+    scope.all(sql).await
 }
 
 pub(crate) async fn patch_client_state(

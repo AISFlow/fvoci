@@ -53,7 +53,7 @@ skip_by_files() {
     "$web_only; all Rust: $rust_only"
   rm -f "$list"
   if ! $any; then return 0; fi
-  if $web_only; then skip+=(rust-sqlite rust-postgres); fi
+  if $web_only; then skip+=(rust-sqlite rust-postgres rust-postgres-versions); fi
   if $rust_only; then skip+=(web-checks web-e2e web-e2e-apple); fi
 }
 

@@ -16,12 +16,14 @@ import LayoutTemplateIcon from '@lucide/svelte/icons/layout-template';
 import PencilIcon from '@lucide/svelte/icons/pencil';
 import Trash2Icon from '@lucide/svelte/icons/trash-2';
 
+import { favoriteAction } from '$lib/components/favorite-toggle/favorite-action.ts';
+import type { ReaderStars } from '$lib/components/favorite-toggle/reader-stars.ts';
 import type { MenuAction } from '$lib/components/menu/actions.ts';
 import { m } from '$lib/i18n/paraglide/messages.js';
 import type { Container } from '$lib/logic/wire.ts';
 import { copyPlaces, type Category, type Workspace } from '$lib/state/index.ts';
 
-import { exportAction } from './container-export.ts';
+import { exportActions } from './container-export.ts';
 import { categoryOrderAfterStep, moveToEnd } from './sidebar-logic.ts';
 
 /**
@@ -54,6 +56,8 @@ export interface SidebarMenus {
   onTemplateFromBoard: (boardId: string) => void;
   onDuplicateContainer: (containerId: string) => void;
   onCopyToWorkspace?: ((container: Container) => void) | undefined;
+  /** The reader's stars: a board, a wiki or a course is starred from its menu too. */
+  stars?: ReaderStars | undefined;
 }
 
 function stepCategory(menus: SidebarMenus, category: Category, step: -1 | 1): void {
@@ -125,15 +129,9 @@ export function categoryActions(menus: SidebarMenus, category: Category): MenuAc
   return actions;
 }
 
-export function containerActions(
-  menus: SidebarMenus,
-  container: Container,
-  home: Category,
-): MenuAction[] {
-  const { workspace } = menus;
-  const kind = container.kind ?? 'board';
-  const wiki = kind === 'wiki';
-  const moves = workspace.sidebar
+/** The lines that move a board, wiki or course from `home` to the end of another category. */
+function movesOf(workspace: Workspace, container: Container, home: Category): MenuAction[] {
+  return workspace.sidebar
     .filter((entry) => entry.category.id !== home.id)
     .map((entry): MenuAction => ({
       id: `move-to-${entry.category.id}`,
@@ -144,12 +142,30 @@ export function containerActions(
         if (move) void workspace.moveContainer(move.containerId, move.categoryId, move.index);
       },
     }));
+}
+
+export function containerActions(
+  menus: SidebarMenus,
+  container: Container,
+  home: Category,
+): MenuAction[] {
+  const { workspace } = menus;
+  const kind = container.kind ?? 'board';
+  const wiki = kind === 'wiki';
+  const moves = movesOf(workspace, container, home);
   const unjoined = container.id === menus.containerId && menus.openContainerJoinable === true;
-  const saving = unjoined ? [] : [exportAction(workspace, container, moves.length > 0)];
-  if (menus.guest) return saving;
+  // The star first, as at the head of the sidebar: set off from the moves after it.
+  const star = kind === 'diary' ? undefined : favoriteAction(menus.stars, container.id);
+  const starred = star ? [star] : [];
+  const [firstMove, ...otherMoves] = moves;
+  const moved = firstMove && star ? [{ ...firstMove, separated: true }, ...otherMoves] : moves;
+  const before = starred.length + moves.length > 0;
+  const saving = unjoined ? [] : exportActions(workspace, container, before);
+  if (menus.guest) return [...starred, ...saving];
   const hasOtherWorkspace = copyPlaces(workspace.workspaces, container.workspaceId).length > 0;
   return [
-    ...moves,
+    ...starred,
+    ...moved,
     ...saving,
     ...(kind === 'diary' || unjoined
       ? []

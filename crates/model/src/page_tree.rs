@@ -623,7 +623,7 @@ mod tests {
                         (id.clone(), order)
                     })
                     .collect();
-                ordered.push(("new".to_owned(), place.order.clone()));
+                ordered.push(("new".to_owned(), place.order));
                 ordered.sort_by(|one, other| one.1.cmp(&other.1));
                 let orders: Vec<&str> = ordered.iter().map(|(_, order)| order.as_str()).collect();
                 assert!(

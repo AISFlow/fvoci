@@ -35,6 +35,7 @@
   import { getLocale } from '$lib/i18n/paraglide/runtime.js';
 
   import { slashEntries } from './block-menu.ts';
+  import { boardViewEntry, type BoardViewOptions } from './board-view.ts';
   import EditorTools from './EditorTools.svelte';
   import { BODY_FIELD, type BodyEditorProps, type BodyReferences } from './body-editor.ts';
   import { CheckedCollaboration, hasInvalidContent } from './content-check.ts';
@@ -51,7 +52,7 @@
   import { MovesKept } from './moves-kept.ts';
   import type { ReferenceOptions } from './reference.ts';
   import { emptyDoc, isEmptyDoc, toStoredDoc, validateDoc, type DocNode } from './schema.ts';
-  import { suggestionList } from './suggestion-list.ts';
+  import { choiceList, suggestionList } from './suggestion-list.ts';
   import { SlashMenu } from './slash-menu.ts';
   import { BodyUpload, fromUpload } from './uploads.ts';
   import { SaveKey } from './save-key.ts';
@@ -63,6 +64,7 @@
     users = [],
     resolveUser,
     references,
+    boardViews,
     onChange,
     onFocus,
     onBlur,
@@ -197,9 +199,24 @@
     },
   });
 
-  /** The slash menu: the kinds of block, tables, and a file where files can be added (block-menu.ts). */
+  /**
+   * The board views of a body that may show them: drawn by the app, put in by
+   * the slash menu and by pasting a view's address (board-view.ts). Read when
+   * the editor is made: a body that may show them always may.
+   */
+  const viewHost = untrack(() => boardViews);
+  const boardView: BoardViewOptions = viewHost
+    ? {
+        ...viewHost,
+        allowed: true,
+        choices: choiceList({ kind: 'board-view', label: m.editor_board_view_paste_label }),
+      }
+    : { allowed: false };
+  const viewEntries = viewHost ? boardViewEntry(viewHost.choose) : undefined;
+
+  /** The slash menu: the kinds of block, tables, board views, and a file where files can be added (block-menu.ts). */
   const slashMenu = SlashMenu.configure({
-    entries: (current) => slashEntries(current, uploadFile !== undefined),
+    entries: (current) => slashEntries(current, uploadFile !== undefined, viewEntries),
     render: suggestionList({ kind: 'slash', label: m.editor_slash_label }),
   });
 
@@ -239,6 +256,7 @@
           readPlaceholder,
           mention,
           reference,
+          boardView,
           emoji: {
             search: async (query) => {
               const found = searchEmoji(await loadEmoji(getLocale()), query);

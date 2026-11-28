@@ -27,7 +27,19 @@ pub(super) async fn exercise(case: &mut Case, board: &str, card: &str) {
         )
         .await
         .value();
-    case.remember(&attached, "id");
+    let attachment = case.remember(&attached, "id");
+    let of_card = &[("boardId", board), ("cardId", card)];
+    case.present("getCardAttachments", of_card, &attachment)
+        .await;
+    let of_attachment = &[
+        ("boardId", board),
+        ("cardId", card),
+        ("attachmentId", attachment.as_str()),
+    ];
+    case.run("deleteCardAttachment", of_attachment, json!({}))
+        .await;
+    case.run("restoreCardAttachment", of_attachment, json!({}))
+        .await;
     case.present("listContainerFiles", at, &filename).await;
     case.present(
         "listCardFiles",
@@ -166,6 +178,14 @@ async fn archives(case: &mut Case, board: &str) {
     );
     check_archive(case, &archive.body);
     check_archive(case, &all.body);
+    let markdown = case
+        .run("exportContainerMarkdown", &[("boardId", board)], json!({}))
+        .await;
+    assert!(
+        markdown.body.starts_with(b"PK"),
+        "a board's Markdown is a ZIP"
+    );
+    check_archive(case, &markdown.body);
     let upload = case
         .run(
             "createImportUpload",

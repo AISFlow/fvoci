@@ -507,7 +507,7 @@ impl Worker {
                 refused(Refusal::TooManyDocuments, message),
             );
         }
-        let (clients, files) = doc_meta(&changed);
+        let (clients, files, board_views) = doc_meta(&changed);
         let repair = changed.repair.update;
         if mutated {
             checkpoint.since.push(update.to_vec());
@@ -549,6 +549,7 @@ impl Worker {
             client_changes: changed.client_changes,
             steps_ahead: changed.steps_ahead,
             files,
+            board_views,
             remake: false,
             fold,
         }))
@@ -569,7 +570,7 @@ impl Worker {
             drop(changed);
             return self.restore_or_close(doc, checkpoint, too_many_bytes());
         }
-        let (clients, files) = doc_meta(&changed);
+        let (clients, files, board_views) = doc_meta(&changed);
         let repair = changed.repair.update;
         let state = changed.state.unwrap_or_else(|| changed.doc.state());
         checkpoint.base = state;
@@ -591,6 +592,7 @@ impl Worker {
             client_changes: changed.client_changes,
             steps_ahead: changed.steps_ahead,
             files,
+            board_views,
             remake: false,
             fold: false,
         }))
@@ -610,7 +612,7 @@ impl Worker {
             drop(changed);
             return self.restore_or_close(doc, checkpoint, too_many_bytes());
         }
-        let (clients, files) = doc_meta(&changed);
+        let (clients, files, board_views) = doc_meta(&changed);
         self.held_bytes = base_held.saturating_add(state_bytes);
         self.docs.insert(
             doc,
@@ -639,6 +641,7 @@ impl Worker {
             client_changes: changed.client_changes,
             steps_ahead: changed.steps_ahead,
             files,
+            board_views,
             remake: true,
             fold: false,
         }))

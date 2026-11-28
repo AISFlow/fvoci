@@ -13,6 +13,9 @@ import type { Component } from 'svelte';
 import type { MenuAction } from '$lib/components/menu/actions.ts';
 import { m } from '$lib/i18n/paraglide/messages.js';
 import type { FilterConditionMessages } from '$lib/logic/filter-conditions.ts';
+import { DONE_FILTER_ID } from '$lib/logic/filter-done.ts';
+import type { FilterPeriod } from '$lib/logic/filter-period.ts';
+import type { QuickFilterId } from '$lib/logic/quick-filter.ts';
 import {
   TITLE_COLUMN_ID,
   type BoardView,
@@ -74,17 +77,51 @@ export const CONDITION_NAMES: FilterConditionMessages = {
   notEndsWith: m['Filter.not-ends-with'],
   isBefore: m['Filter.is-before'],
   isAfter: m['Filter.is-after'],
+  isWithin: m.filter_is_within,
+};
+
+/** The names of the conditions on whether a card is done: "is set" is done. */
+const DONE_CONDITION_NAMES: FilterConditionMessages = {
+  ...CONDITION_NAMES,
+  isSet: m.viewheader_filter_done_yes,
+  isNotSet: m.viewheader_filter_done_no,
+};
+
+/** The names of the conditions of a filter on a property, or on whether a card is done. */
+export function conditionNamesOf(propertyId: string): FilterConditionMessages {
+  return propertyId === DONE_FILTER_ID ? DONE_CONDITION_NAMES : CONDITION_NAMES;
+}
+
+/** The names of the periods a date condition can be within. */
+export const PERIOD_NAMES: Record<FilterPeriod, () => string> = {
+  thisWeek: m.filter_period_this_week,
+  nextWeek: m.filter_period_next_week,
+  lastWeek: m.filter_period_last_week,
+  thisMonth: m.filter_period_this_month,
+  next7Days: m.filter_period_next_7_days,
+  next30Days: m.filter_period_next_30_days,
+  last7Days: m.filter_period_last_7_days,
+  last30Days: m.filter_period_last_30_days,
+};
+
+/** The names of the quick filters. */
+export const QUICK_FILTER_NAMES: Record<QuickFilterId, () => string> = {
+  mine: m.viewheader_quick_mine,
+  incomplete: m.viewheader_quick_incomplete,
+  overdue: m.viewheader_quick_overdue,
+  dueThisWeek: m.viewheader_quick_due_this_week,
 };
 
 /**
- * The name of what a condition or a sort is on: a property of the board, or
- * the title of the card. An identifier nothing answers to is a property that
- * was deleted since.
+ * The name of what a condition or a sort is on: a property of the board,
+ * the title of the card, or whether it is done. An identifier nothing
+ * answers to is a property that was deleted since.
  */
 export function propertyName(propertyId: string, templates: readonly PropertyTemplate[]): string {
   if (propertyId === TITLE_FILTER_ID || propertyId === TITLE_COLUMN_ID) {
     return m['default-properties.title']();
   }
+  if (propertyId === DONE_FILTER_ID) return m.viewheader_filter_done();
   return (
     templates.find((template) => template.id === propertyId)?.name ??
     m.viewheader_unknown_property()

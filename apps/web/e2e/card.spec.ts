@@ -59,7 +59,7 @@ interface DevBackend {
   createComment(boardId: string, cardId: string, body: object): Promise<unknown>;
   comments(boardId: string, cardId: string): Promise<{ body: unknown }[]>;
   attachments(boardId: string, cardId: string): Promise<{ name: string }[]>;
-  deleteBlock(boardId: string, blockId: string): Promise<void>;
+  batchDeleteCards(boardId: string, cardIds: string[]): Promise<void>;
   failNext(method: string, error: unknown): void;
 }
 interface Dev {
@@ -1033,7 +1033,7 @@ test('a comment somebody else writes appears by itself', async ({ page }) => {
   await expect(list).toHaveCount(count + 1);
   await expect(list.last()).toContainText('Seen from elsewhere');
   // Not the reader's, but the reader is the board's admin, who deletes
-  // anyone's comment (`deleteBlock` in the contract).
+  // anyone's comment (`deleteComment` in the contract).
   await expect(list.last().getByRole('button', { name: /^Delete the comment/ })).toHaveCount(1);
 });
 
@@ -1235,9 +1235,15 @@ test('on a board the reader may only look at, nothing can be changed', async ({ 
   await expect(page.getByTestId('property-name')).toHaveCount(0);
   await expect(page.getByTestId('add-property')).toHaveCount(0);
   await expect(page.getByTestId('card-add-icon')).toHaveCount(0);
+  // What can be pressed opens a card, as reading does: a card that names this one.
   await expect(
-    page.getByTestId('card-properties').locator('input:not(:disabled), button:not(:disabled)'),
+    page
+      .getByTestId('card-properties')
+      .locator('input:not(:disabled), button:not(:disabled):not([data-slot="relation-referrer"])'),
   ).toHaveCount(0);
+  await expect(
+    page.getByTestId('card-properties').locator('[data-slot="relation-referrer"]'),
+  ).toHaveText(['Binary search']);
 
   // The body is read in its room (others' changes come in), never edited, and says why.
   await expect(page.getByTestId('card-body')).toHaveAttribute('data-editor', 'reading');
@@ -1274,7 +1280,7 @@ test('somebody else deletes the card while it is open: the same notice', async (
   const place = await openTaskCard(page);
   await expect(page.getByTestId('card-title')).toBeVisible();
   await page.evaluate(async ({ boardId, cardId }) => {
-    await window.fvociDev.someoneElse().deleteBlock(boardId, cardId);
+    await window.fvociDev.someoneElse().batchDeleteCards(boardId, [cardId]);
   }, place);
   await expect(page.getByTestId('card-missing').getByRole('alert')).toHaveText(
     "This card doesn't exist or is inaccessible.",

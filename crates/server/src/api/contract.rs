@@ -313,9 +313,17 @@ const SCHEMAS: &[(&str, Members)] = &[
             "bodyMarkdown",
             "hasComplexBlocks",
             "complexBlocks",
+            "recurrence",
+            "recurredTo",
         ]),
     ),
+    ("Recurrence", Members::AllBut(&["from"])),
+    ("RecurrenceAnchor", Members::AsWritten),
+    ("RecurrenceUnit", Members::AsWritten),
+    ("CardEvent", Members::All),
+    ("CardEventKind", Members::AsWritten),
     ("CardPreview", Members::All),
+    ("CardWithReactions", Members::AllBut(&["reactions"])),
     ("CardsOfPage", Members::AsWritten),
     ("CompactCard", Members::All),
     ("ComplexBlock", Members::All),
@@ -327,7 +335,11 @@ const SCHEMAS: &[(&str, Members)] = &[
     ("CategoryContainers", Members::All),
     ("ClientConfig", Members::All),
     ("CommentVersion", Members::All),
+    ("CommentWithReactions", Members::AllBut(&["reactions"])),
+    ("Reaction", Members::All),
     ("DeletedItem", Members::AllBut(&["kind"])),
+    ("Favorite", Members::AllBut(&["number"])),
+    ("FavoriteKind", Members::AsWritten),
     ("FileRecord", Members::All),
     ("ListedFile", Members::All),
     ("FileLease", Members::All),
@@ -430,18 +442,17 @@ const SCHEMAS: &[(&str, Members)] = &[
     ("OrgRole", Members::AsWritten),
     ("OrgKind", Members::AsWritten),
     ("Page", Members::All),
+    ("PageWithReactions", Members::AllBut(&["reactions"])),
     ("PageNode", Members::All),
-    ("LinkedBlock", Members::AllBut(&["number"])),
+    (
+        "LinkedBlock",
+        Members::AllBut(&["number", "containerTitle", "viewType"]),
+    ),
     ("WorkspaceRoleChange", Members::All),
     // What a request carries.
     ("AcceptInvitation", Members::Only(&["token"])),
     ("AccountChange", Members::AsWritten),
     ("AdminChange", Members::AsWritten),
-    ("BlockPatch", Members::Only(&[])),
-    (
-        "BlockPatchBatch",
-        Members::Only(&["blockIds", "blockPatches"]),
-    ),
     ("ContainerPatch", Members::Only(&[])),
     ("CardPatch", Members::Only(&[])),
     ("CategoryUpdate", Members::AsWritten),
@@ -449,7 +460,6 @@ const SCHEMAS: &[(&str, Members)] = &[
         "ChangePasswordRequest",
         Members::Only(&["oldPassword", "newPassword"]),
     ),
-    ("DeleteContainersAndBlocks", Members::Only(&["containers"])),
     ("FileForm", Members::AsWritten),
     ("FinishPasswordReset", Members::All),
     ("CompleteEmailVerification", Members::Only(&["token"])),
@@ -469,9 +479,7 @@ const SCHEMAS: &[(&str, Members)] = &[
         "NewAccount",
         Members::Only(&["username", "email", "password"]),
     ),
-    ("NewBlock", Members::AsWritten),
     ("NewBoard", Members::AsWritten),
-    ("NewContainersAndBlocks", Members::AsWritten),
     ("NewWiki", Members::AsWritten),
     ("NewPage", Members::Only(&[])),
     ("PagePatch", Members::Only(&[])),
@@ -492,6 +500,7 @@ const SCHEMAS: &[(&str, Members)] = &[
     ("UnitKind", Members::AsWritten),
     ("UnitNode", Members::All),
     ("Unit", Members::All),
+    ("UnitWithReactions", Members::AllBut(&["reactions"])),
     ("DeletedUnit", Members::All),
     ("NewUnit", Members::Only(&[])),
     ("UnitMove", Members::Only(&[])),
@@ -541,6 +550,7 @@ const SCHEMAS: &[(&str, Members)] = &[
     ("CardCommentPatch", Members::Only(&["body", "readAt"])),
     ("CardMovesRequest", Members::Only(&["cardIds"])),
     ("CardBatchIds", Members::All),
+    ("CardBatchPatch", Members::Only(&["cardIds"])),
     ("NewCardAttachment", Members::All),
     ("CategoryPatch", Members::Only(&[])),
     ("CategoryContainerUpdate", Members::Only(&[])),
@@ -550,6 +560,7 @@ const SCHEMAS: &[(&str, Members)] = &[
     ),
     ("NewBoardView", Members::Only(&["title", "viewType"])),
     ("BoardViewMove", Members::Only(&[])),
+    ("BoardViewPatch", Members::Only(&[])),
     ("BoardViewDuplicate", Members::Only(&[])),
     ("ViewType", Members::AsWritten),
     ("NewCard", Members::AsWritten),
@@ -570,10 +581,6 @@ const SCHEMAS: &[(&str, Members)] = &[
     ),
     ("OidcStartRequest", Members::Only(&[])),
     ("DeleteAccountRequest", Members::Only(&["username"])),
-    (
-        "PatchContainersAndBlocks",
-        Members::Only(&["containerIds", "containerPatches"]),
-    ),
     (
         "RegisterRequest",
         Members::Only(&["username", "email", "password"]),
@@ -880,8 +887,7 @@ fn require_members(name: &str, schema: &mut Value, members: Members) -> Result<(
     let names: Vec<String> = own
         .get("properties")
         .and_then(Value::as_object)
-        .map(|properties| properties.keys().cloned().collect())
-        .unwrap_or_default();
+        .map_or_default(|properties| properties.keys().cloned().collect());
     let unknown = |listed: &[&str]| {
         listed
             .iter()

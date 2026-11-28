@@ -15,6 +15,7 @@ import {
   type Comment,
   type CommentVersion,
 } from '../state/backend.ts';
+import type { WithReactions } from '../state/reaction-types.ts';
 import type { DeletedItem, Paging } from '../state/trash-reads.ts';
 import { BlockTurns } from '../state/write.ts';
 import type {
@@ -37,6 +38,7 @@ import {
   type Schemas,
 } from './convert.ts';
 import type { RequestOptions } from './http.ts';
+import { withReactions } from './reactions.ts';
 import type { WorkspacePath } from './requests.ts';
 
 /**
@@ -161,10 +163,12 @@ export class ServerWikis implements Wikis {
     return nodes.map((node) => pageOf(node, wikiId));
   }
 
-  async page(wikiId: string, pageId: string): Promise<WikiPageDetail> {
-    return pageDetailOf(
-      await this.#request<Schemas['Page']>('/wikis/{wikiId}/pages/{pageId}', { wikiId, pageId }),
+  async page(wikiId: string, pageId: string): Promise<WithReactions<WikiPageDetail>> {
+    const page = await this.#request<Schemas['PageWithReactions']>(
+      '/wikis/{wikiId}/pages/{pageId}',
+      { wikiId, pageId },
     );
+    return withReactions(pageDetailOf(page), page);
   }
 
   async createPage(wikiId: string, draft: PageDraft): Promise<WikiPageDetail> {
@@ -243,12 +247,12 @@ export class ServerWikis implements Wikis {
     );
   }
 
-  async comments(wikiId: string, pageId: string): Promise<Comment[]> {
-    const blocks = await this.#request<Schemas['Block'][]>(
+  async comments(wikiId: string, pageId: string): Promise<WithReactions<Comment>[]> {
+    const blocks = await this.#request<Schemas['CommentWithReactions'][]>(
       '/wikis/{wikiId}/pages/{pageId}/comments',
       { wikiId, pageId },
     );
-    return blocks.map(commentOf);
+    return blocks.map((block) => withReactions(commentOf(block), block));
   }
 
   async createComment(wikiId: string, pageId: string, body: DocNode): Promise<Comment> {

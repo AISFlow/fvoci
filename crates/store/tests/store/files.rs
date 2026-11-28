@@ -622,7 +622,7 @@ async fn version_texts(store: &fvoci_store::Store, comment_id: &str) -> Vec<(i64
         .expect("the versions are read")
         .into_iter()
         .map(|version| {
-            let text = version.body.map(|body| body.text()).unwrap_or_default();
+            let text = version.body.map_or_default(|body| body.text());
             (version.version, text)
         })
         .collect()

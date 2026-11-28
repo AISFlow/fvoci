@@ -2,10 +2,10 @@
 //! it until the provider sends the browser back (`oidc_login_flows`).
 
 use crate::Store;
-use crate::db::{Id, OptId, Param, Row};
+use crate::db::{FromRow, Id, OptId, Param, Row};
 use crate::error::StoreError;
 
-/// The columns of a sign-in under way, in the order [`flow_from_row`] reads them.
+/// The columns of a sign-in under way, in the order [`LoginFlow::from_row`] reads them.
 pub(crate) const FLOW_COLUMNS: &str = "state_hash, browser_hash, nonce, pkce_verifier, org_id, \
                                        provider_id, created_at, expires_at, link_session_id, \
                                        pending_at, pending_by, held_hash";
@@ -151,25 +151,29 @@ impl Store {
 }
 
 /// Reads a sign-in under way from the columns [`FLOW_COLUMNS`].
-pub(crate) fn flow_from_row(row: &Row) -> Result<LoginFlow, StoreError> {
-    Ok(LoginFlow {
-        state_hash: row.text(0)?,
-        browser_hash: row.text(1)?,
-        nonce: row.text(2)?,
-        pkce_verifier: row.text(3)?,
-        org_id: row.id(4)?,
-        provider_id: row.id(5)?,
-        created_at: row.int(6)?,
-        expires_at: row.int(7)?,
-        purpose: match (row.id(8)?, row.opt_int(9)?, row.opt_text(11)?) {
-            (_, _, Some(held_hash)) => FlowPurpose::CarryOver { held_hash },
-            (session_id, Some(pending_at), None) => FlowPurpose::Trial {
-                pending_at,
-                user_id: row.id(10)?,
-                session_id,
+impl FromRow for LoginFlow {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(LoginFlow {
+            state_hash: row.text(0)?,
+            browser_hash: row.text(1)?,
+            nonce: row.text(2)?,
+            pkce_verifier: row.text(3)?,
+            org_id: row.id(4)?,
+            provider_id: row.id(5)?,
+            created_at: row.int(6)?,
+            expires_at: row.int(7)?,
+            purpose: match (row.id(8)?, row.opt_int(9)?, row.opt_text(11)?) {
+                (_, _, Some(held_hash)) => FlowPurpose::CarryOver { held_hash },
+                (session_id, Some(pending_at), None) => FlowPurpose::Trial {
+                    pending_at,
+                    user_id: row.id(10)?,
+                    session_id,
+                },
+                (session_id, None, None) if !session_id.is_empty() => {
+                    FlowPurpose::Link { session_id }
+                }
+                (_, None, None) => FlowPurpose::SignIn,
             },
-            (session_id, None, None) if !session_id.is_empty() => FlowPurpose::Link { session_id },
-            (_, None, None) => FlowPurpose::SignIn,
-        },
-    })
+        })
+    }
 }

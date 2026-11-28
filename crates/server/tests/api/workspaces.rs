@@ -539,8 +539,8 @@ async fn an_open_board_of_a_workspace_the_user_is_not_in_is_not_there() {
     };
     for (hidden, absent) in [
         pair(&board.id, ""),
-        pair(&board.id, "/blocks"),
-        pair(&template.id, "/blocks"),
+        pair(&board.id, "/views"),
+        pair(&template.id, "/views"),
     ] {
         let (hidden_answer, absent_answer) =
             (ts.client.get(&hidden).await, ts.client.get(&absent).await);

@@ -44,6 +44,13 @@ export interface RowHost {
   toggleParent(cardId: string): void;
   /** The lines of the "more" menu of a row. */
   rowActions(card: Card): MenuAction[];
+  /**
+   * A press on a row with Ctrl or ⌘ or Shift, or any press while selecting:
+   * the row goes into the selection or out of it. Says whether it did.
+   */
+  pick(cardId: string, event: MouseEvent): boolean;
+  /** The box of a row: takes the row in or out, or with Shift the range up to it. */
+  toggleSelected(cardId: string, range: boolean): void;
 }
 
 /** The kinds of property a cell of the table can change. */

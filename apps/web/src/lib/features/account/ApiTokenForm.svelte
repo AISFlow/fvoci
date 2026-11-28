@@ -142,8 +142,10 @@
       onclick={() => {
         if (more) fold();
         else more = true;
-      }}>{m.account_api_tokens_more()}</Button
+      }}
     >
+      {m.account_api_tokens_more()}
+    </Button>
     {#if more}
       <div id="{uid}-more" class="grid gap-3 border-l pl-3">
         {#if others.length > 0}

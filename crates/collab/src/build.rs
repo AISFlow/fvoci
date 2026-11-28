@@ -255,6 +255,7 @@ pub(crate) fn write_attributes(
                 crate::schema::Fallback::None => None,
                 crate::schema::Fallback::Integer(number) => Some(Any::Number(Number::Int(number))),
                 crate::schema::Fallback::Boolean(truth) => Some(Any::Bool(truth)),
+                crate::schema::Fallback::Text(text) => Some(Any::from(text)),
             },
         };
         if let Some(value) = value {

@@ -12,7 +12,7 @@ use fvoci_server::app::tend_notifications;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::blocks::{block_path, child_of, delete, insert_one, undelete_path};
+use crate::blocks::{child_of, delete, insert_one, restore_card};
 use crate::boards::{delete_member, new_board};
 use crate::common::{Client, Setup, TEST_WORKSPACE_ID, TEST_WS, TestServer, UNKNOWN_ID};
 use crate::rooms::{Peer, card_holds};
@@ -186,11 +186,11 @@ async fn a_mention_typed_a_mention_in_a_comment_and_a_card_given_are_told_once()
     let comment = comment_on(&th.client, &card, &mentioning(&[&b.id])).await;
     th.client
         .patch(
-            &block_path(&board.id, &card.id),
-            &json!({"updatedFields": {"properties": {OWNER: b.id}}}),
+            &format!("{TEST_WS}/cards/{}", card.id),
+            &json!({"updatedProperties": {OWNER: b.id}}),
         )
         .await
-        .check_no_content();
+        .check_ok();
 
     // The two mentions are of one card within the hour: one notification of them.
     let theirs = told(&th, &th.client2).await;
@@ -271,21 +271,24 @@ async fn a_mention_typed_a_mention_in_a_comment_and_a_card_given_are_told_once()
             .updated_at;
         th.client
             .patch(
-                &block_path(&board.id, &comment.id),
+                &format!(
+                    "{TEST_WS}/boards/{}/cards/{}/comments/{}",
+                    board.id, card.id, comment.id
+                ),
                 &json!({"body": body, "readAt": read_at}),
             )
             .await
-            .check_no_content();
+            .check_ok();
         tend_notifications(&th.app).await;
     }
     for owner in ["", b.id.as_str()] {
         th.client
             .patch(
-                &block_path(&board.id, &card.id),
-                &json!({"updatedFields": {"properties": {OWNER: owner}}}),
+                &format!("{TEST_WS}/cards/{}", card.id),
+                &json!({"updatedProperties": {OWNER: owner}}),
             )
             .await
-            .check_no_content();
+            .check_ok();
         tend_notifications(&th.app).await;
     }
     // Each taken out and put back by whoever put it there was counted already.
@@ -330,6 +333,7 @@ async fn a_mention_typed_a_mention_in_a_comment_and_a_card_given_are_told_once()
                 "createdAt": before.created_at,
                 "updatedAt": before.updated_at,
                 "readAt": 0,
+                "archivedAt": 0,
                 "subject": null,
             }),
             "nothing but that there was one"
@@ -537,37 +541,22 @@ async fn a_mention_typed_by_one_of_several_is_told_as_theirs_and_ones_own_is_not
     th.teardown().await;
 }
 
-/// Makes a comment on the board naming `user_id` with `sourceBoardId`, verifying that
-/// copied blocks suppress notifications and auto-subscriptions.
-async fn made_from_another_board(th: &TestServer, board_id: &str, source_id: &str, user_id: &str) {
-    let anchor = card_with(&th.client, board_id, &Value::Null).await;
-    let parent = Block {
-        id: anchor.id,
-        container_id: board_id.to_owned(),
-        ..Block::default()
-    };
-    let mut comment = child_of(&parent, BlockType::Comment, "Made from");
-    comment.body = fvoci_model::Body::parse(mentioning(&[user_id])).expect("a body");
-    let made: Vec<Block> = th
-        .client
+/// Copies `source_id`, as a board is made from a template, after a card there names
+/// `user_id` in its body and is given to them; what that card noted is tended first.
+async fn copy_of_a_board_naming(th: &TestServer, source_id: &str, user_id: &str) {
+    th.client
         .post(
-            &format!(
-                "{}?sourceBoardId={source_id}",
-                crate::blocks::blocks_path(board_id)
-            ),
-            &[comment],
+            &format!("{TEST_WS}/boards/{source_id}/cards"),
+            &json!({"title": "Named", "body": mentioning(&[user_id]),
+                    "properties": {OWNER: user_id}}),
         )
         .await
-        .created_json();
-    assert_eq!(
-        th.app
-            .store()
-            .get_subscribers_for_block(&made[0].id)
-            .await
-            .expect("the watchers are read"),
-        [],
-        "blocks made from another board's make nobody watch them"
-    );
+        .check_created();
+    tend_notifications(&th.app).await;
+    th.client
+        .post_empty(&format!("{TEST_WS}/containers/{source_id}/duplicate"))
+        .await
+        .check_created();
 }
 
 /// What is no person's own words tells nobody: a write that asks for it, a copy of a
@@ -606,31 +595,30 @@ async fn copies_restores_and_quiet_writes_tell_nobody_and_a_body_only_whom_it_ne
 
     // A copy of the card names whom the card names, and tells nobody.
     th.client
-        .post_empty(&format!("{}/duplicate", block_path(&board.id, &card.id)))
+        .post_empty(&format!(
+            "{TEST_WS}/boards/{}/cards/{}/duplicate",
+            board.id, card.id
+        ))
         .await
         .check_created();
     assert_eq!(waiting().await, 0, "a copy notes nothing");
 
-    // Blocks made from those of another board, as a board is from a template.
+    // A board made from another, as a board is from a template.
     let source = board_with_owner(&th, ContainerVisibility::Private).await;
-    made_from_another_board(&th, &board.id, &source.id, &b.id).await;
-    assert_eq!(
-        waiting().await,
-        0,
-        "blocks made from another board's note nothing"
-    );
+    copy_of_a_board_naming(&th, &source.id, &b.id).await;
+    assert_eq!(waiting().await, 0, "a copy of a board notes nothing");
 
     // Asked to tell nobody.
     let quiet = card_with(&th.client, &board.id, &Value::Null).await;
     let quietly = th
         .client
         .patch(
-            &format!("{}?disableNotify=true", block_path(&board.id, &quiet.id)),
+            &format!("{TEST_WS}/cards/{}?disableNotify=true", quiet.id),
             &json!({"body": mentioning(&[&b.id]), "readAt": quiet.updated_at,
-                    "updatedFields": {"properties": {OWNER: b.id}}}),
+                    "updatedProperties": {OWNER: b.id}}),
         )
         .await;
-    assert_eq!(quietly.status, StatusCode::NO_CONTENT, "{}", quietly.text());
+    assert_eq!(quietly.status, StatusCode::OK, "{}", quietly.text());
     assert_eq!(waiting().await, 0, "a quiet write notes nothing");
 
     // To the trash and back.
@@ -640,8 +628,7 @@ async fn copies_restores_and_quiet_writes_tell_nobody_and_a_body_only_whom_it_ne
         ..Block::default()
     };
     delete(&th.client, &block).await;
-    th.client
-        .post_empty(&undelete_path(&board.id, &card.id))
+    restore_card(&th.client, &board.id, &card.id)
         .await
         .check_ok();
     assert_eq!(waiting().await, 0, "what comes back notes nothing");

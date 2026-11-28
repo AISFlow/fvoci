@@ -168,13 +168,11 @@ fn assert_nothing_left(directory: &std::path::Path) {
         "the file of the check"
     );
     let writing = directory.join(fvoci_server::storage::WRITING_DIR);
-    let partial: Vec<_> = std::fs::read_dir(&writing)
-        .map(|entries| {
-            entries
-                .map(|entry| entry.expect("an entry").path())
-                .collect()
-        })
-        .unwrap_or_default();
+    let partial: Vec<_> = std::fs::read_dir(&writing).map_or_default(|entries| {
+        entries
+            .map(|entry| entry.expect("an entry").path())
+            .collect()
+    });
     assert!(partial.is_empty(), "nothing being written: {partial:?}");
 }
 

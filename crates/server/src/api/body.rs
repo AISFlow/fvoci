@@ -3,11 +3,16 @@
 //! A body that is not the JSON a route expects is a bad request (400), whatever is wrong
 //! with it: not JSON at all, the wrong type, `null`, a member of the wrong type.
 
-use fvoci_model::{BlockPatch, Body, BodyChange, BodyError, DiaryEntryPatch, JsonMap};
+use fvoci_model::{Body, BodyChange, BodyError, DiaryEntryPatch, JsonMap};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::AppError;
+
+/// The JSON Pointer to the fields of a block, where the store names what it refuses of
+/// them: a request that sends them under another member moves the refusal there
+/// ([`AppError::moved`]).
+pub(crate) const BLOCK_FIELDS: &str = "/fields";
 
 /// Decodes a JSON request body.
 ///
@@ -61,122 +66,11 @@ pub(crate) fn decode_object_with<T: DeserializeOwned, R>(
     Ok((decoded, prepared))
 }
 
-/// The JSON objects in the list that is the member `name` of `object`. An element of the
-/// list that is not an object is `None`.
-pub(crate) fn objects_mut<'v>(
-    object: &'v mut JsonMap,
-    name: &str,
-) -> impl Iterator<Item = Option<&'v mut JsonMap>> {
-    object
-        .get_mut(name)
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-        .map(Value::as_object_mut)
-}
-
 /// The refusal of a body that may not be stored, naming `body`: the node of the
 /// document that is refused, where it is one node (the first; a document may have
 /// thousands), else the document.
 fn body_refused(error: BodyError) -> AppError {
     AppError::from_body_error("body", error)
-}
-
-/// The JSON Pointer to the block at `index` of a request: empty if the request body is
-/// the one block (`list` is `None`), else the element of the list at the pointer
-/// `list`, which is empty if the body is the list itself.
-pub(crate) fn element_pointer(list: Option<&str>, index: usize) -> String {
-    list.map(|list| format!("{list}/{index}"))
-        .unwrap_or_default()
-}
-
-/// Takes the member `body` out of each block of a request before the blocks are decoded
-/// and reads it, so that a body that may not be stored is refused as one (`errors`
-/// names `/body`). Returns the bodies in the order of the blocks; an element that is no object
-/// has none.
-///
-/// # Errors
-///
-/// Returns a bad request that names `body` for the first body that may not be stored,
-/// where its block is in the request ([`element_pointer`]).
-pub(crate) fn take_block_bodies<'a>(
-    blocks: impl IntoIterator<Item = Option<&'a mut JsonMap>>,
-    list: Option<&str>,
-) -> Result<Vec<Option<Body>>, AppError> {
-    blocks
-        .into_iter()
-        .enumerate()
-        .map(
-            |(index, block)| match block.and_then(|block| block.remove("body")) {
-                None => Ok(None),
-                Some(value) => Body::parse(value)
-                    .map_err(|error| body_refused(error).under(&element_pointer(list, index))),
-            },
-        )
-        .collect()
-}
-
-/// Takes the member `body` out of each block patch of a request before the patches are
-/// decoded and reads what it asks for, in the order of the patches.
-///
-/// # Errors
-///
-/// Returns a bad request that names `body` for the first body that may not be stored,
-/// where its patch is in the request ([`element_pointer`]).
-pub(crate) fn take_patch_bodies<'a>(
-    patches: impl IntoIterator<Item = Option<&'a mut JsonMap>>,
-    list: Option<&str>,
-) -> Result<Vec<BodyChange>, AppError> {
-    patches
-        .into_iter()
-        .enumerate()
-        .map(|(index, patch)| {
-            if patch
-                .as_ref()
-                .is_some_and(|patch| patch.contains_key("type"))
-            {
-                return Err(AppError::from(fvoci_model::BlockError::TypeChanges)
-                    .under(&element_pointer(list, index)));
-            }
-            match patch.and_then(|patch| patch.remove("body")) {
-                None => Ok(BodyChange::Keep),
-                Some(value) => BodyChange::parse(value)
-                    .map_err(|error| body_refused(error).under(&element_pointer(list, index))),
-            }
-        })
-        .collect()
-}
-
-/// Gives each patch the change of body that was taken out of it, and checks that a
-/// patch that changes the body says when its block was read.
-///
-/// # Errors
-///
-/// Returns a bad request that names `readAt` for a change of body without it, where
-/// its patch is in the request ([`element_pointer`]).
-pub(crate) fn put_patch_bodies<'a>(
-    patches: impl IntoIterator<Item = &'a mut BlockPatch>,
-    changes: Vec<BodyChange>,
-    list: Option<&str>,
-) -> Result<(), AppError> {
-    let mut changes = changes.into_iter();
-    for (index, patch) in patches.into_iter().enumerate() {
-        // One change was taken out of each patch.
-        let Some(change) = changes.next() else {
-            return Err(AppError::from(anyhow::anyhow!(
-                "fewer changes of body than block patches"
-            )));
-        };
-        if !change.is_keep() && patch.read_at.is_none() {
-            return Err(AppError::bad_request(
-                "a change of the body needs readAt, the updatedAt of the block as it was read",
-            )
-            .with_field("readAt")
-            .under(&element_pointer(list, index)));
-        }
-        patch.body = change;
-    }
-    Ok(())
 }
 
 /// Decodes a request body that must be a JSON object and may carry a document under

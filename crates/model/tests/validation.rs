@@ -53,6 +53,34 @@ fn block_validate_keeps_file_blocks_out_of_comments() {
     );
 }
 
+/// A board view goes in the body of a card, a page or a unit: not in a comment, nor in
+/// a diary's entry.
+#[test]
+fn block_validate_keeps_board_views_in_cards_pages_and_units() {
+    let body = Body::parse(json!({"type": "doc", "content": [
+        {"type": "boardView", "attrs": {"viewId": "01a1c8e0-e250-735f-b851-4aaaa2ad2d86"}},
+    ]}))
+    .expect("an allowed body");
+    for (block_type, verdict) in [
+        (BlockType::Card, Ok(())),
+        (BlockType::Page, Ok(())),
+        (BlockType::Unit, Ok(())),
+        (BlockType::Comment, Err(BlockError::BoardViewNotAllowed)),
+        (BlockType::Entry, Err(BlockError::BoardViewNotAllowed)),
+    ] {
+        assert_eq!(
+            block_type.check_body(body.as_ref()),
+            verdict,
+            "{block_type:?}"
+        );
+        assert_eq!(
+            block_type.shows_board_views(),
+            verdict.is_ok(),
+            "{block_type:?}"
+        );
+    }
+}
+
 #[test]
 fn block_validate_limits_the_title_in_characters() {
     // The limit counts characters, not bytes: a three-byte character counts once.

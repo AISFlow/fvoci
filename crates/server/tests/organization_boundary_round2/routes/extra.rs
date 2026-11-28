@@ -37,65 +37,22 @@ pub(in super::super) fn archive_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> 
     entries
 }
 
-pub(super) async fn compare_query_targets(client: &Client, own: &Container, hidden: &Container) {
-    for (path, absent) in [
-        (
-            format!(
-                "{ROOT_WS}/containers/{}/duplicate?toWorkspace={HIDDEN_WORKSPACE_ID}",
-                own.id
-            ),
-            format!(
-                "{ROOT_WS}/containers/{}/duplicate?toWorkspace={UNKNOWN_ID}",
-                own.id
-            ),
+pub(super) async fn compare_query_targets(client: &Client, own: &Container) {
+    for (path, absent) in [(
+        format!(
+            "{ROOT_WS}/containers/{}/duplicate?toWorkspace={HIDDEN_WORKSPACE_ID}",
+            own.id
         ),
-        (
-            format!(
-                "{ROOT_WS}/boards/{}/blocks?sourceBoardId={}",
-                own.id, hidden.id
-            ),
-            format!(
-                "{ROOT_WS}/boards/{}/blocks?sourceBoardId={UNKNOWN_ID}",
-                own.id
-            ),
+        format!(
+            "{ROOT_WS}/containers/{}/duplicate?toWorkspace={UNKNOWN_ID}",
+            own.id
         ),
-    ] {
-        let body = if path.contains("/blocks?") {
-            json!([])
-        } else {
-            json!({})
-        };
+    )] {
+        let body = json!({});
         let hidden = client.post(&path, &body).await;
         let missing = client.post(&absent, &body).await;
         assert_eq!(answer(&hidden), answer(&missing), "query target in {path}");
         hidden.check_not_found();
-    }
-    for method in [reqwest::Method::PATCH, reqwest::Method::DELETE] {
-        let body = |board: &str| {
-            if method == reqwest::Method::PATCH {
-                json!({"containerIds": [board], "containerPatches": [{"title": "changed"}], "blockIds": [], "blockPatches": []})
-            } else {
-                json!({"containers": [board], "blocks": []})
-            }
-        };
-        let concealed = Client::send(
-            client
-                .request(method.clone(), &format!("{ROOT_WS}/containers-and-blocks"))
-                .json(&body(&hidden.id)),
-        )
-        .await;
-        let missing = Client::send(
-            client
-                .request(method.clone(), &format!("{ROOT_WS}/containers-and-blocks"))
-                .json(&body(UNKNOWN_ID)),
-        )
-        .await;
-        assert_eq!(
-            answer(&concealed),
-            answer(&missing),
-            "{method} bulk board identifiers"
-        );
-        concealed.check_not_found();
     }
     // For somebody of another organization the root workspace is not there either.
     let search = client
@@ -169,7 +126,7 @@ async fn query_targets_and_bulk_id_bodies_hide_unjoined_workspaces() {
         actors.push(ts.client2.clone());
     }
     for actor in actors {
-        compare_query_targets(&actor, &own, &hidden).await;
+        compare_query_targets(&actor, &own).await;
     }
     ts.teardown().await;
 }
@@ -211,7 +168,7 @@ async fn an_invited_workspace_guest_reads_its_board_without_gaining_editor_right
         .expect("a viewer invitation");
     for (under, suffix) in [
         ("containers", ""),
-        ("boards", "/blocks"),
+        ("boards", "/views"),
         ("boards", "/cards"),
         ("containers", "/members"),
     ] {
@@ -259,10 +216,12 @@ async fn an_invited_workspace_guest_reads_its_board_without_gaining_editor_right
 #[tokio::test]
 async fn the_paths_from_before_the_workspace_are_not_there() {
     let ts = Setup::native().start().await.init_basic().await;
-    // The wikis and the references came after the move, and were never anywhere else.
+    // The wikis, the references and the stars came after the move, and were never
+    // anywhere else.
     let gone = WORKSPACE_ROUTES
         .iter()
         .filter(|(_, suffix, _)| !suffix.starts_with("/wikis"))
+        .filter(|(_, suffix, _)| !suffix.starts_with("/favorites"))
         .filter(|(_, suffix, _)| !suffix.starts_with("/courses"))
         .filter(|(_, suffix, _)| !suffix.starts_with("/references"))
         .filter(|(_, _, operation)| REACHED_BY_ITEM.contains(operation))
@@ -293,8 +252,11 @@ async fn the_paths_from_before_the_workspace_are_not_there() {
         }
     }
     ts.teardown().await;
+    // 77 since the reactions (addReaction, removeReaction) came, after the move, 78 with
+    // the activity of cards (getCardActivity), and 79 with the export in Markdown
+    // (exportContainerMarkdown).
     assert_eq!(
-        count, 77,
+        count, 79,
         "the operations that moved or came after under the workspace, and the two that went"
     );
     assert!(violations.is_empty(), "{}", violations.join("\n"));

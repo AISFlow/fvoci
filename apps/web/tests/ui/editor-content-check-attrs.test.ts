@@ -47,6 +47,17 @@ describe('CheckedCollaboration remote attribute validation (H-7)', () => {
       },
     ],
     [
+      'callout of a tone not on the list',
+      (fragment: Y.XmlFragment) => {
+        const block = new Y.XmlElement('callout');
+        block.setAttribute('tone', 'purple');
+        const paragraph = new Y.XmlElement('paragraph');
+        paragraph.insert(0, [new Y.XmlText('x')]);
+        block.insert(0, [paragraph]);
+        fragment.insert(fragment.length, [block]);
+      },
+    ],
+    [
       'invalid codeBlock language',
       (fragment: Y.XmlFragment) => {
         const block = new Y.XmlElement('codeBlock');

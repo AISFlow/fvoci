@@ -146,10 +146,10 @@ impl Checkpoint {
     }
 }
 
-pub(super) fn doc_meta(changed: &TakenInPlace) -> (u64, Vec<String>) {
+pub(super) fn doc_meta(changed: &TakenInPlace) -> (u64, Vec<String>, u64) {
     let clients = count(changed.doc.clients());
     let files = changed.doc.file_ids();
-    (clients, files)
+    (clients, files, changed.doc.board_views())
 }
 
 pub(super) fn too_many_bytes() -> Refused {
@@ -199,7 +199,12 @@ pub(super) fn take_refused(error: &TakeError) -> Refused {
         ) => Refusal::DocumentTooLarge,
         TakeError::Update(UpdateError::TooManyReadingSteps { .. }) => Refusal::TooManySteps,
         TakeError::Body(BodyError::TableTooLarge { .. }) => Refusal::TableTooLarge,
-        TakeError::Body(BodyError::TooLarge | BodyError::TooManyNodes | BodyError::TooDeep)
+        TakeError::Body(
+            BodyError::TooLarge
+            | BodyError::TooManyNodes
+            | BodyError::TooDeep
+            | BodyError::TooManyBoardViews,
+        )
         | TakeError::BodyTooLarge { .. } => Refusal::BodyTooLarge,
         TakeError::Body(_) => Refusal::NoBody,
         // What cannot be applied, and what would be placed past too much of the

@@ -273,11 +273,7 @@ impl Audience {
     /// Returns the store's error if either cannot be read: the block is not sent then.
     pub async fn unsaid_by_link(&self, block: &Block) -> Result<UnsaidByLink, StoreError> {
         let people = self.person_properties(&block.container_id).await?;
-        let named = block
-            .body
-            .as_ref()
-            .map(Body::reference_ids)
-            .unwrap_or_default();
+        let named = block.body.as_ref().map_or_default(Body::reference_ids);
         let shown = self
             .store
             .blocks_on_container_among(&block.container_id, BlockType::Card, &named)

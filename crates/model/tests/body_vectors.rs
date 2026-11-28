@@ -14,6 +14,7 @@ fn reason(error: &BodyError) -> &'static str {
         BodyError::TooLarge => "tooLarge",
         BodyError::TooDeep => "tooDeep",
         BodyError::TooManyNodes => "tooManyNodes",
+        BodyError::TooManyBoardViews => "tooManyBoardViews",
         BodyError::TableTooLarge { .. } => "tableTooLarge",
         BodyError::InvalidNode { .. } => "invalidNode",
     }

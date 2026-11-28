@@ -15,6 +15,7 @@ import type { Container, ContainerVisibility, MemberRole } from '../logic/wire.t
 import type { BodyWrite, Comment, CommentVersion } from './backend.ts';
 import type { BodyVersions } from './body-versions.ts';
 import type { CourseExamsApi, CourseMeetingsApi } from './course-meeting-types.ts';
+import type { WithReactions } from './reaction-types.ts';
 import type { DeletedItem, Paging } from './trash-reads.ts';
 import type { CourseReviews } from './unit-review-types.ts';
 
@@ -286,7 +287,7 @@ export interface Courses {
   createCourse(workspaceId: string, draft: CourseDraft): Promise<Container>;
   /** Every chapter and unit of the course, in no promised order. */
   units(courseId: string): Promise<CourseUnit[]>;
-  unit(courseId: string, unitId: string): Promise<CourseUnitDetail>;
+  unit(courseId: string, unitId: string): Promise<WithReactions<CourseUnitDetail>>;
   /** For editors. Invalid `parentId`/`after` is 400; limits are `too_many_units` / `too_many_chapters`. */
   createUnit(courseId: string, draft: UnitDraft): Promise<CourseUnitDetail>;
   patchUnit(courseId: string, unitId: string, patch: UnitPatch): Promise<CourseUnitDetail>;
@@ -301,7 +302,7 @@ export interface Courses {
 
   // Comments on a unit (chapters return 404).
   /** Oldest first. Open-course unjoined workspace members may read. */
-  comments(courseId: string, unitId: string): Promise<Comment[]>;
+  comments(courseId: string, unitId: string): Promise<WithReactions<Comment>[]>;
   /** For the course's commenters and up. A comment must be non-empty and have no file blocks. */
   createComment(courseId: string, unitId: string, body: DocNode): Promise<Comment>;
   /** Replaces a comment's text; 409 when it changed since `readAt`. */

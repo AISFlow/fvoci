@@ -10,7 +10,7 @@ use fvoci_model::{LoginOrigin, Session};
 
 use crate::Store;
 use crate::api_tokens;
-use crate::db::{Dialect, Id, LockRank, OptId, Param, Row, Scope, Sql};
+use crate::db::{FromRow, Id, LockRank, OptId, Param, Row, RowLock, Scope, Sql};
 use crate::error::StoreError;
 use crate::oidc::{Identity, StoredProvider};
 
@@ -199,8 +199,7 @@ impl Store {
                     " AND EXISTS (SELECT 1 FROM users WHERE users.id = sessions.user_id \
                      AND users.deleted_at IS NULL)",
                 );
-            let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-            session_from_row(&row)
+            scope.first(sql).await?.ok_or(StoreError::NoRows)
         })
         .await
     }
@@ -221,10 +220,7 @@ impl Store {
                     " AND EXISTS (SELECT 1 FROM users WHERE users.id = sessions.user_id \
                      AND users.deleted_at IS NULL)",
                 );
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -303,12 +299,7 @@ impl Store {
         self.transaction(async |scope| {
             let mut sql = scope.sql("SELECT id FROM sessions WHERE expires_at <= ");
             sql.bind(now).push_bind(" OR last_used_at <= ", idle_since);
-            let ended: Vec<String> = scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.id(0))
-                .collect::<Result<_, _>>()?;
+            let ended: Vec<String> = scope.all(sql).await?;
             let mut sql = scope.sql("DELETE FROM sessions WHERE expires_at <= ");
             sql.bind(now).push_bind(" OR last_used_at <= ", idle_since);
             scope.execute(sql).await?;
@@ -334,17 +325,19 @@ pub struct ConfirmedPassword<'a> {
     pub seen_password_hash: &'a str,
 }
 
-fn session_from_row(row: &Row) -> Result<Session, StoreError> {
-    Ok(Session {
-        id: row.id(0)?,
-        user_id: row.id(1)?,
-        created_at: row.int(2)?,
-        last_used_at: row.int(3)?,
-        expires_at: row.int(4)?,
-        user_agent: row.text(5)?,
-        login: login_origin(row)?,
-        password_confirmed_at: Some(row.int(11)?).filter(|at| *at != 0),
-    })
+impl FromRow for Session {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(Session {
+            id: row.id(0)?,
+            user_id: row.id(1)?,
+            created_at: row.int(2)?,
+            last_used_at: row.int(3)?,
+            expires_at: row.int(4)?,
+            user_agent: row.text(5)?,
+            login: login_origin(row)?,
+            password_confirmed_at: Some(row.int(11)?).filter(|at| *at != 0),
+        })
+    }
 }
 
 /// The origin of a session row: the provider, its organization and its issuer, or
@@ -503,7 +496,6 @@ async fn hold_account_proved_by(
     seen_password_hash: &str,
     proof: Proof,
 ) -> Result<Option<SignedInto>, StoreError> {
-    scope.record_lock(LockRank::Users, user_id);
     let mut sql = scope.sql([
         "SELECT password_hash, deleted_at, password_locked_at FROM users \
          WHERE (deleted_at IS NULL OR (",
@@ -511,9 +503,7 @@ async fn hold_account_proved_by(
         ")) AND id = ",
     ]);
     sql.bind(Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::Share));
     let Some(row) = scope.fetch_optional(sql).await? else {
         return Ok(None);
     };
@@ -540,12 +530,7 @@ pub(crate) async fn session_by_digest(
         " FROM sessions WHERE token_hash = ",
     ]);
     sql.bind(token_digest);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(session_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Stores a session under the digest of its token, as one that has confirmed nothing:

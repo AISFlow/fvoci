@@ -68,8 +68,10 @@
           class="grid size-10 shrink-0 place-items-center rounded-md border text-2xl"
           role="img"
           aria-label={icon ? m.wiki_icon_is({ icon }) : m.wiki_no_icon()}
-          data-testid="wiki-settings-icon">{icon}</span
+          data-testid="wiki-settings-icon"
         >
+          {icon}
+        </span>
         <IconButton
           label={m['ViewTitle.random-icon']()}
           data-testid="wiki-settings-random-icon"

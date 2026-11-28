@@ -37,7 +37,7 @@ async function templates(api: APIRequestContext, workspaceId: string, language?:
 
 async function views(api: APIRequestContext, workspaceId: string, boardId: string) {
   return (await (
-    await api.get(`/api/v1/w/${workspaceId}/boards/${boardId}/blocks`, { params: { type: 'view' } })
+    await api.get(`/api/v1/w/${workspaceId}/boards/${boardId}/views`)
   ).json()) as Schemas['Block'][];
 }
 

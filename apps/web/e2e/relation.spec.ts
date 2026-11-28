@@ -207,3 +207,29 @@ test('a named card that is deleted is not shown, and is shown again when it is b
   await pressInBar(page, 'undo');
   await expect(chips(cell)).toHaveText([named.title]);
 });
+
+test('the card a relation names lists the cards that name it, and opens them', async ({ page }) => {
+  const place = await openTable(page);
+  const [own, named] = place.cards as [StoredCard, StoredCard];
+  await page.goto(boardPath(place.boardId, place.viewId, own.id));
+  await expect(dialog(page)).toBeVisible();
+  await addRelation(page);
+  // Nothing names the card yet.
+  await expect(property(page, 'After').locator('[data-slot="relation-referrers"]')).toHaveCount(0);
+  await pick(page, named.title);
+
+  await property(page, 'After')
+    .getByRole('button', { name: `Open ${named.title}` })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/${named.id}$`));
+  const referrers = property(page, 'After').getByRole('list', {
+    name: 'Cards that point to this card',
+  });
+  await expect(referrers.locator('[data-slot="relation-referrer"]')).toHaveText([own.title]);
+  // Its own value is still empty: the list is the other end, not a value of its own.
+  await expect(chips(property(page, 'After'))).toHaveCount(0);
+
+  await referrers.getByRole('button', { name: `Open ${own.title}` }).click();
+  await expect(page).toHaveURL(new RegExp(`/${own.id}$`));
+  await expect(property(page, 'After').locator('[data-slot="relation-referrers"]')).toHaveCount(0);
+});

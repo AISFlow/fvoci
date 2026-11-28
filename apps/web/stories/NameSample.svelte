@@ -11,8 +11,10 @@
 <Button
   onclick={() => {
     open = true;
-  }}>{m.org_rename()}</Button
+  }}
 >
+  {m.org_rename()}
+</Button>
 <output data-testid="submitted-name" class="m-4 break-all">{name}</output>
 <NameDialog
   bind:open

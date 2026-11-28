@@ -22,6 +22,8 @@ struct Named {
     view: String,
     card: String,
     card_comment: String,
+    /// An attachment of the founder's on the card.
+    attachment: String,
     /// A wiki for everybody in the workspace, which the member joined, a page of it, and
     /// a comment of the founder's on the page.
     wiki: String,
@@ -103,11 +105,10 @@ const NOT_THERE_FOR_A_MEMBER: [&str; 52] = [
     // A link the member did not make, and the empty body of the sweep.
     "acceptInvitation",
     "revokeInvitation",
-    // The card is no comment, and has no versions of one.
-    "getCommentVersions",
-    // The board is not in the trash, nor the card, nor the wiki's page, nor its comment.
+    // The board is not in the trash, nor the card, nor its view, nor the wiki's page, nor
+    // its comment.
     "restoreContainer",
-    "restoreBlock",
+    "restoreBoardView",
     "restorePage",
     "restorePageComment",
     "restoreCardComment",
@@ -115,6 +116,8 @@ const NOT_THERE_FOR_A_MEMBER: [&str; 52] = [
     "restoreUnitComment",
     // The member's subscription is to the card, by its own identifier.
     "deleteSubscription",
+    // The sweep may take a star off the card before it puts one on.
+    "deleteFavorite",
     // The upload asked of is done with by then, or was never begun in parts.
     "completeUpload",
     "putUploadPart",
@@ -123,6 +126,30 @@ const NOT_THERE_FOR_A_MEMBER: [&str; 52] = [
     // none it could, with its empty body.
     "resendEmailChange",
 ];
+
+/// The identifier of a comment that `founder` writes on `card` of `board`.
+async fn commented(founder: &Client, at: &str, board: &str, card: &Value) -> String {
+    let comment = founder
+        .post(
+            &format!("{at}/boards/{board}/cards/{}/comments", text(card, "id")),
+            &json!({"body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "card comment"}]}]}}),
+        )
+        .await
+        .value();
+    text(&comment, "id")
+}
+
+/// The identifier of an attachment of `file` that `founder` puts on `card` of `board`.
+async fn attached(founder: &Client, at: &str, board: &str, card: &Value, file: &Value) -> String {
+    let attachment = founder
+        .post(
+            &format!("{at}/boards/{board}/cards/{}/attachments", text(card, "id")),
+            &json!({"fileId": text(file, "fileId")}),
+        )
+        .await
+        .value();
+    text(&attachment, "id")
+}
 
 /// The operations the contract publishes: method, path and identifier, in its order.
 fn operations() -> Vec<(String, String, String)> {
@@ -147,7 +174,7 @@ fn operations() -> Vec<(String, String, String)> {
         "changePassword" | "leaveOrganization" => 2,
         "leaveContainer"
         | "deleteContainer"
-        | "deleteBlock"
+        | "deleteBoardView"
         | "batchDeleteCards"
         | "deletePage"
         | "deleteUnit"
@@ -156,7 +183,6 @@ fn operations() -> Vec<(String, String, String)> {
         | "deleteUnitReview"
         | "deleteUnitNote"
         | "deleteCourseSchedule"
-        | "deleteContainersAndBlocks"
         | "deleteUpload"
         | "deleteCategory"
         | "deleteTimeEntry"
@@ -199,7 +225,9 @@ impl Named {
             .replace("{boardId}", &self.board)
             .replace("{viewId}", &self.view)
             .replace("{cardId}", &self.card)
+            .replace("{attachmentId}", &self.attachment)
             .replace("{blockId}", &self.card)
+            .replace("{targetId}", &self.card)
             .replace("{wikiId}", &self.wiki)
             .replace("{pageId}", &self.page)
             .replace("{commentId}", comment)
@@ -227,6 +255,7 @@ impl Named {
             .replace("{number}", "1")
             // A lease never given: its release is the member's answer as an editor's or not.
             .replace("{leaseId}", "a-lease-never-given")
+            .replace("{emoji}", "%F0%9F%91%8D")
             // A token never made: taking it back is the member's answer as its owner's or
             // an administrator's.
             .replace("{tokenId}", "a-token-never-made")
@@ -236,7 +265,7 @@ impl Named {
         match operation {
             "getWorkspaceUsersById" => json!([self.member_id]),
             "resolveReferences" => json!([self.card, self.page, self.unit]),
-            "createBlocks" | "reorderCardProperties" => json!([]),
+            "reorderCardProperties" => json!([]),
             "importArchive" => json!({ "uploadId": self.upload }),
             "previewInvitation" => json!({ "token": self.invitation }),
             "patchMe" => json!({ "customName": "a member" }),
@@ -342,14 +371,7 @@ async fn organization(server: &TestServer, name: &str) -> Named {
         )
         .await
         .value();
-    let card_comment = founder
-        .post(
-            &format!("{at}/boards/{board}/cards/{}/comments", text(&card, "id")),
-            &json!({"body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "card comment"}]}]}}),
-        )
-        .await
-        .value();
-    let card_comment = text(&card_comment, "id");
+    let card_comment = commented(&founder, &at, &board, &card).await;
     let (wiki, page, comment) = wiki_with_a_page(&founder, &at, name).await;
     let (course, unit, course_comment, meeting, exam) =
         course_with_a_unit(&founder, &at, name).await;
@@ -361,6 +383,7 @@ async fn organization(server: &TestServer, name: &str) -> Named {
     )
     .await
     .value();
+    let attachment = attached(&founder, &at, &board, &card, &file).await;
     let (invitation, member) = invited_member(server, &founder, &at, name).await;
     let token = text(&invitation, "token");
     let member_id = member.me().await.id;
@@ -389,6 +412,7 @@ async fn organization(server: &TestServer, name: &str) -> Named {
         view,
         card: card_id,
         card_comment,
+        attachment,
         read_token,
         wiki_token,
         course_token,
@@ -719,7 +743,6 @@ const MEMBER_READ_OPERATIONS: &[&str] = &[
     "getWorkspaceBoards",
     "searchWorkspaceBoards",
     "getContainer",
-    "getBlocks",
     "getCards",
     "getCard",
     "getCardByNumber",
@@ -746,6 +769,7 @@ const MEMBER_READ_OPERATIONS: &[&str] = &[
     "getPageCommentVersions",
     "getPageBodyVersions",
     "getPageBodyVersion",
+    "getCardActivity",
     "getCardBodyVersions",
     "getCardBodyVersion",
     "getUpload",

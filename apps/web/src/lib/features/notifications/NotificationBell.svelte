@@ -13,8 +13,16 @@
   name), and where it happened: the board, wiki or course, and the
   organization (`sourceOf`). In a narrow pane (a phone) the bell opens the
   same list as a sheet of the whole screen.
+
+  The list is sorted as a mail inbox is: tabs of the inbox, the unread, the
+  mentions, the cards given and the archive (`NotificationTabs`); each line
+  marked read or unread and put away or back by its menu, a swipe of a
+  finger (`NotificationRow`), or a key while the list has the focus (J and
+  K, the arrows, Enter, E, U, ⇧U: `inbox-keys.ts`); and every one read put
+  away at once.
 -->
 <script lang="ts">
+  import ArchiveIcon from '@lucide/svelte/icons/archive';
   import BellIcon from '@lucide/svelte/icons/bell';
   import CalendarCheckIcon from '@lucide/svelte/icons/calendar-check';
   import XIcon from '@lucide/svelte/icons/x';
@@ -25,13 +33,17 @@
   import { pane } from '$lib/layout/room.svelte.ts';
   import { relativeTime } from '$lib/logic/format.ts';
   import { userDisplayName } from '$lib/logic/users.ts';
-  import type { NotificationInbox } from '$lib/state/notification-inbox.svelte.ts';
+  import type { InboxTab, NotificationInbox } from '$lib/state/notification-inbox.svelte.ts';
   import type { Notification } from '$lib/state/notification-types.ts';
   import { Button } from '$lib/ui/button/index.js';
   import * as Dialog from '$lib/ui/dialog/index.js';
   import * as Popover from '$lib/ui/popover/index.js';
 
+  import { listKeys } from './inbox-keys.ts';
   import { bellLabel, notificationText, unreadBadge } from './notification-words.ts';
+  import NotificationRow from './NotificationRow.svelte';
+  import NotificationTabs from './NotificationTabs.svelte';
+  import type { RowActions } from './row-actions.ts';
 
   interface Props {
     inbox: NotificationInbox;
@@ -65,6 +77,7 @@
   let went = false;
 
   const label = $derived(bellLabel(inbox.unread));
+  const keysHintId = $props.id();
 
   function nameOf(notification: Notification): string | undefined {
     const actorId = notification.subject?.actorId;
@@ -108,6 +121,25 @@
     onGo(notification);
   }
 
+  const actions: RowActions = {
+    toggleRead: (notification) => void inbox.toggleRead(notification),
+    toggleArchive: (notification) =>
+      void (notification.archivedAt === 0
+        ? inbox.archive(notification)
+        : inbox.unarchive(notification)),
+  };
+
+  /** Whether "read all" reads anything: something listed is unread. Its button and ⇧U alike. */
+  const canReadAll = $derived(inbox.listed && inbox.items.some((one) => one.readAt === 0));
+
+  const keys = listKeys({
+    of: (id) => inbox.items.find((one) => one.id === id),
+    ...actions,
+    readAll: () => {
+      if (canReadAll) void inbox.readAll();
+    },
+  });
+
   function onCloseAutoFocus(event: Event): void {
     if (!went) return;
     went = false;
@@ -124,8 +156,10 @@
           <span
             class="absolute top-0.5 right-0.5 min-w-4 rounded-full bg-primary px-1 text-[0.625rem] leading-4 font-semibold text-primary-foreground tabular-nums"
             data-testid="unread-notifications"
-            aria-hidden="true">{unreadBadge(inbox.unread)}</span
+            aria-hidden="true"
           >
+            {unreadBadge(inbox.unread)}
+          </span>
         {/if}
       </IconButton>
     {/snippet}
@@ -173,53 +207,65 @@
 </Dialog.Root>
 
 {#snippet readAll()}
+  {#if inbox.tab !== 'archived'}
+    <IconButton
+      label={m.notifications_archive_read()}
+      disabled={!inbox.listed || !inbox.items.some((one) => one.readAt !== 0)}
+      data-testid="archive-read-notifications"
+      onclick={() => void inbox.archiveRead()}
+    >
+      <ArchiveIcon />
+    </IconButton>
+  {/if}
   <Button
     variant="ghost"
     size="sm"
-    disabled={!inbox.listed || !inbox.items.some((one) => one.readAt === 0)}
+    disabled={!canReadAll}
     data-testid="read-all-notifications"
-    onclick={() => void inbox.readAll()}>{m.notifications_read_all()}</Button
+    onclick={() => void inbox.readAll()}
   >
+    {m.notifications_read_all()}
+  </Button>
 {/snippet}
 
 {#snippet list()}
+  <NotificationTabs tab={inbox.tab} onShow={(tab: InboxTab) => void inbox.show(tab)} />
   {#if !inbox.listed}
     <p class="p-4 text-muted-foreground">{m.notifications_loading()}</p>
   {:else if inbox.items.length === 0}
     <p class="p-4 text-muted-foreground" data-testid="no-notifications">
-      {m.notifications_empty()}
+      {inbox.tab === 'all'
+        ? m.notifications_empty()
+        : inbox.tab === 'archived'
+          ? m.notifications_archived_empty()
+          : m.notifications_tab_empty()}
     </p>
   {:else}
-    <ul class="grid">
+    <ul class="grid overflow-x-hidden" aria-describedby={keysHintId} {@attach keys}>
       {#each inbox.items as notification (notification.id)}
         {@const unread = notification.readAt === 0}
-        <li
-          data-notification={notification.id}
-          data-unread={unread || undefined}
-          data-kind={notification.subject?.kind}
+        <NotificationRow
+          {notification}
+          text={notificationText(notification.subject, nameOf(notification))}
+          href={notification.subject ? hrefOf(notification) : undefined}
+          {actions}
+          onclick={(event: MouseEvent) => {
+            onclick(event, notification);
+          }}
         >
-          {#if notification.subject}
-            <a
-              href={hrefOf(notification)}
-              class="flex gap-2 px-3 py-2 hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
-              onclick={(event: MouseEvent) => {
-                onclick(event, notification);
-              }}
-            >
-              {@render line(notification, unread)}
-            </a>
-          {:else}
-            <div class="flex gap-2 px-3 py-2 text-muted-foreground">
-              {@render line(notification, unread)}
-            </div>
-          {/if}
-        </li>
+          {#snippet line()}
+            {@render lineOf(notification, unread)}
+          {/snippet}
+        </NotificationRow>
       {/each}
     </ul>
+    <p id={keysHintId} class="hidden px-3 py-2 text-xs text-muted-foreground pointer-fine:block">
+      {m.notifications_keys()}
+    </p>
   {/if}
 {/snippet}
 
-{#snippet line(notification: Notification, unread: boolean)}
+{#snippet lineOf(notification: Notification, unread: boolean)}
   {@const source = sourceOf(notification)}
   <span
     class={['mt-1.5 size-2 shrink-0 rounded-full', unread ? 'bg-primary' : 'bg-transparent']}

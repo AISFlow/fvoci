@@ -72,7 +72,7 @@ async fn meetings_crud_attendance_trash_and_purge() {
         )
         .await
         .expect("unit")
-        .unit;
+        .first;
 
     let mut late_req = new_meeting("Session 2", T0 + 7_200_000);
     late_req.unit_ids = vec![unit.id.clone()];

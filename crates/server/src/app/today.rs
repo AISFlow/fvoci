@@ -56,8 +56,7 @@ impl App {
                 .await?
                 .into_iter()
                 .find(|entry| entry.id == workspace_id)
-                .map(|entry| entry.org_id)
-                .unwrap_or_default();
+                .map_or_default(|entry| entry.org_id);
             (own_org_id, String::new())
         } else {
             let org = self.organization().await?;
@@ -191,11 +190,7 @@ async fn resolve_org_name(
     if let Some(cached) = cache.get(org_id) {
         return cached.clone();
     }
-    let fetched = org_app
-        .organization()
-        .await
-        .map(|org| org.name)
-        .unwrap_or_default();
+    let fetched = org_app.organization().await.map_or_default(|org| org.name);
     cache.insert(org_id.to_owned(), fetched.clone());
     fetched
 }

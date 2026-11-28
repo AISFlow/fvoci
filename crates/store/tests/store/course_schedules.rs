@@ -64,7 +64,7 @@ async fn create_unit(
         )
         .await
         .expect("unit created")
-        .unit
+        .first
 }
 
 async fn save_role(store: &Store, course_id: &str, user_id: &str, role: Option<ContainerRole>) {
@@ -165,7 +165,7 @@ async fn seed_chapter_with_three_units(
         )
         .await
         .expect("chapter")
-        .unit;
+        .first;
     let u1 = create_unit(
         store,
         course_id,

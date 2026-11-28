@@ -1,5 +1,5 @@
 /**
- * View, card, comment, attachment, and block HTTP operations for `ServerBackend`
+ * View, card, comment and attachment HTTP operations for `ServerBackend`
  * (`api/backend.ts`), using server-authority fractional-indexed view writes,
  * atomic `duplicateCard` / `card-moves` / `batch-delete` / `batch-restore`,
  * formal card comment routes, and verified card attachments.
@@ -28,7 +28,7 @@ import {
   type ViewDraft,
 } from '../state/backend.ts';
 import { pagesTogether } from '../state/page-reads.ts';
-import { applyViewPatch } from '../state/patches.ts';
+import type { WithReactions } from '../state/reaction-types.ts';
 import type { BlockTurns } from '../state/write.ts';
 
 import {
@@ -45,6 +45,7 @@ import {
   type Schemas,
 } from './convert.ts';
 import type { RequestOptions } from './http.ts';
+import { withReactions } from './reactions.ts';
 import type { WorkspacePath } from './requests.ts';
 
 type ChangedBlock = Extract<Change, { kind: 'blocks' }>['blocks'][number];
@@ -60,7 +61,6 @@ export class ServerBlocks {
   readonly #inWorkspace: InWorkspaceFn;
   readonly #turns: BlockTurns;
   readonly #knownViews = new Map<string, BoardView>();
-  readonly #knownComments = new Map<string, Comment>();
 
   constructor(inWorkspace: InWorkspaceFn, turns: BlockTurns) {
     this.#inWorkspace = inWorkspace;
@@ -73,9 +73,6 @@ export class ServerBlocks {
 
   learnLiveBlock(block: ChangedBlock): void {
     if (isViewBlock(block)) this.#knownViews.set(block.id, block);
-    else if (block.type === 'comment' && 'body' in block) {
-      this.#knownComments.set(block.id, block);
-    }
   }
 
   #takeViewWrite(written: Schemas['BoardViewWrite']): BoardViewWriteResult {
@@ -87,11 +84,9 @@ export class ServerBlocks {
   }
 
   async views(boardId: string): Promise<BoardView[]> {
-    const blocks = await this.#inWorkspace<Schemas['Block'][]>(
-      '/boards/{boardId}/blocks',
-      { boardId },
-      { query: { type: 'view' } },
-    );
+    const blocks = await this.#inWorkspace<Schemas['Block'][]>('/boards/{boardId}/views', {
+      boardId,
+    });
     const views = blocks.map(viewOf);
     for (const view of views) this.#knownViews.set(view.id, view);
     return views;
@@ -169,35 +164,40 @@ export class ServerBlocks {
             containerId: boardId,
             updatedAt: patch.readAt ?? 0,
           });
-    const answered = await this.#inWorkspace<Schemas['Block'] | undefined>(
-      '/boards/{boardId}/blocks/{blockId}',
-      { boardId, blockId: viewId },
-      { method: 'PATCH', json: patch },
+    const answered = await this.#inWorkspace<Schemas['Block']>(
+      '/boards/{boardId}/views/{viewId}',
+      { boardId, viewId },
+      { method: 'PATCH', json: boardViewPatchOf(patch) },
     );
-    let after: BoardView;
-    if (answered) {
-      after = viewOf(answered);
-    } else if (patch.readAt !== undefined || conditionalQueued) {
-      after = await this.#view(boardId, viewId).catch(() =>
-        applyViewPatch(this.#knownViews.get(viewId) ?? known, patch),
-      );
-    } else {
-      after = applyViewPatch(this.#knownViews.get(viewId) ?? known, patch);
-    }
+    const after = viewOf(answered);
     this.#knownViews.set(viewId, after);
     return { before: known, after };
   }
 
   async #view(boardId: string, viewId: string): Promise<BoardView> {
-    const [view] = await this.#inWorkspace<Schemas['Block'][]>(
-      '/boards/{boardId}/blocks',
-      { boardId },
-      { query: { blockId: viewId } },
+    return viewOf(
+      await this.#inWorkspace<Schemas['Block']>('/boards/{boardId}/views/{viewId}', {
+        boardId,
+        viewId,
+      }),
     );
-    if (view?.type !== 'view') {
-      throw new BackendError(404, { detail: 'no such view on this board' });
-    }
-    return viewOf(view);
+  }
+
+  async deleteView(boardId: string, viewId: string): Promise<void> {
+    await this.#inWorkspace(
+      '/boards/{boardId}/views/{viewId}',
+      { boardId, viewId },
+      { method: 'DELETE' },
+    );
+  }
+
+  async restoreView(boardId: string, viewId: string): Promise<void> {
+    const restored = await this.#inWorkspace<Schemas['Block']>(
+      '/boards/{boardId}/views/{viewId}/restore',
+      { boardId, viewId },
+      { method: 'POST' },
+    );
+    this.#knownViews.set(viewId, viewOf(restored));
   }
 
   async cards(boardId: string): Promise<CardSummary[]> {
@@ -218,12 +218,15 @@ export class ServerBlocks {
     );
   }
 
-  async card(boardId: string, cardId: string): Promise<CardDetail> {
-    const card = await this.#inWorkspace<Schemas['Card']>('/cards/{cardId}', { cardId, boardId });
+  async card(boardId: string, cardId: string): Promise<WithReactions<CardDetail>> {
+    const card = await this.#inWorkspace<Schemas['CardWithReactions']>('/cards/{cardId}', {
+      cardId,
+      boardId,
+    });
     if (card.boardId !== boardId) {
       throw new BackendError(404, { detail: 'no such card on this board' });
     }
-    return cardDetailOf(card);
+    return withReactions(cardDetailOf(card), card);
   }
 
   async createCard(boardId: string, draft: CardDraft): Promise<CardSummary> {
@@ -309,14 +312,12 @@ export class ServerBlocks {
     );
   }
 
-  async comments(boardId: string, cardId: string): Promise<Comment[]> {
-    const blocks = await this.#inWorkspace<Schemas['Block'][]>(
+  async comments(boardId: string, cardId: string): Promise<WithReactions<Comment>[]> {
+    const blocks = await this.#inWorkspace<Schemas['CommentWithReactions'][]>(
       '/boards/{boardId}/cards/{cardId}/comments',
       { boardId, cardId },
     );
-    const list = blocks.map(commentOf);
-    for (const comment of list) this.#knownComments.set(comment.id, comment);
-    return list;
+    return blocks.map((block) => withReactions(commentOf(block), block));
   }
 
   async createComment(boardId: string, cardId: string, body: DocNode): Promise<Comment> {
@@ -326,16 +327,14 @@ export class ServerBlocks {
       { boardId, cardId },
       { method: 'POST', json: request },
     );
-    const comment = commentOf(made);
-    this.#knownComments.set(comment.id, comment);
-    return comment;
+    return commentOf(made);
   }
 
   patchComment(
     boardId: string,
     commentId: string,
     write: BodyWrite,
-    cardId?: string,
+    cardId: string,
   ): Promise<Comment> {
     const body = write.body;
     if (!body) {
@@ -347,27 +346,13 @@ export class ServerBlocks {
       );
     }
     return this.#turns.run(commentId, async () => {
-      const parentCardId = cardId ?? this.#knownComments.get(commentId)?.parentId;
-      if (parentCardId) {
-        const request: Schemas['CardCommentPatch'] = { body: wireBody(body), readAt: write.readAt };
-        const updated = await this.#inWorkspace<Schemas['Block']>(
-          '/boards/{boardId}/cards/{cardId}/comments/{commentId}',
-          { boardId, cardId: parentCardId, commentId },
-          { method: 'PATCH', json: request },
-        );
-        const comment = commentOf(updated);
-        this.#knownComments.set(commentId, comment);
-        return comment;
-      }
-      const patch: Schemas['BlockPatch'] = { body: wireBody(body), readAt: write.readAt };
-      const answered = await this.#inWorkspace<Schemas['Block'] | undefined>(
-        '/boards/{boardId}/blocks/{blockId}',
-        { boardId, blockId: commentId },
-        { method: 'PATCH', json: patch },
+      const request: Schemas['CardCommentPatch'] = { body: wireBody(body), readAt: write.readAt };
+      const updated = await this.#inWorkspace<Schemas['Block']>(
+        '/boards/{boardId}/cards/{cardId}/comments/{commentId}',
+        { boardId, cardId, commentId },
+        { method: 'PATCH', json: request },
       );
-      const comment = answered ? commentOf(answered) : await this.#comment(boardId, commentId);
-      this.#knownComments.set(commentId, comment);
-      return comment;
+      return commentOf(updated);
     });
   }
 
@@ -385,46 +370,25 @@ export class ServerBlocks {
       { boardId, cardId, commentId },
       { method: 'POST' },
     );
-    const comment = commentOf(restored);
-    this.#knownComments.set(comment.id, comment);
-    return comment;
-  }
-
-  async #comment(boardId: string, commentId: string): Promise<Comment> {
-    const [comment] = await this.#inWorkspace<Schemas['Block'][]>(
-      '/boards/{boardId}/blocks',
-      { boardId },
-      { query: { blockId: commentId } },
-    );
-    if (comment?.type !== 'comment') {
-      throw new BackendError(404, { detail: 'no such comment on this board' });
-    }
-    return commentOf(comment);
+    return commentOf(restored);
   }
 
   async commentVersions(
     boardId: string,
     commentId: string,
-    cardId?: string,
+    cardId: string,
   ): Promise<CommentVersion[]> {
-    const parentCardId = cardId ?? this.#knownComments.get(commentId)?.parentId;
-    const versions = parentCardId
-      ? await this.#inWorkspace<Schemas['CommentVersion'][]>(
-          '/boards/{boardId}/cards/{cardId}/comments/{commentId}/versions',
-          { boardId, cardId: parentCardId, commentId },
-        )
-      : await this.#inWorkspace<Schemas['CommentVersion'][]>(
-          '/boards/{boardId}/blocks/{blockId}/versions',
-          { boardId, blockId: commentId },
-        );
+    const versions = await this.#inWorkspace<Schemas['CommentVersion'][]>(
+      '/boards/{boardId}/cards/{cardId}/comments/{commentId}/versions',
+      { boardId, cardId, commentId },
+    );
     return versions.map(commentVersionOf);
   }
 
   async attachments(boardId: string, cardId: string): Promise<Attachment[]> {
     const blocks = await this.#inWorkspace<Schemas['Block'][]>(
-      '/boards/{boardId}/blocks',
-      { boardId },
-      { query: { parentId: cardId, type: 'attachment' } },
+      '/boards/{boardId}/cards/{cardId}/attachments',
+      { boardId, cardId },
     );
     return blocks.map(attachmentOf);
   }
@@ -440,19 +404,32 @@ export class ServerBlocks {
     return attachmentOf(made);
   }
 
-  async deleteBlock(boardId: string, blockId: string): Promise<void> {
+  async deleteAttachment(boardId: string, cardId: string, attachmentId: string): Promise<void> {
     await this.#inWorkspace(
-      '/boards/{boardId}/blocks/{blockId}',
-      { boardId, blockId },
+      '/boards/{boardId}/cards/{cardId}/attachments/{attachmentId}',
+      { boardId, cardId, attachmentId },
       { method: 'DELETE' },
     );
   }
 
-  async restoreBlock(boardId: string, blockId: string): Promise<void> {
+  async restoreAttachment(boardId: string, cardId: string, attachmentId: string): Promise<void> {
     await this.#inWorkspace(
-      '/boards/{boardId}/blocks/{blockId}/restore',
-      { boardId, blockId },
+      '/boards/{boardId}/cards/{cardId}/attachments/{attachmentId}/restore',
+      { boardId, cardId, attachmentId },
       { method: 'POST' },
     );
   }
+}
+
+/**
+ * What of a view's patch `patchBoardView` takes: its title and fields, and
+ * the time it was read; a view has no parent or type to change.
+ */
+function boardViewPatchOf(patch: BlockPatch): Schemas['BoardViewPatch'] {
+  return {
+    ...(patch.title === undefined ? {} : { title: patch.title }),
+    ...(patch.updatedFields === undefined ? {} : { updatedFields: patch.updatedFields }),
+    ...(patch.deletedFields === undefined ? {} : { deletedFields: [...patch.deletedFields] }),
+    ...(patch.readAt === undefined ? {} : { readAt: patch.readAt }),
+  };
 }

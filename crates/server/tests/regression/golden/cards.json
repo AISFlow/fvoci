@@ -444,53 +444,6 @@
     }
   },
   {
-    "name": "insert content",
-    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as cards-alice",
-    "status": 201,
-    "content_type": "application/json",
-    "body": [
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {},
-        "id": "<id:7>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:5>",
-        "title": "one",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {},
-        "id": "<id:8>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:5>",
-        "title": "two",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {},
-        "id": "<id:9>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:5>",
-        "title": "three",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      }
-    ]
-  },
-  {
     "name": "set content order",
     "request": "PATCH /api/v1/w/<id:1>/cards/<id:5> as cards-alice",
     "status": 200,
@@ -520,7 +473,7 @@
   },
   {
     "name": "move: the route is gone",
-    "request": "POST /api/v1/content-blocks/<id:7>/moveto/after/<id:9> as cards-alice",
+    "request": "POST /api/v1/content-blocks/t1/moveto/after/t3 as cards-alice",
     "status": 404,
     "content_type": "application/problem+json",
     "body": {

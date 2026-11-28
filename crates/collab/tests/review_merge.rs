@@ -203,7 +203,7 @@ fn concurrent_deletions_remove_both_leading_paragraphs_of_list_entries() {
         let input = document(vec![json!({"type": list, "content": [
             item(vec![paragraph("first"), paragraph("second"),
                 json!({"type": "blockquote", "content": [paragraph("tail")]})]),
-            kept.clone(),
+            kept,
         ]})]);
         let base = from_body_by(&body_of(&input), 1);
         let a = edited(&base, 2, |txn, root| {

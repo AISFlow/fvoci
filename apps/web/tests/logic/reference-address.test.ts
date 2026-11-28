@@ -1,7 +1,7 @@
 /** The addresses of the app that a body takes as a reference when one is pasted. */
 import { describe, expect, it } from 'vitest';
 
-import { referenceAt, type Here } from '$lib/logic/reference-address.ts';
+import { boardViewAt, referenceAt, type Here } from '$lib/logic/reference-address.ts';
 
 const WS = '01930000-0000-7000-8000-0000000000a1';
 const BOARD = '01930000-0000-7000-8000-0000000000b1';
@@ -65,5 +65,38 @@ describe('the address of a card, a page, or a unit', () => {
     expect(referenceAt(`https://fvoci.example/boards/app${path}`, based)).toBe(CARD);
     expect(referenceAt(`https://fvoci.example${path}`, based)).toBeUndefined();
     expect(referenceAt(`https://fvoci.example/boards/apps${path}`, based)).toBeUndefined();
+  });
+});
+
+describe('the address of a view of a board', () => {
+  it('names the view of a board of the workspace, under the base path', () => {
+    expect(boardViewAt(`https://fvoci.example/w/${WS}/boards/${BOARD}/${VIEW}`, here)).toBe(VIEW);
+    expect(boardViewAt(`https://fvoci.example/w/${WS}/boards/${BOARD}/${VIEW}?q=1#a`, here)).toBe(
+      VIEW,
+    );
+    const under: Here = { ...here, basePath: '/app/' };
+    expect(boardViewAt(`https://fvoci.example/app/w/${WS}/boards/${BOARD}/${VIEW}`, under)).toBe(
+      VIEW,
+    );
+  });
+
+  it('names nothing for a card, a board alone, another workspace, site or kind', () => {
+    for (const address of [
+      `https://fvoci.example/w/${WS}/boards/${BOARD}/${VIEW}/${CARD}`,
+      `https://fvoci.example/w/${WS}/boards/${BOARD}`,
+      `https://fvoci.example/w/${PAGE}/boards/${BOARD}/${VIEW}`,
+      `https://elsewhere.example/w/${WS}/boards/${BOARD}/${VIEW}`,
+      `https://fvoci.example/w/${WS}/wikis/${WIKI}/${PAGE}`,
+      `https://fvoci.example/shared/${BOARD}/${VIEW}`,
+      'not an address',
+    ]) {
+      expect(boardViewAt(address, here), address).toBeUndefined();
+    }
+    expect(
+      boardViewAt(`https://fvoci.example/w/${WS}/boards/${BOARD}/${VIEW}`, {
+        ...here,
+        workspaceId: undefined,
+      }),
+    ).toBeUndefined();
   });
 });

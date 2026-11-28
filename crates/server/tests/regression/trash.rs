@@ -1,10 +1,10 @@
-//! Scenario: the trash. Deleting a block or a board, bringing it back, and what does
-//! not come back.
+//! Scenario: the trash. Deleting a card, a comment, a view or a board, bringing it
+//! back, and what does not come back.
 
 use serde_json::json;
 
 use crate::common::UNKNOWN_ID;
-use crate::fixtures::{add_member, block, id_of, new_blocks, new_board, new_card};
+use crate::fixtures::{add_member, new_board, new_card};
 use crate::harness::{API, ROOT_API, Session};
 
 pub(crate) async fn trash(s: &mut Session) {
@@ -14,9 +14,9 @@ pub(crate) async fn trash(s: &mut Session) {
     add_member(s, &alice, &board, &carol, "viewer").await;
     let alice_id = s.user_id(&alice).await;
     let board_path = format!("{ROOT_API}/containers/{board}");
-    let blocks = format!("{ROOT_API}/boards/{board}/blocks");
+    let blocks = format!("{ROOT_API}/boards/{board}");
 
-    // A card with a subcard, comment and attachment on it, and a view next to it.
+    // A card with a subcard and a comment on it, and a view next to it.
     let card = new_card(s, &alice, &board, "Card", json!({}), "create card").await;
     let deep = new_card(
         s,
@@ -27,34 +27,26 @@ pub(crate) async fn trash(s: &mut Session) {
         "create subcard",
     )
     .await;
-    let created = new_blocks(
-        s,
-        &alice,
-        &board,
-        json!([block(
-            "v1",
-            &board,
-            "view",
-            "View",
-            "",
-            json!({"viewType": "board"})
-        )]),
-        "insert a view",
-    )
-    .await;
-    let view = id_of(&created[0]);
-    let created = new_blocks(
-        s,
-        &alice,
-        &board,
-        json!([
-            block("m1", &board, "comment", "Comment", &card, json!({})),
-            block("t1", &board, "attachment", "Text", &card, json!({})),
-        ]),
-        "insert a comment and a text on the card",
-    )
-    .await;
-    let text = id_of(&created[1]);
+    let view = s
+        .post("create a view", &format!("{blocks}/views"))
+        .json(json!({"title": "View", "viewType": "board"}))
+        .user(&alice)
+        .await
+        .json()["view"]["id"]
+        .as_str()
+        .expect("the view's identifier")
+        .to_owned();
+    let text = s
+        .post(
+            "comment on the card",
+            &format!("{blocks}/cards/{card}/comments"),
+        )
+        .json(json!({"body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Comment"}]},
+        ]}}))
+        .user(&alice)
+        .await
+        .string("id");
     let board = Board {
         alice,
         bob,
@@ -86,17 +78,17 @@ struct Board {
     alice_id: String,
     /// The route of the board.
     path: String,
-    /// The route of its blocks.
+    /// The route of the board under `/boards`.
     blocks: String,
     card: String,
     /// The subcard of the card.
     deep: String,
     view: String,
-    /// The text on the card.
+    /// The comment on the card.
     text: String,
 }
 
-/// A block goes with what is below it, and comes back with it.
+/// A card goes with what is below it, and comes back with it.
 async fn a_block_and_what_is_below_it(s: &mut Session, board: &Board) {
     let Board {
         alice,
@@ -119,43 +111,46 @@ async fn a_block_and_what_is_below_it(s: &mut Session, board: &Board) {
         }))
         .user(alice)
         .await;
-    s.delete("delete the card", &format!("{blocks}/{card}"))
+    let delete = format!("{blocks}/cards/batch-delete");
+    let restore = format!("{blocks}/cards/batch-restore");
+    let cards = format!("{blocks}/cards");
+    s.post("delete the card", &delete)
+        .json(json!({"cardIds": [card]}))
         .user(alice)
         .await;
-    s.get("blocks: the card took everything below it", blocks)
+    s.get("cards: the card took everything below it", &cards)
         .user(alice)
         .await;
     s.get("subscriptions: ended with the card", &of_alice)
         .user(alice)
         .await;
-    s.post("undelete: viewer", &format!("{blocks}/{card}/restore"))
+    s.post("undelete: viewer", &restore)
+        .json(json!({"cardIds": [card]}))
         .user(carol)
         .await;
-    s.post("undelete: non-member", &format!("{blocks}/{card}/restore"))
+    s.post("undelete: non-member", &restore)
+        .json(json!({"cardIds": [card]}))
         .user(dave)
         .await;
-    s.post(
-        "undelete: unknown block",
-        &format!("{blocks}/{UNKNOWN_ID}/restore"),
-    )
-    .user(alice)
-    .await;
-    s.post(
-        "undelete: a block that is not deleted",
-        &format!("{blocks}/{view}/restore"),
-    )
-    .user(alice)
-    .await;
-    s.post(
-        "undelete: a child brings back the whole deletion",
-        &format!("{blocks}/{deep}/restore"),
-    )
-    .user(bob)
-    .await;
-    s.get("blocks: all back, with their parents", blocks)
+    s.post("undelete: unknown card", &restore)
+        .json(json!({"cardIds": [UNKNOWN_ID]}))
         .user(alice)
         .await;
-    s.post("undelete: again", &format!("{blocks}/{card}/restore"))
+    s.post(
+        "undelete: a view that is not deleted",
+        &format!("{blocks}/views/{view}/restore"),
+    )
+    .user(alice)
+    .await;
+    s.post("undelete: a child brings back the whole deletion", &restore)
+        .json(json!({"cardIds": [deep]}))
+        .user(bob)
+        .await;
+    s.get("cards: all back, with their parents", &cards)
+        .user(alice)
+        .await;
+    s.post("undelete: again", &restore)
+        .json(json!({"cardIds": [card]}))
         .user(alice)
         .await;
     s.get("subscriptions: back with the card", &of_alice)
@@ -163,8 +158,8 @@ async fn a_block_and_what_is_below_it(s: &mut Session, board: &Board) {
         .await;
 }
 
-/// A block deleted on its own, then what it was on: the block comes back only after
-/// what it was on.
+/// A comment deleted on its own, then the card it was on: the comment comes back only
+/// after its card.
 async fn a_block_deleted_on_its_own(s: &mut Session, board: &Board) {
     let Board {
         alice,
@@ -173,39 +168,45 @@ async fn a_block_deleted_on_its_own(s: &mut Session, board: &Board) {
         text,
         ..
     } = board;
-    s.delete("delete the text", &format!("{blocks}/{text}"))
-        .user(alice)
-        .await;
-    s.delete("delete the card again", &format!("{blocks}/{card}"))
+    let comments = format!("{blocks}/cards/{card}/comments");
+    s.delete("delete the comment", &format!("{comments}/{text}"))
         .user(alice)
         .await;
     s.post(
-        "undelete the text: its card is in the trash",
-        &format!("{blocks}/{text}/restore"),
+        "delete the card again",
+        &format!("{blocks}/cards/batch-delete"),
+    )
+    .json(json!({"cardIds": [card]}))
+    .user(alice)
+    .await;
+    s.post(
+        "undelete the comment: its card is in the trash",
+        &format!("{comments}/{text}/restore"),
     )
     .user(alice)
     .await;
-    s.post("undelete the card", &format!("{blocks}/{card}/restore"))
+    s.post(
+        "undelete the card",
+        &format!("{blocks}/cards/batch-restore"),
+    )
+    .json(json!({"cardIds": [card]}))
+    .user(alice)
+    .await;
+    s.get("comments on the card: still deleted", &comments)
         .user(alice)
         .await;
-    s.get(
-        "blocks on the card: the text is still deleted",
-        &format!("{blocks}?parentId={card}"),
+    s.post(
+        "undelete the comment",
+        &format!("{comments}/{text}/restore"),
     )
     .user(alice)
     .await;
-    s.post("undelete the text", &format!("{blocks}/{text}/restore"))
+    s.get("comments on the card: back", &comments)
         .user(alice)
         .await;
-    s.get(
-        "blocks on the card: the text is back",
-        &format!("{blocks}?parentId={card}"),
-    )
-    .user(alice)
-    .await;
 }
 
-/// A board goes with its members and its blocks, and comes back with them.
+/// A board goes with its members, its cards and its views, and comes back with them.
 async fn a_board(s: &mut Session, board: &Board) {
     let Board {
         alice,
@@ -218,9 +219,12 @@ async fn a_board(s: &mut Session, board: &Board) {
         view,
         ..
     } = board;
-    s.delete("delete the view on its own", &format!("{blocks}/{view}"))
-        .user(alice)
-        .await;
+    s.delete(
+        "delete the view on its own",
+        &format!("{blocks}/views/{view}"),
+    )
+    .user(alice)
+    .await;
     s.delete("delete the board", board_path).user(alice).await;
     s.get("board: gone", board_path).user(alice).await;
     s.get(
@@ -242,9 +246,10 @@ async fn a_board(s: &mut Session, board: &Board) {
     .user(alice)
     .await;
     s.post(
-        "undelete a block of the deleted board",
-        &format!("{blocks}/{card}/restore"),
+        "undelete a card of the deleted board",
+        &format!("{blocks}/cards/batch-restore"),
     )
+    .json(json!({"cardIds": [card]}))
     .user(alice)
     .await;
     s.post(
@@ -281,9 +286,15 @@ async fn a_board(s: &mut Session, board: &Board) {
     )
     .user(alice)
     .await;
-    s.get("blocks: back, but for the view deleted before", blocks)
+    s.get("cards: back", &format!("{blocks}/cards"))
         .user(bob)
         .await;
+    s.get(
+        "views: back, but for the view deleted before",
+        &format!("{blocks}/views"),
+    )
+    .user(bob)
+    .await;
     s.post(
         "undelete the board: again",
         &format!("{board_path}/restore"),

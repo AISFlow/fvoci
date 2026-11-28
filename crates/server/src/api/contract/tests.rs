@@ -547,27 +547,20 @@ fn a_schema_that_is_written_where_it_is_used_is_finished_too() {
 /// What each operation that answers a list says about the order of the list: words
 /// of its description, or of the description of its answer.
 const ORDERS: &[(&str, &str)] = &[
-    ("createBlocks", "in the order of the request"),
-    (
-        "createContainersAndBlocks",
-        "The boards in the order of the request",
-    ),
-    ("duplicateBlock", "the copy of the block first"),
+    ("batchPatchCards", "in the order of `cardIds`"),
     (
         "duplicateContainer",
         "in the order of the source board's, oldest first",
     ),
     ("getApiTokens", "the newest first"),
-    (
-        "getBlocks",
-        "Oldest first; the blocks that one request made come in the order that request had them in",
-    ),
+    ("getBoardViews", "Oldest first"),
+    ("getCardActivity", "the newest first"),
+    ("getCardAttachments", "Oldest first"),
     ("getCardBodyVersions", "The newest first"),
     ("getCardCommentVersions", "the first one first"),
     ("getCardComments", "oldest first"),
     ("getCards", "Oldest first; the pages cut that order"),
     ("getCategories", "by `sortOrder`, lowest first"),
-    ("getCommentVersions", "The first one first"),
     (
         "getContainerTeams",
         "Ordered by team name in any letter case, by code point, then by identifier",
@@ -595,6 +588,7 @@ const ORDERS: &[(&str, &str)] = &[
     ("getDiaryEntriesOn", "the latest year first"),
     ("getDiaryEntryBodyVersions", "the newest first"),
     ("getDiaryRuns", "the earliest first"),
+    ("getFavorites", "in their order"),
     ("getFileVersions", "The newest first"),
     ("getInvitations", "The newest first"),
     ("getMembers", "By the identifier of the user"),
@@ -674,10 +668,6 @@ const ORDERS: &[(&str, &str)] = &[
     ),
     ("listMyUnitNotes", "Ordered by `createdAt` descending"),
     ("listWorkspaceContainers", "Oldest first"),
-    (
-        "patchContainersAndBlocks",
-        "each in the order of the request",
-    ),
     ("reorderCardProperties", "in their new order"),
     ("reorderCategories", "in their new order"),
     ("reorderCategoryContainers", "in their new order"),
@@ -769,8 +759,8 @@ fn the_routes_that_share_a_position_are_named_apart() {
 
 #[test]
 fn path_parameters_are_the_names_in_braces() {
-    let names: Vec<&str> = path_parameters("/boards/{boardId}/blocks/{blockId}").collect();
-    assert_eq!(names, ["boardId", "blockId"], "the names in the path");
+    let names: Vec<&str> = path_parameters("/boards/{boardId}/views/{viewId}").collect();
+    assert_eq!(names, ["boardId", "viewId"], "the names in the path");
     assert_eq!(
         path_parameters("/boards").count(),
         0,

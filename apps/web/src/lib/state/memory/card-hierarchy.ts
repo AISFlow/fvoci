@@ -8,6 +8,7 @@
 import type { Container } from '../../logic/wire.ts';
 import { BackendError, refusedMember, type CardDraft } from '../backend.ts';
 
+import { settleNewCard } from './card-recurrence.ts';
 import { checkedBody } from './bodies.ts';
 import { numberBlock } from './card-numbers.ts';
 import { checkRelations } from './references.ts';
@@ -128,10 +129,12 @@ export function storeNewCard(
     icon: draft.icon ?? '',
     isTemplate: draft.isTemplate ?? false,
     properties: copy(draft.properties ?? {}),
+    ...(draft.recurrence ? { recurrence: copy(draft.recurrence) } : {}),
   };
   block.body = checkedBody(world, board.id, draft.body ?? null);
   checkCardParent(world, board.id, block, block.parentId, true);
   checkRelations(world, board, block, undefined, 'properties');
+  settleNewCard(board, block as StoredCard, draft.quiet ?? false);
   numberBlock(world, block);
   world.blocks.set(block.id, block);
   return block as StoredCard;

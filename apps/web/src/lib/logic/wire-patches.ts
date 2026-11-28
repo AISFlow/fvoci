@@ -3,12 +3,7 @@
  * re-exported through `wire.ts`.
  */
 import type { Block, BlockPatch } from './wire-blocks.ts';
-import type {
-  Container,
-  ContainerPatch,
-  ContainersAndBlocksPatch,
-  PropertyTemplate,
-} from './wire.ts';
+import type { Container, ContainerPatch, PropertyTemplate } from './wire.ts';
 
 type Members = object | null | undefined;
 
@@ -130,39 +125,6 @@ export function createPatchesFromContainers(
       ...(doneChanged ? { doneWhen: oldBoard.doneWhen ?? null } : {}),
       updatedProperties: changedMembers(oldBoard.properties, newBoard.properties, []),
       deletedProperties: keysOnlyIn(newBoard.properties, oldBoard.properties),
-    },
-  ];
-}
-
-export function createPatchesFromContainersAndBlocks(
-  updatedBoard: Container,
-  oldBoard: Container,
-  updatedBlockIds: string[],
-  updatedBlocks: readonly Block[],
-  oldBlocks: readonly Block[],
-): [ContainersAndBlocksPatch, ContainersAndBlocksPatch] {
-  const blockPatches: BlockPatch[] = [];
-  const blockUndoPatches: BlockPatch[] = [];
-  updatedBlocks.forEach((newBlock, index) => {
-    const oldBlock = oldBlocks[index];
-    if (!oldBlock) throw new Error(`no old state for block ${newBlock.id}`);
-    const [patch, undoPatch] = createPatchesFromBlocks(newBlock, oldBlock);
-    blockPatches.push(patch);
-    blockUndoPatches.push(undoPatch);
-  });
-  const [boardPatch, boardUndoPatch] = createPatchesFromContainers(updatedBoard, oldBoard);
-  return [
-    {
-      blockIDs: updatedBlockIds,
-      blockPatches,
-      containerIDs: [updatedBoard.id],
-      containerPatches: [boardPatch],
-    },
-    {
-      blockIDs: updatedBlockIds,
-      blockPatches: blockUndoPatches,
-      containerIDs: [updatedBoard.id],
-      containerPatches: [boardUndoPatch],
     },
   ];
 }

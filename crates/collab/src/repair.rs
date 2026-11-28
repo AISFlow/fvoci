@@ -193,6 +193,7 @@ fn deleting(doc: &Doc, writer: Option<u64>) -> Result<Repair, BodyError> {
     check_totals(DocTotals {
         blocks: survey.kept_blocks,
         nodes: survey.kept_nodes,
+        board_views: survey.kept_board_views,
         json_bytes: survey.kept_json_bytes,
         is_empty_doc: survey.only_empty_paragraph,
     })?;
@@ -287,6 +288,7 @@ fn deleting_with_cache(
     check_totals(DocTotals {
         blocks: survey.kept_blocks,
         nodes: survey.kept_nodes,
+        board_views: survey.kept_board_views,
         json_bytes: survey.kept_json_bytes,
         is_empty_doc: survey.only_empty_paragraph,
     })?;
@@ -392,7 +394,7 @@ fn refresh_cache_after_repair<T: ReadTxn>(
         }
     }
     for block in kept {
-        let entry = if kind == RepairKind::WithMends && block.is_table {
+        let entry = if kind == RepairKind::WithMends && block.may_be_mended {
             project_and_validate_block(txn, &block.element)?
         } else {
             block.entry
@@ -480,7 +482,9 @@ struct KeptSurveyBlock {
     id: ID,
     element: XmlElementRef,
     entry: BlockEntry,
-    is_table: bool,
+    /// Whether a mend may have changed it after its survey: a table, or a toggle, which
+    /// may hold tables.
+    may_be_mended: bool,
 }
 
 /// What [`Survey::root_cached`] collected without materializing clean or non-table blocks'
@@ -489,6 +493,7 @@ struct KeptSurveyBlock {
 struct CachedRootSurvey {
     kept_blocks: usize,
     kept_nodes: u64,
+    kept_board_views: u64,
     kept_json_bytes: u64,
     only_empty_paragraph: bool,
     changes: Changes,
@@ -579,6 +584,9 @@ impl<T: ReadTxn> Survey<'_, T> {
             {
                 out.kept_blocks += 1;
                 out.kept_nodes = out.kept_nodes.saturating_add(u64::from(summary.nodes));
+                out.kept_board_views = out
+                    .kept_board_views
+                    .saturating_add(u64::from(summary.board_views));
                 out.kept_json_bytes = out
                     .kept_json_bytes
                     .saturating_add(u64::from(summary.json_bytes));
@@ -625,10 +633,13 @@ impl<T: ReadTxn> Survey<'_, T> {
                 let bytes = u64::try_from(summary.json_bytes).unwrap_or(u64::MAX);
                 out.kept_blocks += 1;
                 out.kept_nodes = out.kept_nodes.saturating_add(nodes);
+                out.kept_board_views = out
+                    .kept_board_views
+                    .saturating_add(u64::try_from(summary.board_views).unwrap_or(u64::MAX));
                 out.kept_json_bytes = out.kept_json_bytes.saturating_add(bytes);
                 out.only_empty_paragraph = out.kept_blocks == 1 && summary.is_empty_paragraph;
                 if let Some((id, element)) = elem {
-                    let is_table = summary.kind == "table";
+                    let may_be_mended = matches!(summary.kind, "table" | "details");
                     out.surveyed_kept.push(KeptSurveyBlock {
                         id,
                         element,
@@ -638,10 +649,11 @@ impl<T: ReadTxn> Survey<'_, T> {
                                 json_bytes: u32::try_from(summary.json_bytes).unwrap_or(u32::MAX),
                                 is_empty_paragraph: summary.is_empty_paragraph,
                                 has_empty_row_text: false,
+                                board_views: u32::try_from(summary.board_views).unwrap_or(u32::MAX),
                             },
                             file_ids: summary.file_ids.into_boxed_slice(),
                         },
-                        is_table,
+                        may_be_mended,
                     });
                 }
             }

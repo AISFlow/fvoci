@@ -164,11 +164,7 @@ async fn warm_document_grants_end_when_the_card_is_deleted() {
         let (room, mut one, mut two) = two_in_a_room(&ts, &paragraphs(&["private"])).await;
         one.write_acked("warm").await;
         assert!(two.step(WAIT).await, "cache warmed");
-        ts.client
-            .delete(&format!(
-                "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-                room.board_id, room.card_id
-            ))
+        crate::blocks::trash_card(&ts.client, &room.board_id, &room.card_id)
             .await
             .check_no_content();
         if write {

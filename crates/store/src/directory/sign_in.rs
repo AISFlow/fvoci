@@ -6,7 +6,7 @@ use fvoci_model::LoginOrganization;
 use crate::Store;
 use crate::db::Id;
 use crate::error::StoreError;
-use crate::oidc_flows::{FLOW_COLUMNS, LoginFlow, flow_from_row};
+use crate::oidc_flows::{FLOW_COLUMNS, LoginFlow};
 
 impl Store {
     /// Takes the sign-in under way whose `state` has the digest `state_hash`, if the
@@ -30,10 +30,7 @@ impl Store {
                 sql.bind(state_hash)
                     .push_bind(" AND browser_hash = ", browser_hash)
                     .push([" RETURNING ", FLOW_COLUMNS]);
-                let Some(row) = scope.fetch_optional(sql).await? else {
-                    return Ok(None);
-                };
-                flow_from_row(&row).map(Some)
+                scope.first(sql).await
             })
             .await
     }
@@ -52,11 +49,7 @@ impl Store {
             .with_conn(async |scope| {
                 let mut sql = scope.sql("SELECT org_id FROM oidc_login_flows WHERE state_hash = ");
                 sql.bind(state_hash);
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await
     }

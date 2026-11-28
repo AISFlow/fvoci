@@ -9,7 +9,6 @@
 import { tick } from 'svelte';
 import { SvelteSet } from 'svelte/reactivity';
 
-import { copyCardLink } from '$lib/components/card-number/card-link.ts';
 import type { MenuAction } from '$lib/components/menu/actions.ts';
 import { PickerPresentation } from '$lib/components/picker-surface/default-presentation.svelte.ts';
 import { readerPointer } from '$lib/components/drag/reader-pointer.ts';
@@ -30,6 +29,8 @@ import {
 } from '$lib/logic/wire.ts';
 import type { BoardStore } from '$lib/state/index.ts';
 
+import { activationOf, Selection } from '../selection.svelte.ts';
+
 import { titleProperty } from './calculation-names.ts';
 import { CellEditing } from './cell-editing.svelte.ts';
 import { ColumnResize } from './column-resize.svelte.ts';
@@ -45,7 +46,8 @@ import {
 import { COLUMN_DRAG_MESSAGES, rowDragMessages } from './drag-messages.ts';
 import { GridFocus } from './grid-focus.ts';
 import { isEditableKind, readAsOrder, type RowHost, type TableReader } from './host.ts';
-import { headerMenu, rowMenu } from './menus.ts';
+import { headerMenu } from './menus.ts';
+import { rowActionsOf, type RowActionsHost } from './row-actions.ts';
 import {
   buildTableRowLists,
   listsHaveHierarchy,
@@ -406,47 +408,31 @@ export class TableController {
     );
   }
 
+  /** The rows selected, to change together; in the order the table shows them. */
+  readonly selection = new Selection(() =>
+    this.shownLists.flatMap((list) => list.rows.map((row) => row.card.id)),
+  );
+
+  readonly #rowActions: RowActionsHost = {
+    board: () => this.#board,
+    cards: () => this.#source.cards(),
+    cardHref: (cardId) => this.#source.cardHref(cardId),
+    openCard: (cardId) => {
+      this.#source.openCard(cardId);
+    },
+    grid: this.grid,
+    selection: this.selection,
+    say: (text) => {
+      this.#say(text);
+    },
+  };
+
   #say(text: string): void {
     // The same words twice in a row would not be read again.
     this.said = '';
     void tick().then(() => {
       this.said = text;
     });
-  }
-
-  async #focusTitle(cardId: string | undefined): Promise<void> {
-    if (cardId === undefined) return;
-    await tick();
-    const cell = this.grid.find(cardId, TITLE_COLUMN_ID);
-    if (cell) this.grid.focus(cell);
-  }
-
-  async #deleteCard(card: Card): Promise<void> {
-    // The keyboard continues from the row that takes the place of the deleted one.
-    const cards = this.#source.cards();
-    const at = cards.findIndex((other) => other.id === card.id);
-    const neighbour = cards[at + 1] ?? cards[at - 1];
-    await this.#board.deleteCards([card.id]);
-    await this.#focusTitle(neighbour?.id);
-  }
-
-  async #duplicateCard(card: Card): Promise<void> {
-    const copy = await this.#board.duplicateCard(card.id);
-    await this.#focusTitle(copy?.id);
-  }
-
-  async #copyLink(card: Card): Promise<void> {
-    // An anchor gives the whole address of a path: with the origin and the base path.
-    const link = document.createElement('a');
-    link.href = this.#source.cardHref(card.id);
-    const address = link.href;
-    try {
-      await copyCardLink(address, card);
-    } catch {
-      // The browser refused (no permission, not a secure page): nothing was copied, and nothing is said.
-      return;
-    }
-    this.#say(m['CardActionsMenu.copiedLink']());
   }
 
   /** What the rows are given. One object for all of them, made once. */
@@ -486,15 +472,16 @@ export class TableController {
     toggleParent: (cardId) => {
       table.toggleParent(cardId);
     },
-    rowActions: (card) =>
-      rowMenu({
-        canEdit: table.canEdit,
-        onOpen: () => {
-          table.#source.openCard(card.id);
-        },
-        onDuplicate: () => void table.#duplicateCard(card),
-        onCopyLink: () => void table.#copyLink(card),
-        onDelete: () => void table.#deleteCard(card),
-      }),
+    rowActions: (card) => rowActionsOf(table.#rowActions, card),
+    pick: (cardId, event) => {
+      const how = activationOf(event);
+      if (!table.canEdit || how === undefined || !table.selection.press(cardId, how)) return false;
+      // Shift and a press also select the text between; the rows are what was meant.
+      if (how === 'range') document.getSelection()?.removeAllRanges();
+      return true;
+    },
+    toggleSelected: (cardId, range) => {
+      table.selection.press(cardId, range ? 'range' : 'toggle');
+    },
   }))(this);
 }

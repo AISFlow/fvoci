@@ -377,8 +377,7 @@ async fn only_who_edits_the_card_restores_a_version() {
     );
 
     // Not of a card in the trash.
-    th.client
-        .delete(&crate::blocks::block_path(&t.board_id, &t.card_id))
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
         .await
         .check_no_content();
     th.client

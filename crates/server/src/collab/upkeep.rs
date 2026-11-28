@@ -2,7 +2,7 @@
 //! the body to the card, folding the log into the state, and making a document that
 //! grew too large again from its body.
 
-use fvoci_model::Body;
+use fvoci_model::{BlockError, Body};
 use fvoci_store::{BodyBefore, ByAgent, Projection, StoreError, body_digest};
 use serde_json::Value;
 use tokio::time::{Instant, sleep_until};
@@ -12,7 +12,7 @@ use super::place::{AskedFor, Held, OpenDoc, Opening, Unanswered, died_over};
 use super::senders::SenderOf;
 use super::versions::Versioned;
 use super::{Collab, DocChange, FOLD_AFTER, REMAKE_RETRY, Taken};
-use crate::app::App;
+use crate::app::{App, Changes};
 use crate::collab_worker::wire::{Answer, Request};
 use crate::error::{AppError, Reason};
 
@@ -43,6 +43,15 @@ pub(super) struct Sent<'a> {
 struct Sending<'a> {
     update: &'a [u8],
     by: Sent<'a>,
+}
+
+/// What the worker says the document holds after it took an update: what its repair
+/// changed, and what the body shows that is logged by its rules.
+#[derive(Debug, Clone, Copy)]
+struct Shows<'a> {
+    repair: Option<&'a [u8]>,
+    files: &'a [String],
+    board_views: u64,
 }
 
 impl Collab {
@@ -175,6 +184,7 @@ impl Collab {
             client_changes,
             steps_ahead,
             files,
+            board_views,
             remake,
             fold,
         } = answer
@@ -189,7 +199,17 @@ impl Collab {
             return Err(super::refusals::out_of_step().into());
         }
         let seqs = self
-            .log_taken(app, card_id, slot, sending, repair.as_deref(), &files)
+            .log_taken(
+                app,
+                card_id,
+                slot,
+                sending,
+                Shows {
+                    repair: repair.as_deref(),
+                    files: &files,
+                    board_views,
+                },
+            )
             .await?;
         let open = slot.open.as_mut().expect("the document is open");
         let now = Instant::now();
@@ -222,9 +242,19 @@ impl Collab {
         card_id: &str,
         slot: &mut Held,
         sending: Sending<'_>,
-        repair: Option<&[u8]>,
-        files: &[String],
+        shows: Shows<'_>,
     ) -> Result<Vec<i64>, AppError> {
+        let Shows {
+            repair,
+            files,
+            board_views,
+        } = shows;
+        let open = slot.open.as_ref().expect("the document is open");
+        if board_views > 0 && !open.block_type.shows_board_views() {
+            let refused = AppError::bad_request(BlockError::BoardViewNotAllowed)
+                .with_reason(Reason::UpdateRefused);
+            return Err(self.unlogged(app, card_id, slot, refused).await);
+        }
         let Sending { update, by } = sending;
         let user_id = by.user_id;
         let mut entries: Vec<(&[u8], &str)> = vec![(update, user_id)];
@@ -276,10 +306,7 @@ impl Collab {
         slot: &mut Held,
         error: StoreError,
     ) -> AppError {
-        self.forget(slot).await;
-        if let Err(reopened) = self.ensure_open(app, card_id, slot).await {
-            tracing::warn!(%reopened, card_id, "cannot open a document again after an update that was not logged");
-        }
+        self.forget_and_reopen(app, card_id, slot).await;
         match error {
             StoreError::InvalidBlock { .. } => AppError::bad_request(
                 "the update names a file (of an image or a file block) the board or wiki \
@@ -291,6 +318,28 @@ impl Collab {
                 error.into()
             }
             other => other.into(),
+        }
+    }
+
+    /// Opens again, as it is stored and at once, a document whose worker took an update
+    /// that is not logged for what it leaves in the body (`refused`, which it is
+    /// refused with): a board view in a body that shows none.
+    async fn unlogged(
+        &self,
+        app: &App,
+        card_id: &str,
+        slot: &mut Held,
+        refused: AppError,
+    ) -> AppError {
+        self.forget_and_reopen(app, card_id, slot).await;
+        refused
+    }
+
+    /// Forgets the document its worker holds and opens it again as it is stored.
+    async fn forget_and_reopen(&self, app: &App, card_id: &str, slot: &mut Held) {
+        self.forget(slot).await;
+        if let Err(reopened) = self.ensure_open(app, card_id, slot).await {
+            tracing::warn!(%reopened, card_id, "cannot open a document again after an update that was not logged");
         }
     }
 
@@ -921,12 +970,5 @@ async fn announce(app: &App, card_id: &str) {
             return;
         }
     };
-    let app_of_task = app.clone();
-    app.spawn_background(async move {
-        app_of_task
-            .ws()
-            .broadcast_block_change(&container.workspace_id, &block)
-            .await;
-        app_of_task.tell_webhooks(&block);
-    });
+    app.tell(Changes::in_workspace(&container.workspace_id).changed([block]));
 }

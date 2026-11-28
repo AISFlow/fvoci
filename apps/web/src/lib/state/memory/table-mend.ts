@@ -7,7 +7,9 @@
  * to what fits, and a row is given the empty cells it lacks at its end (one
  * without cells too, unless the cells above cover it); a table no row of which
  * holds a cell goes. Anything else that is wrong is left, for the room to
- * refuse.
+ * refuse. Tables are found where the document holds them: at its top and in
+ * what a toggle hides, a toggle in a toggle too; a toggle left with nothing to
+ * hide once its table goes goes too, whole, as the server's repair takes it.
  *
  * The rooms of the tabs joined together (`shareRooms`) each mend what they
  * hold. So that two that mend the same are one, as two makings of a document
@@ -179,6 +181,41 @@ function needsMending(table: Y.XmlElement): boolean {
   );
 }
 
+type Parent = Y.XmlFragment | Y.XmlElement;
+
+const TABLE = new Set(['table']);
+const TOGGLE = new Set(['details']);
+const HIDDEN = new Set(['detailsContent']);
+
+/** The tables under `parent`, each with what holds it: at its top and in what its toggles hide. */
+function tablesOf(parent: Parent): [Parent, Y.XmlElement][] {
+  const found: [Parent, Y.XmlElement][] = [];
+  for (const child of parent.toArray()) {
+    if (isElement(child, TABLE)) found.push([parent, child]);
+    else if (isElement(child, TOGGLE))
+      for (const part of child.toArray())
+        if (isElement(part, HIDDEN)) found.push(...tablesOf(part));
+  }
+  return found;
+}
+
+/** Deletes `child` from `parent`, and a toggle that then hides nothing, up to the one that hides something. */
+function deleteFrom(doc: Y.Doc, parent: Parent, child: Y.XmlElement): void {
+  let holder = parent;
+  let gone: Y.XmlElement = child;
+  for (;;) {
+    const toggle =
+      holder instanceof Y.XmlElement && isElement(holder, HIDDEN) ? holder.parent : null;
+    if (!(toggle instanceof Y.XmlElement) || holder.length > 1 || !toggle.parent) break;
+    gone = toggle as Y.XmlElement;
+    holder = toggle.parent as Parent;
+  }
+  const at = holder.toArray().indexOf(gone);
+  doc.transact(() => {
+    holder.delete(at);
+  });
+}
+
 /**
  * Mends every table of a room's document that two merged changes left
  * wrong; the update it wrote, if it wrote anything.
@@ -190,15 +227,11 @@ export function mendTables(doc: Y.Doc): Uint8Array | undefined {
   };
   doc.on('update', keep);
   try {
-    const fragment = doc.getXmlFragment(BODY_FIELD);
-    for (const table of fragment.toArray()) {
-      if (!isElement(table, new Set(['table'])) || !needsMending(table)) continue;
+    for (const [parent, table] of tablesOf(doc.getXmlFragment(BODY_FIELD))) {
+      if (!needsMending(table)) continue;
       if (!mendRows(doc, table)) continue;
       if (holdsNoCell(table)) {
-        const at = fragment.toArray().indexOf(table);
-        doc.transact(() => {
-          fragment.delete(at);
-        });
+        deleteFrom(doc, parent, table);
         continue;
       }
       mendGrid(doc, table);

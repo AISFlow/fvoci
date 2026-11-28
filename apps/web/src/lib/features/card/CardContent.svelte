@@ -20,6 +20,7 @@
   import { ancestorsOf } from '$lib/logic/card-hierarchy.ts';
   import type { BoardView } from '$lib/logic/wire.ts';
   import {
+    embeddedBoards,
     whileHere,
     type BoardStore,
     type CardStore,
@@ -30,10 +31,12 @@
   import { bodyReferences } from './body-references.ts';
   import BodyVersions from './BodyVersions.svelte';
   import { cardVersions, keepVersion, VersionsReading } from './body-versions.svelte.ts';
+  import CardActivity from './CardActivity.svelte';
   import CardAttachments from './CardAttachments.svelte';
   import CardBacklinks from './CardBacklinks.svelte';
   import CardBody from './CardBody.svelte';
   import CardComments from './CardComments.svelte';
+  import CommentReactions from './CommentReactions.svelte';
   import CardHeader from './CardHeader.svelte';
   import CardParentBar from './CardParentBar.svelte';
   import CardProperties from './CardProperties.svelte';
@@ -60,6 +63,7 @@
   let { board, view, card, frame, cardHref, onClose, onOpenCard, headerActions }: Props = $props();
 
   const references = $derived(bodyReferences(board, card.cardId));
+  const boardViews = $derived(embeddedBoards(board.workspace).host);
 
   // The body's room is asked for with the card's reading (`CardStore.load`): the
   // editor that shows its document is asked for with them, not once the card is read.
@@ -192,14 +196,19 @@
           container={board}
           {card}
           {references}
+          {boardViews}
           keep={() => keepVersion(cardVersions(board, card))}
         />
+        <CommentReactions reactions={card.reactions} blockId={card.cardId} />
         {#if !summary.fields.isTemplate}
           <SubcardsSection {board} card={summary} {onOpenCard} />
         {/if}
         <CardBacklinks workspace={board.workspace} blockId={card.cardId} />
         <CardAttachments {board} {card} />
-        <CardComments {board} {card} {readVersions} />
+        {#if board.workspace.backend.cardActivity}
+          <CardActivity {board} card={summary} />
+        {/if}
+        <CardComments {board} {card} {readVersions} reactions={card.reactions} />
       {:else if card.status === 'failed'}
         <p class="border-t pt-5 text-muted-foreground" role="alert">{m.app_problem_load()}</p>
       {:else}

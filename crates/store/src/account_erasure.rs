@@ -29,12 +29,14 @@
 //! Steps 1 and 3 reach every organization: a person's memberships, and the records
 //! about them, are of several.
 
-use fvoci_model::{AuditAction, ContainerMember, ContainerRole, OrgRole, WorkspaceRole};
+use fvoci_model::{
+    AuditAction, ContainerMember, ContainerRole, OrgRole, OrganizationName, WorkspaceRole,
+};
 
 use crate::account_deletion::{self, DeletionStanding, Held};
 use crate::audit::{self, AuditActor, AuditEntry};
 use crate::containers::{delete_member, find_member, save_member};
-use crate::db::{DeletedContainersHeld, Dialect, Id, LockRank, OrganizationHeld, Param, Scope};
+use crate::db::{DeletedContainersHeld, Id, LockRank, OrganizationHeld, Param, RowLock, Scope};
 use crate::error::StoreError;
 use crate::sessions::{self, EndedSessionScope, SessionsEnded};
 use crate::trash::{self, Purged, TrashedRoles};
@@ -139,12 +141,7 @@ impl Store {
                  AND (erase_started_at > 0 OR (delete_after > 0 AND delete_after <= ",
             );
             sql.bind(now).push(")) ORDER BY delete_after, id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.id(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -196,10 +193,11 @@ impl Store {
                 // Whoever is on their way into an organization that is to go is in it
                 // before it is asked once more who is.
                 let (alone_in, joined) = {
+                    let waited = std::mem::take(&mut standing.alone_in);
+                    wait_for_who_comes_in(scope, &waited).await?;
                     let mut alone_in = Vec::new();
                     let mut joined = Vec::new();
-                    for organization in std::mem::take(&mut standing.alone_in) {
-                        wait_for_who_comes_in(scope, &organization.id).await?;
+                    for organization in waited {
                         if account_deletion::has_other_people(scope, &organization.id, user_id)
                             .await?
                         {
@@ -266,12 +264,7 @@ impl Store {
                         Id(user_id),
                     )
                     .push(" ORDER BY 1");
-                scope
-                    .fetch_all(sql)
-                    .await?
-                    .iter()
-                    .map(|row| row.id(0))
-                    .collect()
+                scope.all(sql).await
             })
             .await
     }
@@ -373,13 +366,10 @@ impl Store {
                 let turn = link_locks::take_turn(scope).await?;
                 let addresses = addresses_of(scope, user_id).await?;
                 hold_organizations_of_links_to(scope, turn, &addresses).await?;
-                scope.record_lock(LockRank::Users, user_id);
                 let mut sql =
                     scope.sql("SELECT erase_started_at, erased_at FROM users WHERE id = ");
                 sql.bind(Id(user_id));
-                if scope.dialect() == Dialect::Postgres {
-                    sql.push(" FOR UPDATE");
-                }
+                sql.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::Update));
                 let Some(row) = scope.fetch_optional(sql).await? else {
                     return Ok(ErasureEnd::NotBegun);
                 };
@@ -406,6 +396,7 @@ impl Store {
                     .push(")");
                 scope.execute(sql).await?;
                 crate::api_tokens::forget_names_of_tokens_of(scope, user_id).await?;
+                crate::card_events::forget_actor(scope, user_id).await?;
                 for delete in PERSONAL_DELETES {
                     let mut sql = scope.sql(delete);
                     sql.bind(Id(user_id));
@@ -436,7 +427,7 @@ impl Store {
 ///
 /// `meeting_attendance` and `course_meetings` (`presenter_id`, `host_id`) are intentionally
 /// excluded: shared study meeting history stays under the erased user's tombstone identifier.
-const PERSONAL_DELETES: [&str; 20] = [
+const PERSONAL_DELETES: [&str; 22] = [
     "DELETE FROM notifications WHERE recipient_id = ",
     "DELETE FROM notification_outbox WHERE recipient_id = ",
     "DELETE FROM card_due_notices WHERE user_id = ",
@@ -451,8 +442,10 @@ const PERSONAL_DELETES: [&str; 20] = [
     "DELETE FROM user_client_state WHERE user_id = ",
     "DELETE FROM password_resets WHERE user_id = ",
     "DELETE FROM subscriptions WHERE user_id = ",
+    "DELETE FROM reactions WHERE user_id = ",
     "DELETE FROM category_containers WHERE user_id = ",
     "DELETE FROM categories WHERE user_id = ",
+    "DELETE FROM favorites WHERE user_id = ",
     "DELETE FROM unit_progress WHERE user_id = ",
     "DELETE FROM exam_scores WHERE user_id = ",
     "DELETE FROM unit_reviews WHERE user_id = ",
@@ -489,23 +482,35 @@ async fn mark(
     Ok(Some(ended))
 }
 
-/// Waits for whoever is on their way into the organization, on PostgreSQL: a sign-in
-/// through its provider holds the provider's settings, and an acceptance its link,
-/// until it ends. Held here in turn, after the organization's row (`link_locks`), they
-/// are in the organization, or refused, before it is asked who is in it; whoever
-/// comes after waits for this transaction, and finds the provider gone and the link
-/// revoked. SQLite's writers wait for each other already.
-async fn wait_for_who_comes_in(scope: &mut Scope<'_>, org_id: &str) -> Result<(), StoreError> {
-    if scope.dialect() != Dialect::Postgres {
-        return Ok(());
-    }
-    for select in [
-        "SELECT id FROM oidc_providers WHERE org_id = ",
-        "SELECT id FROM invitations WHERE org_id = ",
+/// Waits for whoever is on their way into the `organizations`, on PostgreSQL: a sign-in
+/// through a provider holds the provider's settings, and an acceptance its link, until
+/// it ends. Held here in turn, after the organizations' rows (`link_locks`), they are in
+/// an organization, or refused, before it is asked who is in it; whoever comes after
+/// waits for this transaction, and finds the provider gone and the link revoked. The
+/// providers of every organization are held before the links of any, in the order of
+/// the organizations, as their ranks have them. SQLite's writers wait for each other
+/// already.
+async fn wait_for_who_comes_in(
+    scope: &mut Scope<'_>,
+    organizations: &[OrganizationName],
+) -> Result<(), StoreError> {
+    for (rank, select) in [
+        (
+            LockRank::Provider,
+            "SELECT id FROM oidc_providers WHERE org_id = ",
+        ),
+        (
+            LockRank::Invitation,
+            "SELECT id FROM invitations WHERE org_id = ",
+        ),
     ] {
-        let mut sql = scope.sql(select);
-        sql.bind(Id(org_id)).push(" ORDER BY id FOR UPDATE");
-        scope.fetch_all(sql).await?;
+        for organization in organizations {
+            let mut sql = scope.sql(select);
+            sql.bind(Id(&organization.id)).push(" ORDER BY id");
+            scope
+                .hold(rank, &organization.id, sql, RowLock::Update)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -541,7 +546,7 @@ async fn is_being_erased(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, S
     let mut sql =
         scope.sql("SELECT 1 FROM users WHERE erase_started_at > 0 AND erased_at = 0 AND id = ");
     sql.bind(Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Whether the scope's organization is the user's own space.
@@ -549,14 +554,14 @@ async fn is_own_space_of(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, S
     let mut sql = scope.sql("SELECT 1 FROM organizations WHERE id = ");
     sql.bind(scope.org()?)
         .push_bind(" AND owner_id = ", Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Whether the scope's organization is out of use.
 async fn is_out_of_use(scope: &mut Scope<'_>) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT 1 FROM organizations WHERE deleted_at IS NOT NULL AND id = ");
     sql.bind(scope.org()?);
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Whether the user is an administrator of the scope's organization: an organization
@@ -570,7 +575,7 @@ async fn administers_organization(
     sql.bind(Id(user_id))
         .push_bind(" AND org_id = ", scope.org()?)
         .push_bind(" AND role = ", OrgRole::Admin.as_str());
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Takes the user out of each workspace of the scope's organization they are in, in use
@@ -606,12 +611,7 @@ async fn workspaces_of(scope: &mut Scope<'_>, user_id: &str) -> Result<Vec<Strin
     sql.bind(Id(user_id))
         .push_bind(" AND w.org_id = ", scope.org()?)
         .push(" ORDER BY wm.workspace_id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect()
+    scope.all(sql).await
 }
 
 /// Takes the user out of a workspace of the scope's organization, in use or in the
@@ -626,13 +626,10 @@ async fn leave_workspace(
     user_id: &str,
     actor: &AuditActor,
 ) -> Result<Option<LeftWorkspace>, StoreError> {
-    scope.record_lock(LockRank::Workspace, workspace_id);
     let mut sql = scope.sql("SELECT deleted_at FROM workspaces WHERE id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND org_id = ", scope.org()?);
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR NO KEY UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Workspace, workspace_id, RowLock::NoKeyUpdate));
     let Some(row) = scope.fetch_optional(sql).await? else {
         return Ok(None);
     };
@@ -746,16 +743,12 @@ async fn heir_in(
         .push_bind(" AND wm.role = ", WorkspaceRole::Admin.as_str())
         .push_bind(" AND wm.via_org_admin = ", false)
         .push(" ORDER BY wm.created_at, wm.user_id LIMIT 1");
-    scope
-        .fetch_optional(sql)
-        .await?
-        .map(|row| row.id(0))
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Removes what the user still has in the scope's organization once they are out of
 /// its workspaces: a role left on a board of a workspace they had left before, what
-/// they follow there, the membership of the organization, and the links they made
+/// they follow there, their reactions there, the membership of the organization, and the links they made
 /// that nobody used. A link another was made like stays, and so do those made like it
 /// that were used and the registrations made by them, which the schema would take
 /// along: such a link lets nobody in, for its maker is no member of the organization.
@@ -793,6 +786,7 @@ pub(crate) async fn leave_organization<'c>(
     // and note writes (which hold `users`) so an in-flight write cannot insert an orphan
     // after we clear rows.
     crate::users::hold_user_for_cleanup(scope, user_id).await?;
+    crate::reactions::forget_user_in_organization(scope, user_id).await?;
     crate::unit_reviews::forget_user_in_organization(scope, user_id).await?;
     let mut due_sql = scope.sql("DELETE FROM card_due_notices WHERE user_id = ");
     due_sql
@@ -837,20 +831,17 @@ async fn remove_organization<'c>(
     let mut sql = scope.sql("UPDATE organizations SET default_workspace_id = NULL WHERE id = ");
     sql.bind(scope.org()?);
     scope.execute(sql).await?;
+    // Under the organization's row, which is held: each of them is a pass of its own
+    // after this.
+    let org_id = scope.org_id().unwrap_or_default();
     let mut sql = scope.sql("SELECT id FROM workspaces WHERE org_id = ");
-    sql.bind(scope.org()?).push(" ORDER BY id");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
-    let workspaces: Vec<String> = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<_, _>>()?;
+    sql.bind(scope.org()?)
+        .push(" ORDER BY id")
+        .push_lock(scope.row_lock(LockRank::Organization, &org_id, RowLock::Update));
+    let workspaces: Vec<String> = scope.all(sql).await?;
     let mut removed = Purged::default();
     for workspace_id in &workspaces {
-        scope.record_lock(LockRank::Workspace, workspace_id);
+        scope.record_lock(LockRank::Workspace, workspace_id, RowLock::Update);
         let of_workspace = org_admin::remove_workspace(scope, held_org, workspace_id).await?;
         removed.records += of_workspace.records;
         removed.files.extend(of_workspace.files);
@@ -861,12 +852,7 @@ async fn remove_organization<'c>(
     crate::api_tokens::revoke_of_organization_providers(scope).await?;
     let mut sql = scope.sql("SELECT id FROM sessions WHERE login_org_id = ");
     sql.bind(scope.org()?);
-    let sessions: Vec<String> = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<_, _>>()?;
+    let sessions: Vec<String> = scope.all(sql).await?;
     let mut sql = scope.sql("DELETE FROM sessions WHERE login_org_id = ");
     sql.bind(scope.org()?);
     scope.execute(sql).await?;
@@ -892,7 +878,7 @@ async fn has_a_place(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, Store
     ] {
         let mut sql = scope.sql(select);
         sql.bind(Id(user_id)).push(" LIMIT 1");
-        if scope.fetch_optional(sql).await?.is_some() {
+        if scope.exists(sql).await? {
             return Ok(true);
         }
     }
@@ -937,12 +923,7 @@ async fn hold_organizations_of_links_to(
             .push(")");
     }
     sql.push(" ORDER BY org_id");
-    let organizations: Vec<String> = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<_, _>>()?;
+    let organizations: Vec<String> = scope.all(sql).await?;
     for org_id in &organizations {
         link_locks::hold_organization(scope, org_id).await?;
     }

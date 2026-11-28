@@ -24,7 +24,7 @@ pub(crate) use self::cleanup::{
 };
 use crate::Store;
 use crate::containers::inherited_members_source;
-use crate::db::{Id, Param, Row, Scope};
+use crate::db::{FromRow, Id, Param, Row, Scope};
 use crate::error::StoreError;
 use crate::notification_outbox::keep_newest;
 use crate::unit_progress::require_live_unit;
@@ -100,12 +100,7 @@ impl Store {
                 sql.push_bind(" AND ur.unit_id = ", Id(unit_id));
             }
             sql.push(" ORDER BY ur.scheduled_date ASC, ur.created_at ASC, ur.id ASC");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(review_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -237,7 +232,7 @@ impl Store {
                      CAST(interval_days AS BIGINT), created_at, updated_at",
                 );
             let (review, transitioned) = match scope.fetch_optional(update).await? {
-                Some(row) => (review_from_row(&row)?, true),
+                Some(row) => (UnitReview::from_row(&row)?, true),
                 None => (
                     fetch_review_row(scope, course_id, review_id, user_id, org.clone()).await?,
                     false,
@@ -529,8 +524,7 @@ async fn insert_review(
             ") RETURNING id, unit_id, container_id, scheduled_date, completed_at, \
              CAST(interval_days AS BIGINT), created_at, updated_at",
         );
-    let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-    review_from_row(&row)
+    scope.first(sql).await?.ok_or(StoreError::NoRows)
 }
 
 async fn find_live_review_unit(
@@ -560,11 +554,7 @@ async fn find_live_review_unit(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("ur", "b"), ("b", "c"), ("c", "w")]));
-    let row = scope
-        .fetch_optional(sql)
-        .await?
-        .ok_or_else(|| StoreError::not_found("unit review"))?;
-    row.id(0)
+    scope.one(sql, "unit review").await
 }
 
 async fn fetch_review_row(
@@ -584,24 +574,22 @@ async fn fetch_review_row(
         .push_bind(" AND container_id = ", Id(course_id))
         .push_bind(" AND user_id = ", Id(user_id))
         .push_bind(" AND org_id = ", org);
-    let row = scope
-        .fetch_optional(sql)
-        .await?
-        .ok_or_else(|| StoreError::not_found("unit review"))?;
-    review_from_row(&row)
+    scope.one(sql, "unit review").await
 }
 
-fn review_from_row(row: &Row) -> Result<UnitReview, StoreError> {
-    Ok(UnitReview {
-        id: row.id(0)?,
-        unit_id: row.id(1)?,
-        container_id: row.id(2)?,
-        scheduled_date: row.text(3)?,
-        completed_at: row.opt_int(4)?,
-        interval_days: positive_u32(row.int(5)?),
-        created_at: row.int(6)?,
-        updated_at: row.int(7)?,
-    })
+impl FromRow for UnitReview {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(UnitReview {
+            id: row.id(0)?,
+            unit_id: row.id(1)?,
+            container_id: row.id(2)?,
+            scheduled_date: row.text(3)?,
+            completed_at: row.opt_int(4)?,
+            interval_days: positive_u32(row.int(5)?),
+            created_at: row.int(6)?,
+            updated_at: row.int(7)?,
+        })
+    }
 }
 
 fn today_review_from_row(row: &Row, today: &str) -> Result<TodayReviewItem, StoreError> {

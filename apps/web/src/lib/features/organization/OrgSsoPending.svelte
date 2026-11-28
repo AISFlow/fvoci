@@ -76,22 +76,28 @@
         size="sm"
         disabled={busy}
         data-testid="sso-pending-sign-in-again"
-        onclick={onSignInAgain}>{m.org_sso_pending_sign_in_again()}</Button
+        onclick={onSignInAgain}
       >
+        {m.org_sso_pending_sign_in_again()}
+      </Button>
     {/if}
     <Button
       size="sm"
       variant={signInFirst && throughProvider ? 'outline' : 'default'}
       disabled={busy}
       data-testid="sso-pending-try"
-      onclick={onTry}>{m.org_sso_pending_try()}</Button
+      onclick={onTry}
     >
+      {m.org_sso_pending_try()}
+    </Button>
     <Button
       size="sm"
       variant="outline"
       disabled={busy}
       data-testid="sso-pending-discard"
-      onclick={onDiscard}>{m.org_sso_pending_discard()}</Button
+      onclick={onDiscard}
     >
+      {m.org_sso_pending_discard()}
+    </Button>
   </div>
 </section>

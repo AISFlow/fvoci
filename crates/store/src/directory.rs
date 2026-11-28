@@ -264,11 +264,8 @@ fn push_writer(sql: &mut Sql, scope: &Scope<'_>, seer_id: &str, within: Option<(
     )
     .push(&scope.same_organization(&[("d", "b"), ("cv", "d")]))
     .push(" AND ")
-    .push(match scope.dialect() {
-        Dialect::Sqlite => "json_extract(d.block, '$.type') = 'comment'",
-        Dialect::Postgres => "d.block->>'type' = 'comment'",
-    })
-    .push("))");
+    .push(&scope.json_text("d.block", "type"))
+    .push(" = 'comment'))");
     let open_where_seer_works = match within {
         Some((workspace_id, reach)) => {
             sql.push_bind(" AND b.workspace_id = ", Id(workspace_id));
@@ -399,11 +396,7 @@ impl Store {
                     .push(" AND o.deleted_at IS NULL");
                 of_people(&mut sql, "o.kind");
                 sql.push(" ORDER BY o.created_at, o.id LIMIT 1");
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await
     }
@@ -536,11 +529,7 @@ impl Store {
                     )
                     .bind(Id(user_id))
                     .push("))");
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await
     }
@@ -743,7 +732,7 @@ impl Store {
         block_id: &str,
         read_token: &str,
     ) -> Result<Option<String>, StoreError> {
-        let container_id = self
+        let container_id: Option<String> = self
             .system()
             .with_conn(async |scope| {
                 let mut sql = scope.sql(
@@ -753,11 +742,7 @@ impl Store {
                 sql.bind(Id(block_id))
                     .push_bind(" AND b.workspace_id = ", Id(workspace_id))
                     .push(&scope.same_organization(&[("bl", "b")]));
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await?;
         let Some(container_id) = container_id else {
@@ -864,10 +849,7 @@ impl Store {
                 invitations::push_maker_in_use(&mut sql);
                 sql.push(IN_USE)
                     .push(&scope.same_organization(&[("i", "t")]));
-                match scope.fetch_optional(sql).await? {
-                    Some(row) => row.id(0).map(Some),
-                    None => Ok(None),
-                }
+                scope.first(sql).await
             })
             .await
     }
@@ -890,12 +872,7 @@ impl Store {
                      AND deleted_at IS NOT NULL AND deleted_at < ",
                 );
                 sql.bind(deleted_before).push(" ORDER BY org_id, id");
-                scope
-                    .fetch_all(sql)
-                    .await?
-                    .iter()
-                    .map(|row| Ok((row.id(0)?, row.id(1)?)))
-                    .collect()
+                scope.all(sql).await
             })
             .await
     }

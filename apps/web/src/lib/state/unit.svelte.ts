@@ -18,6 +18,7 @@ import { CollaborativeBodyState } from './collab-body.svelte.ts';
 import { CommentThreadStore } from './comment-thread.svelte.ts';
 import type { CourseStore } from './course.svelte.ts';
 import type { OpenHierarchyNode } from './hierarchy-writes.ts';
+import type { WithReactions } from './reaction-types.ts';
 import { mentionedIn } from './user-names.ts';
 import type { LoadStatus } from './workspace.svelte.ts';
 
@@ -62,6 +63,7 @@ export class UnitStore implements OpenHierarchyNode {
     this.comments = new CommentThreadStore({
       workspace: course.workspace,
       parentId: unitId,
+      containerId: course.courseId,
       role: () => this.course.role,
       joinable: () => this.course.joinable,
       isSpeculative: () => this.#speculative,
@@ -115,7 +117,7 @@ export class UnitStore implements OpenHierarchyNode {
     return this.course.courseId;
   }
 
-  #read(): Promise<CourseUnitDetail> {
+  #read(): Promise<WithReactions<CourseUnitDetail>> {
     const courses = this.course.workspace.backend.course;
     if (!courses) return Promise.reject(new Error('this backend has no courses'));
     return courses.unit(this.#courseId, this.unitId);
@@ -198,14 +200,17 @@ export class UnitStore implements OpenHierarchyNode {
     const first = kind === 'first';
     this.#readings += 1;
     const reading = this.#readings;
+    const mark = this.comments.reactionsMark();
     try {
-      const detail = await this.#read();
+      const { reactions, ...detail } = await this.#read();
       if (this.#closed || reading !== this.#readings) return;
       if (detail.kind === 'chapter') {
         if (this.#speculative) this.course.clearSpeculativeUnit(this.unitId);
         else this.gone();
         return;
       }
+      // A reaction changes nothing of the unit: they are taken whatever its `updatedAt`.
+      this.comments.takeReactions(reactions, mark);
       if (!first && detail.updatedAt <= this.#readAt) return;
       this.#readAt = detail.updatedAt;
       if (!sameDocNode(detail.body, this.body)) this.body = detail.body;

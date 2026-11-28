@@ -172,6 +172,9 @@ pub enum Answer {
         /// The files the images and file blocks of its body name now, by their stored
         /// names.
         files: Vec<String>,
+        /// How many board views its body has now: a room whose body shows none (a
+        /// diary's entry) logs no update that leaves one.
+        board_views: u64,
         /// Whether reading the document's state would take more steps than it may
         /// ([`fvoci_collab::READING_STEPS`]), so it was not read back from its state
         /// and must be made again from its body before its state is stored or another
@@ -469,6 +472,7 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
             client_changes,
             steps_ahead,
             files,
+            board_views,
             remake,
             fold,
         }) => {
@@ -480,6 +484,7 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
                 .number(*client_changes)
                 .number(*steps_ahead)
                 .names(files)
+                .number(*board_views)
                 .tag(u8::from(*remake))
                 .tag(u8::from(*fold));
         }
@@ -532,6 +537,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<Response, Malformed> {
             client_changes: input.number()?,
             steps_ahead: input.number()?,
             files: input.names()?,
+            board_views: input.number()?,
             remake: input.flag()?,
             fold: input.flag()?,
         }),
@@ -756,6 +762,7 @@ mod tests {
                     client_changes: 3,
                     steps_ahead: 1,
                     files: vec!["a.png".to_owned()],
+                    board_views: 0,
                     remake: false,
                     fold: false,
                 }),
@@ -784,6 +791,7 @@ mod tests {
                 client_changes: 600_000,
                 steps_ahead: 800_000,
                 files: Vec::new(),
+                board_views: 0,
                 remake: false,
                 fold: true,
             }),
@@ -795,6 +803,7 @@ mod tests {
                 client_changes: 1,
                 steps_ahead: 0,
                 files: vec!["7a.png".to_owned(), "7b.png".to_owned()],
+                board_views: 10,
                 remake: true,
                 fold: false,
             }),
@@ -845,6 +854,7 @@ mod tests {
             client_changes: 1,
             steps_ahead: 0,
             files: Vec::new(),
+            board_views: 0,
             remake: false,
             fold: false,
         }));

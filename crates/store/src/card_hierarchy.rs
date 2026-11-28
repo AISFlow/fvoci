@@ -230,7 +230,7 @@ async fn check_card_restore_top(
 async fn has_child_cards(scope: &mut Scope<'_>, block_id: &str) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT 1 FROM blocks WHERE parent_id = ");
     sql.bind(Id(block_id)).push(" AND type = 'card' LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// The 1-based depth of a live card on its board, bounded and cycle-safe.

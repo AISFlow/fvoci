@@ -1,6 +1,6 @@
 {
-  "description": "Shared test vectors for the body of a card or a comment: documents and what the server and the web app's validator must do with them. expect is accept (stored as sent), empty (stored as no body) or reject; a rejection names its kind in reason: notDocument, tooLarge, tooDeep, tooManyNodes, tableTooLarge, invalidNode. An accepted case may give text, the plain text the server stores for searching : a line per paragraph, heading, code block and formula block, the lines of blocks without words left out; a hard break is a line break kept inside its block's line, a formula inside a line gives its source there, a table gives the lines of its cells row after row, and a mention and a reference give nothing. Whole numbers count however they are written (1, 1.0, 1e0). Lengths are UTF-16 code units. The limits of depth (60), nodes (100,000) and size (8 MiB) are tested with documents each side builds from a case's build, which stands for body: {depth: n} is a document nesting n deep (doc, then n-2 blockquotes, then an empty paragraph); {nodes: n} is a document of n nodes (doc, then one paragraph of n-2 hardBreaks); {bytes: n} is a document of one paragraph of one text of the letter a, as long as makes its JSON without whitespace n bytes of UTF-8; {rows: n, columns: m} is a document of one table of n rows of m cells, each cell an empty paragraph. A table has at most 200 rows and 20 columns (its cells' spans across a row): past them is tableTooLarge. The server's test is crates/model/tests/body_vectors.rs. Either side that finds the two disagree adds a case. The allowlist is crates/model/src/allowlist.rs on the server and apps/web/src/lib/editor/schema.ts in the web app; bodyVersion is the version of it the cases are written for.",
-  "bodyVersion": 5,
+  "description": "Shared test vectors for the body of a card or a comment: documents and what the server and the web app's validator must do with them. expect is accept (stored as sent), empty (stored as no body) or reject; a rejection names its kind in reason: notDocument, tooLarge, tooDeep, tooManyNodes, tooManyBoardViews, tableTooLarge, invalidNode. An accepted case may give text, the plain text the server stores for searching : a line per paragraph, heading, code block and formula block, the lines of blocks without words left out; a hard break is a line break kept inside its block's line, a formula inside a line gives its source there, a table gives the lines of its cells row after row, a toggle (details) gives its summary as a line and then the lines of what it hides, and a mention, a reference and a board view give nothing. Whole numbers count however they are written (1, 1.0, 1e0). Lengths are UTF-16 code units. The limits of depth (60), nodes (100,000) and size (8 MiB) are tested with documents each side builds from a case's build, which stands for body: {depth: n} is a document nesting n deep (doc, then n-2 blockquotes, then an empty paragraph); {nodes: n} is a document of n nodes (doc, then one paragraph of n-2 hardBreaks); {bytes: n} is a document of one paragraph of one text of the letter a, as long as makes its JSON without whitespace n bytes of UTF-8; {rows: n, columns: m} is a document of one table of n rows of m cells, each cell an empty paragraph. A table has at most 200 rows and 20 columns (its cells' spans across a row): past them is tableTooLarge. The server's test is crates/model/tests/body_vectors.rs. Either side that finds the two disagree adds a case. The allowlist is crates/model/src/allowlist.rs on the server and apps/web/src/lib/editor/schema.ts in the web app; bodyVersion is the version of it the cases are written for.",
+  "bodyVersion": 7,
   "cases": [
     {
       "name": "null",
@@ -6877,6 +6877,2571 @@
                         "type": "paragraph"
                       }
                     ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle: its summary, then what it hides",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Question"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Answer"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "Question\nAnswer"
+    },
+    {
+      "name": "a toggle with an empty summary and an empty paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": ""
+    },
+    {
+      "name": "a toggle's summary of marks, a line break, a formula, a reference and a link",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "bold",
+                    "marks": [
+                      {
+                        "type": "bold"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "text",
+                    "text": " plain "
+                  },
+                  {
+                    "type": "hardBreak"
+                  },
+                  {
+                    "type": "inlineMath",
+                    "attrs": {
+                      "latex": "x^2"
+                    }
+                  },
+                  {
+                    "type": "reference",
+                    "attrs": {
+                      "id": "01930000-0000-7000-8000-00000000b002"
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "link",
+                    "marks": [
+                      {
+                        "type": "link",
+                        "attrs": {
+                          "href": "https://example.com/"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "hidden"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "bold plain \nx^2link\nhidden"
+    },
+    {
+      "name": "a toggle holding a table, a callout and a toggle",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "outer"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "table",
+                    "content": [
+                      {
+                        "type": "tableRow",
+                        "content": [
+                          {
+                            "type": "tableCell",
+                            "content": [
+                              {
+                                "type": "paragraph",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "cell"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "callout",
+                    "attrs": {
+                      "tone": "tip"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "tip"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "inner"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "deep"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "outer\ncell\ntip\ninner\ndeep"
+    },
+    {
+      "name": "a toggle among other blocks gives its lines between theirs",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "before"
+              }
+            ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "shown"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "one"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "two"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "before\nshown\none\ntwo\nafter"
+    },
+    {
+      "name": "a toggle hides every kind of block",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "all"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "heading",
+                    "attrs": {
+                      "level": 2
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "h"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "bulletList",
+                    "content": [
+                      {
+                        "type": "listItem",
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "b"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "taskList",
+                    "content": [
+                      {
+                        "type": "taskItem",
+                        "attrs": {
+                          "checked": true
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "t"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "blockquote",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "q"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "codeBlock",
+                    "attrs": {
+                      "language": "rust"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "let x;"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "horizontalRule"
+                  },
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "y"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "all\nh\nb\nt\nq\nlet x;\ny"
+    },
+    {
+      "name": "a callout of each tone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "i"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "tip"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "t"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "warn"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "w"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "danger"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "d"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "i\nt\nw\nd"
+    },
+    {
+      "name": "a callout holding a heading, a list, a quote and code",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "warn"
+            },
+            "content": [
+              {
+                "type": "heading",
+                "attrs": {
+                  "level": 3
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Careful"
+                  }
+                ]
+              },
+              {
+                "type": "orderedList",
+                "attrs": {
+                  "start": 2
+                },
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "two"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "blockquote",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "said"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "codeBlock",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "rm"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "Careful\ntwo\nsaid\nrm"
+    },
+    {
+      "name": "a callout of an empty paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": ""
+    },
+    {
+      "name": "a callout in a toggle",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "s"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "callout",
+                    "attrs": {
+                      "tone": "danger"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "d"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "s\nd"
+    },
+    {
+      "name": "a toggle's summary with an empty content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": []
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "a toggle without content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle without parts",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of a summary alone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "s"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of a content alone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of its content before its summary",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              },
+              {
+                "type": "detailsSummary"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of two summaries and a content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of a summary and two contents",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle of a summary and a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle that says it is open",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "attrs": {
+              "open": true
+            },
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle with an identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "attrs": {
+              "id": "x"
+            },
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content without blocks",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": []
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content without a content member",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content holding text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "x"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content holding a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "listItem",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's summary holding a paragraph",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's summary with an attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "attrs": {
+                  "open": true
+                }
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content with an attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary"
+              },
+              {
+                "type": "detailsContent",
+                "attrs": {
+                  "open": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's summary in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "detailsSummary",
+            "content": [
+              {
+                "type": "text",
+                "text": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle's content in the document",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "detailsContent",
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a quote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "details",
+                "content": [
+                  {
+                    "type": "detailsSummary",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "s"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "detailsContent",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "s"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a task",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "s"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "details",
+                        "content": [
+                          {
+                            "type": "detailsSummary",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "s"
+                              }
+                            ]
+                          },
+                          {
+                            "type": "detailsContent",
+                            "content": [
+                              {
+                                "type": "paragraph"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a callout",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "details",
+                "content": [
+                  {
+                    "type": "detailsSummary",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "s"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "detailsContent",
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a toggle in a summary",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "s"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout without a tone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout of a tone not on the list",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "purple"
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout of a tone in capitals",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "INFO"
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout of an empty tone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": ""
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout of a tone that is no string",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": 1
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout of a tone that is null",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": null
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout with another attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info",
+              "icon": "x"
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout without blocks",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": []
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout without content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout holding text",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "x"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout holding a table",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "table",
+                "content": [
+                  {
+                    "type": "tableRow",
+                    "content": [
+                      {
+                        "type": "tableCell",
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout holding a callout",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "callout",
+                "attrs": {
+                  "tone": "tip"
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout in a quote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "callout",
+                "attrs": {
+                  "tone": "info"
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout in a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "callout",
+                    "attrs": {
+                      "tone": "info"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "callout",
+                        "attrs": {
+                          "tone": "info"
+                        },
+                        "content": [
+                          {
+                            "type": "paragraph"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a callout in a summary",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "callout",
+                    "attrs": {
+                      "tone": "info"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "before"
+              }
+            ]
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "before\nafter"
+    },
+    {
+      "name": "a board view alone",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": ""
+    },
+    {
+      "name": "a board view in a toggle, and in a toggle in that",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Plan"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c001"
+                    }
+                  },
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "More"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "boardView",
+                            "attrs": {
+                              "viewId": "01930000-0000-7000-8000-00000000c001"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "accept",
+      "text": "Plan\nMore"
+    },
+    {
+      "name": "two board views of one view",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "ten board views",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c002"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c003"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c004"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c005"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c006"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c007"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c008"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c009"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c00a"
+            }
+          }
+        ]
+      },
+      "expect": "accept"
+    },
+    {
+      "name": "eleven board views",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c002"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c003"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c004"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c005"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c006"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c007"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c008"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c009"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c00a"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c00b"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "tooManyBoardViews"
+    },
+    {
+      "name": "eleven board views, some in toggles",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c002"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c003"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c004"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c005"
+            }
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Rest"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c006"
+                    }
+                  },
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c007"
+                    }
+                  },
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c008"
+                    }
+                  },
+                  {
+                    "type": "details",
+                    "content": [
+                      {
+                        "type": "detailsSummary",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Last"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "detailsContent",
+                        "content": [
+                          {
+                            "type": "boardView",
+                            "attrs": {
+                              "viewId": "01930000-0000-7000-8000-00000000c009"
+                            }
+                          },
+                          {
+                            "type": "boardView",
+                            "attrs": {
+                              "viewId": "01930000-0000-7000-8000-00000000c00a"
+                            }
+                          },
+                          {
+                            "type": "boardView",
+                            "attrs": {
+                              "viewId": "01930000-0000-7000-8000-00000000c00b"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "tooManyBoardViews"
+    },
+    {
+      "name": "eleven board views and a node out of place",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c002"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c003"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c004"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c005"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c006"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c007"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c008"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c009"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c00a"
+            }
+          },
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c00b"
+            }
+          },
+          {
+            "type": "listItem",
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view without its view",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView"
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view of an empty view",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": ""
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view of a view that is no identifier",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "table-1"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view of a view in capitals",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000C001"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view with another attribute",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001",
+              "boardId": "01930000-0000-7000-8000-00000000c0ff"
+            }
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view with content",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "boardView",
+            "attrs": {
+              "viewId": "01930000-0000-7000-8000-00000000c001"
+            },
+            "content": [
+              {
+                "type": "paragraph"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a callout",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "tone": "info"
+            },
+            "content": [
+              {
+                "type": "boardView",
+                "attrs": {
+                  "viewId": "01930000-0000-7000-8000-00000000c001"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a quote",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "content": [
+              {
+                "type": "boardView",
+                "attrs": {
+                  "viewId": "01930000-0000-7000-8000-00000000c001"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a list item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bulletList",
+            "content": [
+              {
+                "type": "listItem",
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c001"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a task item",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "taskList",
+            "content": [
+              {
+                "type": "taskItem",
+                "attrs": {
+                  "checked": false
+                },
+                "content": [
+                  {
+                    "type": "paragraph"
+                  },
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c001"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a cell",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "tableRow",
+                "content": [
+                  {
+                    "type": "tableCell",
+                    "content": [
+                      {
+                        "type": "boardView",
+                        "attrs": {
+                          "viewId": "01930000-0000-7000-8000-00000000c001"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a line",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "boardView",
+                "attrs": {
+                  "viewId": "01930000-0000-7000-8000-00000000c001"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "expect": "reject",
+      "reason": "invalidNode"
+    },
+    {
+      "name": "a board view in a toggle's summary",
+      "body": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "boardView",
+                    "attrs": {
+                      "viewId": "01930000-0000-7000-8000-00000000c001"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph"
                   }
                 ]
               }

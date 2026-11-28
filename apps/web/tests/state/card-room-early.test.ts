@@ -105,7 +105,7 @@ describe('the room asked for as a card is opened', () => {
       'in the trash',
       async (made: Made) => {
         const cardId = realCard(made, 'Alpha');
-        await made.other.deleteBlock(made.board.boardId, cardId);
+        await made.other.batchDeleteCards(made.board.boardId, [cardId]);
         await settle();
         return cardId;
       },
@@ -211,7 +211,7 @@ describe('the room asked for as a card is opened', () => {
     const card = made.board.openCard;
     if (!card) throw new Error('no card open');
     await deleted.passed;
-    await made.other.deleteBlock(made.board.boardId, cardId);
+    await made.other.batchDeleteCards(made.board.boardId, [cardId]);
     await vi.waitFor(() => {
       expect(card.room?.reason).toBe('not_found');
     });

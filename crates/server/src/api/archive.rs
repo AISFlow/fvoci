@@ -4,7 +4,7 @@ use axum::Extension;
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::response::{IntoResponse, Response};
-use fvoci_model::{ContainerKinds, Session, UploadPurpose};
+use fvoci_model::{Container, ContainerKinds, Session, UploadPurpose};
 use serde::Deserialize;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -16,7 +16,7 @@ use super::contract::params::{ContainerId, MemberWorkspaceId, WorkspaceId};
 use super::contract::tag;
 use super::workspace::{InContainer, InWorkspace};
 use super::{ApiResult, RequiredSession, json_response};
-use crate::app::{App, ExportedArchive, ImportFormat, ImportSummary, Slot, download};
+use crate::app::{App, ExportedArchive, ImportFormat, ImportSummary, Slot, download, utc_day};
 use crate::connection::{Breaker, Connection};
 use crate::error::AppError;
 use crate::permissions::ContainerPermission;
@@ -38,6 +38,7 @@ struct ImportRequest {
 pub(super) fn routes() -> OpenApiRouter<App> {
     OpenApiRouter::new()
         .routes(routes!(handle_export_container))
+        .routes(routes!(handle_export_container_markdown))
         .routes(routes!(handle_export_workspace))
         .routes(routes!(handle_import))
 }
@@ -103,10 +104,92 @@ async fn handle_export_container(
     connection: Option<Extension<ConnectInfo<Connection>>>,
     Path((_, container_id)): Path<(String, String)>,
 ) -> ApiResult {
-    let user_id = &ws.caller.user_id;
+    let container = exported_container(&ws, &container_id).await?;
+    let slot = ws.app.start_export(&ws.caller.user_id)?;
+    let archive = ws
+        .app
+        .export_archive(&container.workspace_id, std::slice::from_ref(&container.id))
+        .await?;
+    Ok(archive_response(
+        &ws.app,
+        archive,
+        slot,
+        breaker_of(connection),
+        Download::FVOCI,
+    ))
+}
+
+/// Export a board, a wiki, a course or a diary as Markdown
+///
+/// A ZIP of Markdown files of the container, for another tool to read, offered as a
+/// download with its length, for those `exportContainerArchive` gives the archive to
+/// (a diary to its owner alone, as every route of one), and under its limits (one
+/// export at a time, `max_concurrent_exports`, `export_stall_seconds`). A session
+/// alone: a personal API token is refused.
+///
+/// The ZIP holds a folder of the container's name, and in it a `.md` file for each
+/// page of a wiki (in folders as its tree has them: a page with pages below it has a
+/// folder of its name beside its file), each card of a board but its templates
+/// (`cards/<number>-<title>.md`, and all of them in `board.csv`), each unit of a course
+/// (a chapter is a folder of its units), and each entry of a diary
+/// (`entries/<YYYY-MM-DD>.md`); and the files their bodies show and the attachments of
+/// the cards in `files/`, named as they were uploaded. A name is one any system takes,
+/// and one of its own in its folder (` (2)` after a second). A file starts with its
+/// front matter in YAML (`title`, `created`, `updated` in UTC, and a card's `number`
+/// and `attachments`, a page's `icon`, a unit's `amount`, `amountUnit` and
+/// `scheduledDate`, an entry's `date`, `mood`, `weather` and `place`), then its title
+/// as a heading and its body in Markdown as `getCard` writes one with `format=markdown`,
+/// but that a file, a page, a card or a unit the ZIP holds is linked where it is (a
+/// relative link), a person is named in plain text (`@name`), and what else a reference
+/// names is its title where the user reads it, `[[id]]` where not. Comments, the trash
+/// and the versions of bodies are not in it.
+#[utoipa::path(
+    get,
+    path = "/w/{workspaceId}/containers/{containerId}/markdown/export",
+    operation_id = "exportContainerMarkdown",
+    tag = tag::ARCHIVES,
+    params(MemberWorkspaceId, ContainerId),
+    responses((
+        status = 200,
+        description = "The ZIP of Markdown files.",
+        body = inline(Binary),
+        content_type = "application/zip",
+        headers(
+            ("Content-Length" = u64, description = "The size of the ZIP in bytes."),
+            ("Content-Disposition" = String, description = "`attachment; filename=markdown-YYYY-MM-DD.zip`, for the day (UTC)."),
+        ),
+    )),
+)]
+async fn handle_export_container_markdown(
+    InContainer(ws): InContainer,
+    connection: Option<Extension<ConnectInfo<Connection>>>,
+    Path((_, container_id)): Path<(String, String)>,
+) -> ApiResult {
+    let container = exported_container(&ws, &container_id).await?;
+    let slot = ws.app.start_export(&ws.caller.user_id)?;
+    let archive = ws
+        .app
+        .export_markdown(ws.markdown_reader(), &container)
+        .await?;
+    Ok(archive_response(
+        &ws.app,
+        archive,
+        slot,
+        breaker_of(connection),
+        Download::MARKDOWN,
+    ))
+}
+
+/// The container `container_id` for one who may export it: who reads it and is on it
+/// (any reader of a template), and works in its workspace.
+///
+/// # Errors
+///
+/// Returns 404 for what the user does not reach, and 403 for what they may not export.
+async fn exported_container(ws: &InWorkspace, container_id: &str) -> Result<Container, AppError> {
     let access = ws
         .app
-        .container_access(user_id, &container_id)
+        .container_access(&ws.caller.user_id, container_id)
         .await?
         .ok_or_else(|| AppError::not_found("board"))?;
     super::require_granted(
@@ -117,18 +200,31 @@ async fn handle_export_container(
     if (!access.container.is_template && !access.has_membership()) || !access.actor.works_there() {
         return Err(AppError::forbidden("access denied to export board"));
     }
-    let container = access.container;
-    let slot = ws.app.start_export(user_id)?;
-    let archive = ws
-        .app
-        .export_archive(&container.workspace_id, std::slice::from_ref(&container.id))
-        .await?;
-    Ok(archive_response(
-        &ws.app,
-        archive,
-        slot,
-        breaker_of(connection),
-    ))
+    Ok(access.container)
+}
+
+/// What an export is offered as: the name of its file before the day, its extension,
+/// and its type.
+#[derive(Debug, Clone, Copy)]
+struct Download {
+    name: &'static str,
+    extension: &'static str,
+    content_type: &'static str,
+}
+
+impl Download {
+    /// The native archive, `archive-YYYY-MM-DD.fvoci`.
+    const FVOCI: Self = Self {
+        name: "archive",
+        extension: "fvoci",
+        content_type: "application/octet-stream",
+    };
+    /// The Markdown files, `markdown-YYYY-MM-DD.zip`.
+    const MARKDOWN: Self = Self {
+        name: "markdown",
+        extension: "zip",
+        content_type: "application/zip",
+    };
 }
 
 /// Export the boards and wikis of a workspace
@@ -173,7 +269,13 @@ async fn handle_export_workspace(
         .collect();
     let slot = app.start_export(user_id)?;
     let archive = app.export_archive(&ws.workspace_id, &ids).await?;
-    Ok(archive_response(app, archive, slot, breaker_of(connection)))
+    Ok(archive_response(
+        app,
+        archive,
+        slot,
+        breaker_of(connection),
+        Download::FVOCI,
+    ))
 }
 
 /// Import an archive
@@ -267,21 +369,22 @@ async fn handle_import(InContainer(ws): InContainer, body: Bytes) -> ApiResult {
     Ok(json_response(&summary))
 }
 
-/// Streams a prepared archive download with its `Content-Length` and attachment headers.
-/// The export's `slot` and its file are held until the last piece of the archive is read,
-/// the client goes away, or the download stalls (`app::download`).
+/// Streams a prepared archive download as `offered`, with its `Content-Length` and
+/// attachment headers. The export's `slot` and its file are held until the last piece of
+/// the archive is read, the client goes away, or the download stalls (`app::download`).
 fn archive_response(
     app: &App,
     archive: ExportedArchive,
     slot: Slot,
     breaker: Option<Breaker>,
+    offered: Download,
 ) -> Response {
     let stall = app.config().export_stall();
     let size = archive.size;
-    let filename = export_filename(crate::auth::now_millis());
+    let filename = export_filename(crate::auth::now_millis(), offered);
     (
         [
-            ("content-type", "application/octet-stream".to_owned()),
+            ("content-type", offered.content_type.to_owned()),
             (
                 "content-disposition",
                 format!("attachment; filename={filename}"),
@@ -308,25 +411,20 @@ fn breaker_of(connection: Option<Extension<ConnectInfo<Connection>>>) -> Option<
     connection.and_then(|Extension(ConnectInfo(connection))| connection.breaker)
 }
 
-/// The file name an export is offered under: `archive-YYYY-MM-DD.fvoci` for today
-/// (UTC).
-fn export_filename(now_millis: i64) -> String {
-    let days = now_millis.div_euclid(86_400_000);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("archive-{year:04}-{month:02}-{day:02}.fvoci")
+/// The file name an export is offered under: `archive-YYYY-MM-DD.fvoci` (or
+/// `markdown-YYYY-MM-DD.zip`) for today (UTC).
+fn export_filename(now_millis: i64, offered: Download) -> String {
+    format!(
+        "{}-{}.{}",
+        offered.name,
+        utc_day(now_millis),
+        offered.extension
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cutting, export_filename};
+    use super::{Download, cutting, export_filename};
     use crate::connection::Breaker;
 
     #[test]
@@ -344,9 +442,13 @@ mod tests {
     fn export_filename_formats_the_date() {
         // 2026-11-10T05:15:39Z.
         assert_eq!(
-            export_filename(1_794_287_739_000),
+            export_filename(1_794_287_739_000, Download::FVOCI),
             "archive-2026-11-10.fvoci",
             "the archive file name for a known date"
+        );
+        assert_eq!(
+            export_filename(1_794_287_739_000, Download::MARKDOWN),
+            "markdown-2026-11-10.zip"
         );
     }
 }

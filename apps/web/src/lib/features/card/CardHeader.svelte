@@ -24,13 +24,16 @@
 
   import { copyCardLink } from '$lib/components/card-number/card-link.ts';
   import CardNumber from '$lib/components/card-number/CardNumber.svelte';
+  import FavoriteToggle from '$lib/components/favorite-toggle/FavoriteToggle.svelte';
   import IconButton from '$lib/components/icon-button/IconButton.svelte';
   import ActionMenu from '$lib/components/menu/ActionMenu.svelte';
   import type { MenuAction } from '$lib/components/menu/actions.ts';
+  import { markdownActions } from '$lib/components/markdown/markdown-actions.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import type { CardFrame } from '$lib/layout/presentation.ts';
   import type { BoardView } from '$lib/logic/wire.ts';
-  import type { BoardStore, CardStore } from '$lib/state/index.ts';
+  import { workspaceFavorites, type BoardStore, type CardStore } from '$lib/state/index.ts';
+  import { markdownReader } from '$lib/state/markdown-types.ts';
 
   import WatchToggle from './WatchToggle.svelte';
 
@@ -69,8 +72,15 @@
   }: Props = $props();
 
   let menuOpen = $state(false);
-  /** Said once in place of the saving state: the link was copied. */
-  let copied = $state(false);
+  /** Said once in place of the saving state: what was copied. */
+  let copied = $state<'link' | 'markdown' | undefined>();
+
+  function say(what: 'link' | 'markdown'): void {
+    copied = what;
+    setTimeout(() => {
+      if (copied === what) copied = undefined;
+    }, 2000);
+  }
 
   const workspace = $derived(board.workspace);
   const cardTitle = $derived(card.summary?.title || m['KanbanCard.untitled']());
@@ -93,10 +103,7 @@
       // No clipboard here (a page that is not served securely): nothing was copied, so nothing is said.
       return;
     }
-    copied = true;
-    setTimeout(() => {
-      copied = false;
-    }, 2000);
+    say('link');
   }
 
   const actions = $derived.by<MenuAction[]>(() => {
@@ -136,6 +143,22 @@
         separated: list.length > 0 && !board.canEdit,
         run: () => void copyLink(),
       });
+      list.push(
+        ...markdownActions({
+          read: markdownReader(workspace.backend.markdown, {
+            kind: 'card',
+            boardId: board.boardId,
+            cardId: card.cardId,
+          }),
+          title: card.summary?.title ?? '',
+          onCopied: () => {
+            say('markdown');
+          },
+          onRefused: (error) => {
+            workspace.report('load', error);
+          },
+        }),
+      );
     }
     // The versions of the body are for the board's members: not for a reader by its public link.
     if (there && board.role !== '') {
@@ -194,6 +217,9 @@
   {#if there && board.role !== '' && !card.summary?.fields.isTemplate}
     <WatchToggle {workspace} blockId={card.cardId} kind="card" />
   {/if}
+  {#if there && !card.summary?.fields.isTemplate && !board.container?.isTemplate}
+    <FavoriteToggle stars={workspaceFavorites(workspace)} targetId={card.cardId} />
+  {/if}
   <span
     class="shrink-0 px-1 text-xs text-muted-foreground"
     role="status"
@@ -201,7 +227,11 @@
     data-testid="card-save-state"
     data-state={saveState}
   >
-    {copied ? m['CardActionsMenu.copiedLink']() : SAVE_TEXT[saveState]()}
+    {copied === 'link'
+      ? m['CardActionsMenu.copiedLink']()
+      : copied === 'markdown'
+        ? m.markdown_copied()
+        : SAVE_TEXT[saveState]()}
   </span>
   {#if actions.length > 0}
     <ActionMenu bind:open={menuOpen} title={m.card_menu()} subtitle={cardTitle} {actions}>

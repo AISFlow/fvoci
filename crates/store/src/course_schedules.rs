@@ -18,9 +18,9 @@ use serde_json::Value;
 
 use crate::Store;
 use crate::containers::{fetch_containers, lock_container_of_kind, select_containers_of_user};
-use crate::db::{Dialect, Id, LockRank, OptId, Param, Row, Scope};
+use crate::db::{Dialect, FromRow, Id, LockRank, OptId, Param, Row, RowLock, Scope};
 use crate::error::StoreError;
-use crate::unit_progress::{progress_from_row, require_live_unit};
+use crate::unit_progress::require_live_unit;
 use fvoci_model::PublicContainers;
 
 /// Maximum rows written per batched statement during schedule redistribution.
@@ -322,12 +322,7 @@ pub(crate) async fn fetch_course_schedule(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("cs", "c"), ("c", "w")]));
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(schedule_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Verifies `course_id` is a live course in a live workspace and organization while
@@ -352,7 +347,7 @@ async fn require_live_course_locked(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("c", "w")]));
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         return Err(StoreError::not_found("course"));
     }
     Ok(())
@@ -365,7 +360,6 @@ async fn lock_live_course_for_learner(
     course_id: &str,
     org: Param,
 ) -> Result<String, StoreError> {
-    scope.record_lock(LockRank::Container, course_id);
     let mut sql = scope.sql(
         "SELECT c.workspace_id \
          FROM containers AS c \
@@ -379,13 +373,8 @@ async fn lock_live_course_for_learner(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("c", "w")]));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR KEY SHARE OF c");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("course"));
-    };
-    row.id(0)
+    sql.push_lock(scope.row_lock(LockRank::Container, course_id, RowLock::KeyShare.of("c")));
+    scope.one(sql, "course").await
 }
 
 /// Locks `workspace_members` (`FOR SHARE`) and `users` (`FOR KEY SHARE`), ensuring
@@ -397,30 +386,25 @@ async fn lock_active_learner(
     user_id: &str,
     org: Param,
 ) -> Result<(), StoreError> {
-    scope.record_lock(
-        LockRank::WorkspaceMembers,
-        &format!("{workspace_id}:{user_id}"),
-    );
     let mut member = scope.sql("SELECT 1 FROM workspace_members WHERE workspace_id = ");
     member
         .bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        member.push(" FOR SHARE");
-    }
-    if scope.fetch_optional(member).await?.is_none() {
+    member.push_lock(scope.row_lock(
+        LockRank::WorkspaceMembers,
+        &format!("{workspace_id}:{user_id}"),
+        RowLock::Share,
+    ));
+    if !scope.exists(member).await? {
         return Err(StoreError::not_found("course"));
     }
 
-    scope.record_lock(LockRank::Users, user_id);
     let mut user = scope.sql("SELECT 1 FROM users WHERE id = ");
     user.bind(Id(user_id))
         .push(" AND deleted_at IS NULL")
         .push_bind(" AND erased_at = ", 0_i64);
-    if scope.dialect() == Dialect::Postgres {
-        user.push(" FOR KEY SHARE");
-    }
-    if scope.fetch_optional(user).await?.is_none() {
+    user.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::KeyShare));
+    if !scope.exists(user).await? {
         return Err(StoreError::not_found("course"));
     }
     crate::course_meetings::require_active_course_member(scope, course_id, user_id, org)
@@ -465,8 +449,7 @@ pub(crate) async fn upsert_schedule_row(
              updated_at = excluded.updated_at \
              RETURNING start_date, target_date, CAST(study_days AS BIGINT), updated_at",
     );
-    let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-    schedule_from_row(&row)
+    scope.first(sql).await?.ok_or(StoreError::NoRows)
 }
 
 /// Assigns shared `scheduledDate` values on live units of `course_id` in outline order
@@ -627,8 +610,7 @@ async fn upsert_planned_date_row(
         .push(updated_expr)
         .push(org_guard)
         .push(" RETURNING unit_id, completed_at, planned_date, last_position, updated_at");
-    let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-    progress_from_row(&row)
+    scope.first(sql).await?.ok_or(StoreError::NoRows)
 }
 
 /// Inserts or updates personal `planned_date` rows in batches during personal
@@ -706,8 +688,7 @@ async fn fetch_course_node_rows(
         .push(" AND type IN (")
         .bind_list([BlockType::Unit.as_str(), BlockType::Chapter.as_str()])
         .push(")");
-    let rows = scope.fetch_all(sql).await?;
-    rows.iter().map(node_row_from_row).collect()
+    scope.all(sql).await
 }
 
 /// Fetches live units and chapters of `course_id`, locking them in deterministic `id`
@@ -717,7 +698,6 @@ async fn fetch_course_nodes_locked(
     scope: &mut Scope<'_>,
     course_id: &str,
 ) -> Result<Vec<UnitNode>, StoreError> {
-    scope.record_lock(LockRank::Block, course_id);
     let mut sql = scope.sql(
         "SELECT id, parent_id, type, title, fields, created_at, updated_at FROM blocks \
          WHERE container_id = ",
@@ -726,12 +706,10 @@ async fn fetch_course_nodes_locked(
         .push(" AND type IN (")
         .bind_list([BlockType::Unit.as_str(), BlockType::Chapter.as_str()])
         .push(") ORDER BY id");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR KEY SHARE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Block, course_id, RowLock::KeyShare));
     let rows = scope.fetch_all(sql).await?;
     rows.iter()
-        .map(|row| Ok(node_row_from_row(row)?.node))
+        .map(|row| Ok(NodeRow::from_row(row)?.node))
         .collect()
 }
 
@@ -746,12 +724,7 @@ async fn fetch_completed_unit_ids(
         .push_bind(" AND user_id = ", Id(user_id))
         .push_bind(" AND org_id = ", org)
         .push(" AND completed_at IS NOT NULL");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect()
+    scope.all(sql).await
 }
 
 /// Fetches `(course_id, course_title)` for live courses in `workspace_id` where `user_id`
@@ -798,7 +771,7 @@ async fn fetch_nodes_for_courses(
     let mut by_course: HashMap<String, Vec<UnitNode>> = HashMap::new();
     for row in &rows {
         let course_id = row.id(7)?;
-        let node = node_row_from_row(row)?.node;
+        let node = NodeRow::from_row(row)?.node;
         by_course.entry(course_id).or_default().push(node);
     }
     Ok(by_course)
@@ -823,43 +796,47 @@ async fn fetch_my_progress_for_courses(
     let rows = scope.fetch_all(sql).await?;
     let mut map = BTreeMap::new();
     for row in &rows {
-        let progress = progress_from_row(row)?;
+        let progress = UnitProgress::from_row(row)?;
         map.insert(progress.unit_id.clone(), progress);
     }
     Ok(map)
 }
 
-fn node_row_from_row(row: &Row) -> Result<NodeRow, StoreError> {
-    let fields = row.json_map(4, "fields")?;
-    let node = UnitNode::from(Block {
-        id: row.id(0)?,
-        parent_id: row.id(1)?,
-        block_type: crate::blocks::block_type_column(row, 2, "type")?,
-        title: row.text(3)?,
-        fields: fields.clone(),
-        created_at: row.int(5)?,
-        updated_at: row.int(6)?,
-        ..Block::default()
-    });
-    Ok(NodeRow { node, fields })
+impl FromRow for NodeRow {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let fields = row.json_map(4, "fields")?;
+        let node = UnitNode::from(Block {
+            id: row.id(0)?,
+            parent_id: row.id(1)?,
+            block_type: crate::blocks::block_type_column(row, 2, "type")?,
+            title: row.text(3)?,
+            fields: fields.clone(),
+            created_at: row.int(5)?,
+            updated_at: row.int(6)?,
+            ..Block::default()
+        });
+        Ok(NodeRow { node, fields })
+    }
 }
 
-fn schedule_from_row(row: &Row) -> Result<CourseSchedule, StoreError> {
-    let raw_days = row.int(2)?;
-    let study_days = u8::try_from(raw_days)
-        .ok()
-        .and_then(StudyDays::try_new)
-        .ok_or_else(|| StoreError::Corrupt {
-            column: "study_days",
-            reason: format!("invalid study_days bitmask: {raw_days}"),
-        })?
-        .bits();
-    Ok(CourseSchedule {
-        start_date: row.text(0)?,
-        target_date: row.text(1)?,
-        study_days,
-        updated_at: row.int(3)?,
-    })
+impl FromRow for CourseSchedule {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let raw_days = row.int(2)?;
+        let study_days = u8::try_from(raw_days)
+            .ok()
+            .and_then(StudyDays::try_new)
+            .ok_or_else(|| StoreError::Corrupt {
+                column: "study_days",
+                reason: format!("invalid study_days bitmask: {raw_days}"),
+            })?
+            .bits();
+        Ok(CourseSchedule {
+            start_date: row.text(0)?,
+            target_date: row.text(1)?,
+            study_days,
+            updated_at: row.int(3)?,
+        })
+    }
 }
 
 /// Forgets shared schedules of courses that are gone for good: neither live in

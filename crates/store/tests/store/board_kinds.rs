@@ -590,8 +590,8 @@ async fn seed_course_learning_rows(
         )
         .await
         .expect("exam created");
-    populate_learner_activity(test, &c.id, &u.unit.id, &e.id, learner).await;
-    (c.id, u.unit.id)
+    populate_learner_activity(test, &c.id, &u.first.id, &e.id, learner).await;
+    (c.id, u.first.id)
 }
 
 async fn populate_learner_activity(

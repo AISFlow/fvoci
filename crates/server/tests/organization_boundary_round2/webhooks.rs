@@ -65,7 +65,7 @@ async fn a_global_webhook_receives_each_scoped_background_change_with_its_own_bo
             title: board.title.clone(),
             ..Block::default()
         };
-        app.insert_block(&mut block, &scene.user, ChangeNotification::Suppress)
+        app.insert_block_unchecked(&mut block, &scene.user, ChangeNotification::Suppress)
             .await
             .expect("an authorized scoped change");
     }

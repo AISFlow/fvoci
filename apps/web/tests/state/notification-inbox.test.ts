@@ -77,7 +77,14 @@ describe('the inbox', () => {
 });
 
 /** A notification of the stand-in below, unread. */
-const ONE: Notification = { id: 'n1', createdAt: 1, updatedAt: 2, readAt: 0, subject: null };
+const ONE: Notification = {
+  id: 'n1',
+  createdAt: 1,
+  updatedAt: 2,
+  readAt: 0,
+  archivedAt: 0,
+  subject: null,
+};
 
 /** Notifications whose answers the test gives, one by one, in the order asked. */
 function standIn() {
@@ -93,6 +100,10 @@ function standIn() {
     unread: () => new Promise((resolve) => counts.push(resolve)),
     read: () => (refuse ? Promise.reject(new Error('refused')) : write()),
     readAll: write,
+    markUnread: write,
+    archive: () => (refuse ? Promise.reject(new Error('refused')) : write()),
+    unarchive: write,
+    archiveRead: write,
   };
   const backend = { watchSelf: () => () => undefined, usersById: () => Promise.resolve([]) };
   const refused: unknown[] = [];
@@ -203,6 +214,25 @@ describe('the inbox, against what it is answered', () => {
     made.list([{ ...ONE, readAt: 5 }]);
     await reading;
     expect([made.inbox.unread, made.inbox.items[0]?.readAt]).toEqual([0, 5]);
+  });
+
+  it('puts back one put away where that is refused', async () => {
+    const made = standIn();
+    made.inbox.start();
+    made.count(1);
+    const opened = made.inbox.open();
+    made.list([ONE]);
+    await opened;
+    await settle();
+    made.refuseReads();
+    const archiving = made.inbox.archive(ONE);
+    expect([made.inbox.unread, made.inbox.items]).toEqual([0, []]);
+    await settle();
+    made.count(1);
+    made.list([ONE]);
+    await archiving;
+    expect([made.inbox.unread, made.inbox.items]).toEqual([1, [ONE]]);
+    expect(made.refused).toHaveLength(1);
   });
 
   it('shows a list opened again only once it is read again', async () => {

@@ -135,18 +135,26 @@ describe('what the read-only view is made of', () => {
     );
   });
 
-  it('draws with nothing but the list, the validator, the address of files and the width of the numbers of a code block', () => {
+  it('draws with nothing but the list, the validator, the address of files, the width of the numbers of a code block, the names of the kinds of callout and the place of a board view', () => {
     expect(graphOf('src/lib/editor/render.ts')).toEqual({
       files: [
+        // A callout's icon, and the name of its kind that the icon is read as.
+        'src/lib/editor/block-icons.ts',
+        // The place of a board view, drawn into by the app.
+        'src/lib/editor/board-view-read.ts',
+        'src/lib/editor/callout-tones.ts',
         'src/lib/editor/code-lines.ts',
         'src/lib/editor/drawing.ts',
         'src/lib/editor/files.ts',
+        // What draws a toggle and a callout.
+        'src/lib/editor/render-blocks.ts',
         'src/lib/editor/render-table.ts',
         'src/lib/editor/render.ts',
+        'src/lib/editor/schema-rules.ts',
         'src/lib/editor/schema.ts',
         'src/lib/editor/table-grid.ts',
       ],
-      packages: [],
+      packages: ['$lib/i18n/paraglide/messages.js'],
     });
   });
 
@@ -156,6 +164,10 @@ describe('what the read-only view is made of', () => {
         'src/lib/editor/BodyView.svelte',
         // An image opened larger (image-zoom.ts finds what is pressed), and its close button's icon.
         'src/lib/editor/ImageLightbox.svelte',
+        'src/lib/editor/block-icons.ts',
+        'src/lib/editor/board-view-read.ts',
+        'src/lib/editor/board-view.css',
+        'src/lib/editor/callout-tones.ts',
         // What draws a code block's bar, colours and line numbers, fetched when there is one.
         'src/lib/editor/code-block.css',
         'src/lib/editor/code-copy-texts.ts',
@@ -179,9 +191,11 @@ describe('what the read-only view is made of', () => {
         'src/lib/editor/katex.css',
         'src/lib/editor/math.ts',
         'src/lib/editor/reference-chip.ts',
+        'src/lib/editor/render-blocks.ts',
         'src/lib/editor/render-table.ts',
         'src/lib/editor/render.ts',
         'src/lib/editor/safe-svg.ts',
+        'src/lib/editor/schema-rules.ts',
         'src/lib/editor/schema.ts',
         'src/lib/editor/table-grid.ts',
         // What a finger's press on a file's name does in a body being written; nothing it imports.

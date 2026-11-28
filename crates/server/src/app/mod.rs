@@ -12,13 +12,17 @@ mod audience;
 mod auth;
 mod blocks;
 mod board_ops;
+mod board_parts;
 mod body_markdown;
 mod body_versions;
 mod caller;
 mod card_filters;
+mod card_writes;
 mod cards;
 mod category;
 mod category_containers;
+mod changes;
+mod comments;
 mod container_copies;
 mod container_members;
 mod containers;
@@ -32,6 +36,8 @@ mod doomed;
 mod download;
 mod email_change;
 mod export;
+mod export_markdown;
+mod favorites;
 mod file_leases;
 mod file_name;
 mod file_versions;
@@ -44,12 +50,14 @@ mod limits;
 mod list_page;
 mod loose_objects;
 mod mail;
+mod notification_triage;
 mod notifications;
 mod oidc;
 mod oidc_account;
 mod oidc_carry;
 mod oidc_link;
 mod oidc_pending;
+mod oidc_purpose;
 mod oidc_settings;
 mod onboarding;
 mod org_admin;
@@ -58,6 +66,8 @@ mod overview;
 mod pages;
 mod password_reset;
 mod presence;
+mod reached;
+mod reactions;
 mod readiness;
 mod reconcile;
 mod references;
@@ -66,7 +76,14 @@ mod server_lock;
 mod slots;
 mod snapshots;
 
-pub use board_ops::BoardScaffolding;
+pub use board_ops::BoardStart;
+pub use board_parts::{
+    ATTACH_DENIED, ATTACHMENTS_DENIED, CREATE_VIEW_DENIED, DUPLICATE_VIEW_DENIED, MOVE_VIEW_DENIED,
+    VIEWS_DENIED,
+};
+pub use card_writes::{CREATE_CARD_DENIED, NewCardRequest, PATCH_CARD_DENIED};
+pub(crate) use changes::Changes;
+pub use comments::is_comment_on;
 pub(crate) use download::download;
 pub use mail::UnsentMail;
 pub(crate) use notifications::start_upkeep as start_notification_upkeep;
@@ -92,6 +109,7 @@ mod templates;
 mod time_entries;
 mod today;
 mod trash;
+mod tree;
 mod unit_progress;
 mod unit_reviews;
 mod uploads;
@@ -111,8 +129,16 @@ pub use cards::CardPreviews;
 pub use category_containers::DEFAULT_CATEGORY_CONTAINERS;
 pub use course_events::MEETING_REMINDER_WINDOW_MILLIS;
 pub use course_schedules::CourseEnrollment;
-pub use diaries::EntryAnswer;
+pub use courses::{
+    CREATE_UNIT_DENIED, DELETE_UNIT_DENIED, MOVE_UNIT_DENIED, PATCH_UNIT_DENIED,
+    UNDELETE_UNIT_DENIED, UNIT_TRASH_DENIED,
+};
+pub use diaries::{
+    CREATE_ENTRY_DENIED, DELETE_ENTRY_DENIED, ENTRY_TRASH_DENIED, EntryAnswer, PATCH_ENTRY_DENIED,
+    UNDELETE_ENTRY_DENIED,
+};
 pub use export::ExportedArchive;
+pub(crate) use export::utc_day;
 pub(crate) use file_name::check_file_name;
 pub(crate) use files::FILE;
 pub use housekeeping::TrashPurged;
@@ -131,6 +157,12 @@ pub use oidc::{
 pub use oidc_carry::HELD_SIGN_IN_LIFETIME_MILLIS;
 pub use oidc_settings::secret_context;
 pub use overview::OverviewReader;
+pub use pages::{
+    CREATE_PAGE_DENIED, DELETE_PAGE_DENIED, DUPLICATE_PAGE_DENIED, MOVE_PAGE_DENIED,
+    PAGE_TRASH_DENIED, PATCH_PAGE_DENIED, UNDELETE_PAGE_DENIED,
+};
+pub use reached::{BlockAction, Reached};
+pub(crate) use reached::{refusal, require_granted};
 pub use readiness::{Readiness, ReadinessCheck};
 pub use reconcile::{Found, Reconciliation, UNRECORDED_MIN_AGE_MILLIS, Unrecorded};
 pub use references::MAX_REFERENCE_IDS;
@@ -138,6 +170,7 @@ pub use shared_reads::{MAX_SHARED_READ_FAILURES, SHARED_READ_WINDOW, SharedReads
 pub use signups::{ConfirmedSignup, Registrant, SignupMarker};
 pub use sso::{Asker, SessionKept, SessionMade};
 pub use time_entries::TimeEntryQuery;
+pub use unit_progress::{PROGRESS_DENIED, require_progress_recorder};
 pub(crate) use uploads::PART_IDLE_TIMEOUT;
 pub use uploads::{
     CLOSED_UPLOAD_GRACE_MILLIS, CleanedUp, FileToUpload, MAX_OPEN_UPLOADS, MAX_UPLOAD_NAME_CHARS,
@@ -179,6 +212,18 @@ pub struct App {
     inner: Arc<Inner>,
     store: Store,
     ws: Hub,
+    /// What of its organization this handle reaches, as the request it serves entered.
+    reach: Reach,
+    /// The immutable kind of this handle's organization, populated on entry or read at
+    /// most once per handle (`App::tell_webhooks`). Reset whenever [`App::scoped`]
+    /// changes the tenant.
+    org_kind: Arc<tokio::sync::OnceCell<OrgKind>>,
+}
+
+/// What of its organization a handle reaches, and as whom: narrowed as a request enters
+/// ([`App::in_workspace`], [`App::reaching`], [`App::capped_to`]), never widened.
+#[derive(Debug, Clone)]
+struct Reach {
     /// The workspace a request names in its path ([`App::in_workspace`]): what is of
     /// another workspace is not there for this handle. `None` reaches every workspace
     /// of the organization.
@@ -193,14 +238,57 @@ pub struct App {
     /// ([`App::capped_to`]): every kind for a person, and none of a diary for an agent
     /// by a token. It goes with the handle wherever it is scoped.
     allowed_kinds: ContainerKinds,
-    /// The immutable kind of this handle's organization, populated on entry or read at
-    /// most once per handle (`App::tell_webhooks`). Reset whenever [`App::scoped`]
-    /// changes the tenant.
-    org_kind: Arc<tokio::sync::OnceCell<OrgKind>>,
     /// The token an agent writes blocks through with this handle ([`App::writing_for`]);
     /// `None` for a person. Only the writes of blocks are told of as the agent's
     /// (`App::store_telling`): what the rooms of bodies write later is their editors'.
     agent: Option<Arc<crate::auth::api_token::Delegation>>,
+}
+
+impl Reach {
+    /// All of the organization, for nobody in particular: a handle no request entered.
+    fn everything() -> Self {
+        Self {
+            workspace: None,
+            known_actor: None,
+            kinds: ContainerKinds::EVERY,
+            allowed_kinds: ContainerKinds::EVERY,
+            agent: None,
+        }
+    }
+
+    /// The same, in another organization: no workspace of this one, and nobody found in
+    /// one; the kinds it may reach and the agent that writes go along.
+    fn elsewhere(&self) -> Self {
+        Self {
+            workspace: None,
+            known_actor: None,
+            ..self.clone()
+        }
+    }
+
+    /// The same, in `workspace_id` alone, where `known_actor` is who was found there.
+    fn in_workspace(
+        &self,
+        workspace_id: &str,
+        known_actor: Option<(String, String, crate::permissions::Actor)>,
+    ) -> Self {
+        Self {
+            workspace: Some(Arc::from(workspace_id)),
+            known_actor: known_actor.map(Arc::new),
+            ..self.clone()
+        }
+    }
+
+    /// Reaching containers of `kinds` alone, of those it may.
+    fn reaching(&mut self, kinds: ContainerKinds) {
+        self.kinds = kinds.intersection(self.allowed_kinds);
+    }
+
+    /// Never reaching more than `kinds`, whatever it is narrowed to after.
+    fn capped_to(&mut self, kinds: ContainerKinds) {
+        self.allowed_kinds = self.allowed_kinds.intersection(kinds);
+        self.kinds = self.kinds.intersection(kinds);
+    }
 }
 
 #[derive(Debug)]
@@ -229,6 +317,9 @@ struct Inner {
     /// Held while the list of whom to tell is worked off (`notifications::tend`): one
     /// run at a time.
     telling: tokio::sync::Mutex<()>,
+    /// The turns of telling the reactions to a block (`reactions::TellingTurns`): what
+    /// is read last of a block is told last.
+    telling_reactions: reactions::TellingTurns,
     /// The uploads' turns (`uploads::UploadTurns`).
     upload_turns: uploads::UploadTurns,
     /// Active `(upload_id, part_number)` receivers and per-user concurrency caps.
@@ -322,11 +413,7 @@ impl App {
         Ok(Self {
             store,
             ws,
-            workspace: None,
-            known_actor: None,
-            kinds: ContainerKinds::EVERY,
-            allowed_kinds: ContainerKinds::EVERY,
-            agent: None,
+            reach: Reach::everything(),
             org_kind: Arc::new(tokio::sync::OnceCell::new()),
             inner: Arc::new(Inner {
                 reset_limiter: LoginLimiter::new(Limits::from_config(config)),
@@ -349,6 +436,7 @@ impl App {
                 default_category: tokio::sync::Mutex::new(()),
                 opening_upload: tokio::sync::Mutex::new(()),
                 telling: tokio::sync::Mutex::new(()),
+                telling_reactions: reactions::TellingTurns::default(),
                 upload_turns: uploads::UploadTurns::default(),
                 receiving_parts: uploads::ReceivingParts::default(),
                 part_memory: Arc::new(tokio::sync::Semaphore::new(part_memory)),
@@ -453,12 +541,8 @@ impl App {
             inner: Arc::clone(&self.inner),
             ws,
             store,
-            workspace: None,
-            known_actor: None,
-            kinds: self.kinds,
-            allowed_kinds: self.allowed_kinds,
+            reach: self.reach.elsewhere(),
             org_kind: Arc::new(tokio::sync::OnceCell::new()),
-            agent: self.agent.clone(),
         }
     }
 
@@ -467,7 +551,7 @@ impl App {
     /// the token asks for that.
     #[must_use]
     pub(crate) fn writing_for(mut self, delegation: &crate::auth::api_token::Delegation) -> Self {
-        self.agent = Some(Arc::new(delegation.clone()));
+        self.reach.agent = Some(Arc::new(delegation.clone()));
         self
     }
 
@@ -489,22 +573,21 @@ impl App {
     /// reaches that much.
     #[must_use]
     pub fn reaching(mut self, kinds: ContainerKinds) -> Self {
-        self.kinds = kinds.intersection(self.allowed_kinds);
+        self.reach.reaching(kinds);
         self
     }
 
     /// The kinds of board this handle reaches ([`App::reaching`]).
     #[must_use]
     pub fn kinds(&self) -> ContainerKinds {
-        self.kinds
+        self.reach.kinds
     }
 
     /// The same handle, never reaching more than `kinds`, however it is narrowed or
     /// scoped after: for an agent, which reaches no diary.
     #[must_use]
     pub fn capped_to(mut self, kinds: ContainerKinds) -> Self {
-        self.allowed_kinds = self.allowed_kinds.intersection(kinds);
-        self.kinds = self.kinds.intersection(kinds);
+        self.reach.capped_to(kinds);
         self
     }
 
@@ -512,7 +595,7 @@ impl App {
     /// about every kind of container reaches.
     #[must_use]
     pub fn allowed_kinds(&self) -> ContainerKinds {
-        self.allowed_kinds
+        self.reach.allowed_kinds
     }
 
     /// The same handle, for a request that names the workspace in its path: a board of
@@ -521,8 +604,7 @@ impl App {
     #[must_use]
     pub fn in_workspace(&self, workspace_id: &str) -> Self {
         Self {
-            workspace: Some(Arc::from(workspace_id)),
-            known_actor: None,
+            reach: self.reach.in_workspace(workspace_id, None),
             ..self.clone()
         }
     }
@@ -537,13 +619,9 @@ impl App {
         user_id: &str,
         actor: crate::permissions::Actor,
     ) -> Self {
+        let known = (user_id.to_owned(), workspace_id.to_owned(), actor);
         Self {
-            workspace: Some(Arc::from(workspace_id)),
-            known_actor: Some(Arc::new((
-                user_id.to_owned(),
-                workspace_id.to_owned(),
-                actor,
-            ))),
+            reach: self.reach.in_workspace(workspace_id, Some(known)),
             ..self.clone()
         }
     }
@@ -552,7 +630,8 @@ impl App {
     /// handle is for one workspace ([`App::in_workspace`]) and that is another.
     #[must_use]
     pub fn reaches_workspace(&self, workspace_id: &str) -> bool {
-        self.workspace
+        self.reach
+            .workspace
             .as_deref()
             .is_none_or(|ours| ours == workspace_id)
     }
@@ -564,7 +643,7 @@ impl App {
     /// handle's kinds.
     #[must_use]
     pub fn reaches_container(&self, container: &fvoci_model::Container) -> bool {
-        self.kinds.holds(container.kind)
+        self.reach.kinds.holds(container.kind)
             && (container.is_builtin || self.reaches_workspace(&container.workspace_id))
     }
 

@@ -1,8 +1,17 @@
 /** Deciding which cards a view's filter lets through. */
 import { cardUpdatedAt } from './card-time.ts';
 import { arraysEqual } from './arrays.ts';
-import { daysOf, type DateValue } from './dates.ts';
+import { dateOfInstant, daysOf, type CalendarDate, type DateValue } from './dates.ts';
 import { diagnostics } from './diagnostics.ts';
+import { DONE_FILTER_ID, doneRuleOf, isCardDone } from './filter-done.ts';
+import {
+  daysOfPeriod,
+  isFilterPeriod,
+  spansMeet,
+  type DaySpan,
+  type FilterPeriod,
+} from './filter-period.ts';
+import type { Weekday } from './regional.ts';
 import { foldCase } from './text.ts';
 import {
   cardProperty,
@@ -13,6 +22,7 @@ import {
   plainPropertyValue,
   relationCardIds,
   type Card,
+  type DoneRule,
   type FilterClause,
   type FilterGroup,
   type PropertyTemplate,
@@ -25,8 +35,14 @@ export interface FilterContext {
   timeZone: string;
   /** The reader's user ID, used to resolve dynamic `'me'` person/author filters. */
   meId?: string | undefined;
-  /** Optional current moment in milliseconds, used when evaluating `'today'`. */
+  /** Optional current moment in milliseconds, used when evaluating `'today'` and the periods. */
   now?: number | undefined;
+  /** The reader's today, when the caller knows it already: the periods are counted from it. */
+  today?: CalendarDate | undefined;
+  /** The day the reader's week starts on, for the periods of `isWithin`; Monday when not given. */
+  weekStart?: Weekday | undefined;
+  /** The board's rule of done, for a condition on the pseudo property `done`. */
+  doneWhen?: DoneRule | null | undefined;
   /** The title of a card of the board; undefined for one that is not there (deleted). */
   cardTitle?: (cardId: string) => string | undefined;
 }
@@ -46,7 +62,25 @@ export function applyFilterGroup(
   cards: readonly Card[],
   context: FilterContext,
 ): Card[] {
-  return cards.filter((card) => isFilterGroupMet(group, templates, card, context));
+  if (group.filters.length < 1) return [...cards];
+  // Today once for every card, not once a card.
+  const today = todayOf(context);
+  const once = { ...context, today };
+  return cards.filter((card) => isFilterGroupMet(group, templates, card, once));
+}
+
+function todayOf(context: FilterContext): CalendarDate {
+  return context.today ?? dateOfInstant(context.now ?? Date.now(), context.timeZone);
+}
+
+/** The days of the periods for the last today and week start asked: the same for every card. */
+let periodsAsked: { key: string; spans: Partial<Record<FilterPeriod, DaySpan>> } | undefined;
+
+function spanOf(period: FilterPeriod, today: CalendarDate, weekStart: Weekday): DaySpan {
+  const key = `${today}/${String(weekStart)}`;
+  if (periodsAsked?.key !== key) periodsAsked = { key, spans: {} };
+  const spans = periodsAsked.spans;
+  return (spans[period] ??= daysOfPeriod(period, today, weekStart));
 }
 
 /** A group without filters lets every card through. */
@@ -127,6 +161,8 @@ export function isClauseMet(
   card: Card,
   context: FilterContext,
 ): boolean {
+  if (filter.propertyId === DONE_FILTER_ID)
+    return isDoneClauseMet(filter, templates, card, context);
   const template = templates.find((candidate) => candidate.id === filter.propertyId);
   const { value, dateValue } = valueForClause(filter, template, card, context);
   const isPersonLike =
@@ -193,6 +229,16 @@ export function isClauseMet(
       if (first === undefined || day === undefined) return true;
       // A range is after a day when it ends after it.
       return days !== undefined && days.last > day;
+    case 'isWithin': {
+      // Not a date, or no period: nothing to compare with.
+      const period = filter.values[0];
+      if (!dateValue || !isFilterPeriod(period)) return true;
+      // A range is within a period when it has a day of it.
+      return (
+        days !== undefined &&
+        spansMeet(days, spanOf(period, todayOf(context), context.weekStart ?? 1))
+      );
+    }
     default:
       diagnostics.report(`invalid filter condition: ${String(filter.condition)}`);
       return true;
@@ -200,9 +246,29 @@ export function isClauseMet(
 }
 
 /**
+ * Whether a card meets a condition on the pseudo property `done`: `isSet` a
+ * card done by the board's rule, `isNotSet` one that is not. On a board
+ * without a rule (it was taken away since) the condition cannot be evaluated
+ * and is met, as is a condition other than these two.
+ */
+function isDoneClauseMet(
+  filter: FilterClause,
+  templates: readonly PropertyTemplate[],
+  card: Card,
+  context: FilterContext,
+): boolean {
+  const rule = doneRuleOf(context.doneWhen, templates);
+  if (!rule) return true;
+  if (filter.condition === 'isSet') return isCardDone(rule, card);
+  if (filter.condition === 'isNotSet') return !isCardDone(rule, card);
+  return true;
+}
+
+/**
  * Property values a new card needs in order to pass the filter, so that a
- * card added to a filtered view does not vanish at once. Only the clauses
- * directly in the group are looked at, and of an `or` group only the first.
+ * card added to a filtered view does not vanish at once. Every part of an
+ * `and` group has to hold, and is looked at; of an `or` group, its first
+ * part alone. A part that is a group is looked at in the same way.
  */
 export function propertiesThatMeetFilterGroup(
   group: FilterGroup | undefined,
@@ -210,13 +276,19 @@ export function propertiesThatMeetFilterGroup(
   meId?: string,
 ): Record<string, string> {
   if (!group) return {};
-  const clauses = group.filters.filter((filter): filter is FilterClause => !isFilterGroup(filter));
-  const considered = group.operation === 'or' ? clauses.slice(0, 1) : clauses;
   const result: Record<string, string> = {};
-  for (const clause of considered) {
-    const property = propertyThatMeetsFilterClause(clause, templates, meId);
-    if (property.value) result[property.id] = property.value;
-  }
+  const look = (part: FilterGroup): void => {
+    const considered = part.operation === 'or' ? part.filters.slice(0, 1) : part.filters;
+    for (const filter of considered) {
+      if (isFilterGroup(filter)) {
+        look(filter);
+        continue;
+      }
+      const property = propertyThatMeetsFilterClause(filter, templates, meId);
+      if (property.value) result[property.id] = property.value;
+    }
+  };
+  look(group);
   return result;
 }
 
@@ -227,6 +299,8 @@ export function propertyThatMeetsFilterClause(
   meId?: string,
 ): { id: string; value?: string } {
   const id = clause.propertyId;
+  // Whether a new card is done is the board's rule's to say, not the filter's.
+  if (id === DONE_FILTER_ID) return { id };
   const template = templates.find((candidate) => candidate.id === id);
   if (!template) {
     diagnostics.report(`propertyThatMeetsFilterClause: no template for property ${id}`);

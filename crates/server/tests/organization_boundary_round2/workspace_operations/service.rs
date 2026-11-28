@@ -57,6 +57,12 @@ async fn notifications(case: &mut Case, server: &TestServer) {
     )
     .await;
     case.run("readNotifications", &[], json!({})).await;
+    // Sorted as an inbox: unread again, put away, back, and every one read put away.
+    let one = &[("notificationId", notification.as_str())];
+    case.run("unreadNotification", one, json!({})).await;
+    case.run("archiveNotification", one, json!({})).await;
+    case.run("unarchiveNotification", one, json!({})).await;
+    case.run("archiveReadNotifications", &[], json!({})).await;
 }
 
 /// The founder starts, stops, edits, manually logs, lists, and deletes personal time

@@ -96,14 +96,15 @@ test('"+ New" makes a card and opens it', async ({ page }, info) => {
   await expect(cards(page)).toHaveCount(12);
 });
 
-test('the menu of a card duplicates and deletes it, and has nothing about columns', async ({
+test('the menu of a card duplicates, selects and deletes it, and has nothing about columns', async ({
   page,
 }, info) => {
   await openView(page, info, ...WELCOME);
   await page.getByRole('button', { name: 'Card menu: Open a card' }).click();
-  await expect(page.locator('[data-action]')).toHaveCount(3);
+  await expect(page.locator('[data-action]')).toHaveCount(4);
   await expect(page.locator('[data-action="move"]')).toHaveCount(0);
-  await expect(page.locator('[data-action="select"]')).toHaveCount(0);
+  // "Select" is how a finger starts a selection (e2e/bulk.spec.ts changes it).
+  await expect(page.locator('[data-action="select"]')).toHaveCount(1);
   await choose(page, 'duplicate');
   await expect(card(page, 'Open a card')).toHaveCount(2);
   await expect(cards(page)).toHaveCount(13);

@@ -376,7 +376,7 @@ async fn seed_shared_course_activity(
         )
         .await
         .expect("unit created")
-        .unit;
+        .first;
     test.upsert_unit_progress(
         &course.id,
         &unit.id,

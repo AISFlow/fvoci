@@ -46,11 +46,11 @@
     <Dialog.Header class="flex-row items-center gap-2 border-b p-4">
       <div class="min-w-0 flex-1">
         <Dialog.Title>{m.people_title()}</Dialog.Title>
-        <Dialog.Description
-          >{administers(workspace)
+        <Dialog.Description>
+          {administers(workspace)
             ? m.people_description({ workspace: workspaceName })
-            : m.groups_description({ workspace: workspaceName })}</Dialog.Description
-        >
+            : m.groups_description({ workspace: workspaceName })}
+        </Dialog.Description>
       </div>
       <Dialog.Close>
         {#snippet child({ props }: { props: Record<string, unknown> })}

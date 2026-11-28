@@ -31,7 +31,7 @@ use super::files::FilePlace;
 use super::{App, Imported};
 use crate::auth::now_millis;
 use crate::auth::secret::new_secret;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 use crate::storage::S3Files;
 
 /// How long a session lasts after it is opened.
@@ -411,15 +411,11 @@ impl App {
         upload_id: &str,
         user_id: &str,
     ) -> Result<(Upload, Vec<UploadPart>), AppError> {
-        let upload = match self
+        let upload = self
             .store()
             .get_upload(upload_id, user_id, now_millis())
             .await
-        {
-            Ok(upload) => upload,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found(UPLOAD)),
-            Err(error) => return Err(error.into()),
-        };
+            .or_missing(UPLOAD)?;
         let parts = self.store().get_upload_parts(&upload.id).await?;
         Ok((upload, parts))
     }

@@ -13,15 +13,12 @@ use crate::common::{ApiResponse, Setup, TEST_WORKSPACE_ID};
 fn refused(response: &ApiResponse) -> Vec<(String, String)> {
     let places = response.refused_places();
     let body = response.value();
-    let reasons = body["errors"]
-        .as_array()
-        .map(|errors| {
-            errors
-                .iter()
-                .map(|entry| entry["reason"].as_str().unwrap_or_default().to_owned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let reasons = body["errors"].as_array().map_or_default(|errors| {
+        errors
+            .iter()
+            .map(|entry| entry["reason"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    });
     places.into_iter().zip(reasons).collect()
 }
 

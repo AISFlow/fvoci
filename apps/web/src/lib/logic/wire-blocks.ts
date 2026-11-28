@@ -4,6 +4,7 @@
  */
 import { encodeBase32 } from './base32.ts';
 import { diagnostics } from './diagnostics.ts';
+import { readRecurrence, type Recurrence } from './recurrence.ts';
 import type { RelationLink } from './relations.ts';
 import { optionalViewFields, type OptionalViewFields } from './view-members.ts';
 import type { StoredDateValue } from './wire.ts';
@@ -131,6 +132,10 @@ export type CardFields = {
   isTemplate?: boolean;
   properties: Record<string, PropertyValue>;
   contentOrder: ContentOrder;
+  /** How the card repeats (`logic/recurrence.ts`); none for one that does not. */
+  recurrence?: Recurrence;
+  /** Of a card done that repeated: the card the server made after it. */
+  recurredTo?: string;
 };
 
 export type Card = Block & { fields: CardFields; lastCommentAt?: number };
@@ -150,6 +155,8 @@ export function createCard(source?: Block): Card {
   const isTemplate = Boolean(fields.isTemplate);
   const base = createBlock(source ? { ...source, type: 'card' } : ({ type: 'card' } as Block));
   if (isTemplate) delete base.number;
+  const recurrence = readRecurrence(fields.recurrence);
+  const recurredTo = typeof fields.recurredTo === 'string' ? fields.recurredTo : undefined;
   return {
     ...base,
     type: 'card',
@@ -158,8 +165,20 @@ export function createCard(source?: Block): Card {
       properties: { ...(fields.properties as Record<string, PropertyValue> | undefined) },
       contentOrder: readContentOrder(fields.contentOrder),
       isTemplate,
+      ...(recurrence ? { recurrence } : {}),
+      ...(recurredTo ? { recurredTo } : {}),
     },
   };
+}
+
+/** How the card repeats; undefined for one that does not. */
+export const cardRecurrence = (card: Card): Recurrence | undefined => card.fields.recurrence;
+/** The card made after this one, done, when it repeated. */
+export const cardRecurredTo = (card: Card): string | undefined => card.fields.recurredTo;
+/** The card repeating as `recurrence` says, or not at all. */
+export function withCardRecurrence<T extends Card>(card: T, recurrence: Recurrence | undefined): T {
+  const { recurrence: _old, ...fields } = card.fields;
+  return { ...card, fields: recurrence ? { ...fields, recurrence } : fields };
 }
 
 export function cardProperty(card: Card, propertyId: string): PropertyValue | undefined {
@@ -199,7 +218,8 @@ export type FilterCondition =
   | 'endsWith'
   | 'notEndsWith'
   | 'isBefore'
-  | 'isAfter';
+  | 'isAfter'
+  | 'isWithin';
 
 export type FilterClause = {
   propertyId: string;

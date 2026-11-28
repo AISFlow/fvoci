@@ -5,6 +5,8 @@
  */
 import { parseCalendarDate } from '$lib/logic/dates.ts';
 import type { ContainerKind } from '$lib/logic/wire.ts';
+import type { FavoritePlaces } from '$lib/features/shell/favorite-places.ts';
+import type { Favorite } from '$lib/state/index.ts';
 
 import type { RouteFields, Router } from './router.svelte.ts';
 
@@ -92,6 +94,25 @@ export function goToPlace(router: Router, place: Place): void {
     router.openContainer({ id: place.containerId, workspaceId: place.workspaceId ?? '', kind });
     router.go(route, { replace: true });
   }
+}
+
+/** Where a star leads, in the workspace `workspaceId` gives. */
+export function placeOfFavorite(favorite: Favorite, workspaceId: string | undefined): Place {
+  const { kind, targetId: id, containerId, containerKind } = favorite;
+  return { kind, id, containerId, containerKind, workspaceId };
+}
+
+/** The addresses of the reader's stars, and going to them, by the router. */
+export function favoritePlaces(
+  router: Router,
+  workspaceId: () => string | undefined,
+): FavoritePlaces {
+  return {
+    href: (favorite) => router.href(routeOfPlace(router, placeOfFavorite(favorite, workspaceId()))),
+    open: (favorite) => {
+      goToPlace(router, placeOfFavorite(favorite, workspaceId()));
+    },
+  };
 }
 
 export function focusThePlace(): void {

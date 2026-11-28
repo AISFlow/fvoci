@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::body_versions::{lines, versions};
 use crate::collab::{Editing, editing, joined};
-use crate::common::{Client, ROOT_WS, Setup, TEST_WORKSPACE_ID, TEST_WS};
+use crate::common::{Client, ROOT_WS, Setup, TEST_WS};
 use crate::rooms::{give, paragraphs, table, two_in_a_room, write_whole};
 use crate::wiki_isolation::{put_on, wiki_of};
 
@@ -270,11 +270,7 @@ async fn only_who_edits_the_board_keeps_a_version() {
 
     give(&th, &t.board_id, &user2, "editor").await;
     assert_eq!(outcome(&keep_now(&th.client2, &t.card_id).await).0, "kept");
-    th.client
-        .delete(&format!(
-            "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-            t.board_id, t.card_id
-        ))
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
         .await
         .check_no_content();
     th.client

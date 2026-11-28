@@ -1,16 +1,49 @@
 //! The pages of a wiki: their tree, making one, moving one, and the trash of them. A
-//! page is a block, and is changed and deleted as one ([`App::patch_block`],
-//! [`App::delete_block`]).
+//! page is a block, and is changed and deleted as one (`App::patch_block`,
+//! `App::delete_block`).
 
 use fvoci_model::{
-    Block, BlockError, BlockType, DeletedPage, NewPage, Page, PageMove, PageNode, PageTree,
+    Block, BlockError, BlockType, Container, DeletedPage, NewPage, Page, PageDuplicate, PageMove,
+    PageNode, PagePatch, PageTree,
 };
-use fvoci_store::{PageCopies, PageRestore, PageWrite, StoreError};
+use fvoci_store::{ByAgent, StoreError, Written};
 
-use super::App;
 use super::blocks::{ChangeAction, ChangeNotification, log_notification};
+use super::changes::Changes;
 use super::list_page::ListPage;
-use crate::error::{AppError, Reason};
+use super::{App, Reached};
+use crate::error::{AppError, OrMissing, Reason};
+use crate::permissions::ContainerPermission;
+
+/// What a member of the wiki who may not edit it is refused making a page with.
+pub const CREATE_PAGE_DENIED: &str = "access denied to create page";
+/// What a member of the wiki who may not edit it is refused changing a page with.
+pub const PATCH_PAGE_DENIED: &str = "access denied to patch page";
+/// What a member of the wiki who may not edit it is refused moving a page with.
+pub const MOVE_PAGE_DENIED: &str = "access denied to move page";
+/// What a member of the wiki who may not edit it is refused copying a page with.
+pub const DUPLICATE_PAGE_DENIED: &str = "access denied to duplicate page";
+/// What a member of the wiki who may not edit it is refused deleting a page with.
+pub const DELETE_PAGE_DENIED: &str = "access denied to delete page";
+/// What a member of the wiki who may not edit it is refused its trash with.
+pub const PAGE_TRASH_DENIED: &str = "access denied to the trash of the wiki";
+/// What a member of the wiki who may not edit it is refused bringing a page back with.
+pub const UNDELETE_PAGE_DENIED: &str = "access denied to undelete page";
+
+/// Checks that the caller may edit the wiki `on` reached, refusing in `denial`, and
+/// that `page`, which the request found by its identifier, is a page of it.
+fn editing_page<'on>(
+    on: &'on Reached,
+    page: &Block,
+    denial: &str,
+) -> Result<&'on Container, AppError> {
+    let wiki = on.require(ContainerPermission::ManageCards, denial)?;
+    if on.holds(page) && page.block_type == BlockType::Page {
+        Ok(wiki)
+    } else {
+        Err(AppError::not_found("page"))
+    }
+}
 
 impl App {
     /// The page of the wiki, its block read once: a block that is no page of this wiki
@@ -23,13 +56,11 @@ impl App {
     /// store's error if the block cannot be read.
     pub async fn page_of(&self, wiki_id: &str, page_id: &str) -> Result<Block, AppError> {
         const WHAT: &str = "page";
-        match self.block(page_id).await {
-            Ok(block) if block.container_id == wiki_id && block.block_type == BlockType::Page => {
-                Ok(block)
-            }
-            Ok(_) => Err(AppError::not_found(WHAT)),
-            Err(error) if error.is_not_found() => Err(AppError::not_found(WHAT)),
-            Err(error) => Err(error),
+        let block = self.block(page_id).await.or_missing(WHAT)?;
+        if block.container_id == wiki_id && block.block_type == BlockType::Page {
+            Ok(block)
+        } else {
+            Err(AppError::not_found(WHAT))
         }
     }
 
@@ -42,84 +73,117 @@ impl App {
         Ok(self.store().get_page_tree(wiki_id).await?)
     }
 
-    /// Makes a page of the wiki as `new` says, held to the organization's limits, and
-    /// tells websocket listeners and webhooks in the background of it and of the pages
-    /// numbered anew for it, as of any block that is written.
+    /// Makes a page of the wiki `on` reached as `new` says, for an editor of it, held to
+    /// the organization's limits, and tells websocket listeners and webhooks in the
+    /// background of it and of the pages numbered anew for it, as of any block that is
+    /// written.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if there is no such wiki, and a bad request if the
+    /// Returns [`CREATE_PAGE_DENIED`] as [`Reached::require`] does, a not-found error if
+    /// there is no such wiki, and a bad request if the request's shape is refused, the
     /// parent is no page of it, the page would be deeper or the wiki larger than the
     /// limits let them, the page to go after is no page of the same parent, or the
     /// title may not be stored.
-    pub async fn create_page(
-        &self,
-        wiki_id: &str,
-        new: &NewPage,
-        user_id: &str,
-    ) -> Result<Page, AppError> {
-        let wiki = self.store().get_container(wiki_id).await?;
+    pub async fn create_page(&self, on: &Reached, new: &NewPage) -> Result<Page, AppError> {
+        let wiki = on.require(ContainerPermission::ManageCards, CREATE_PAGE_DENIED)?;
+        new.check_request()?;
+        let (wiki_id, user_id) = (on.container_id(), on.user_id());
         let limits = self.limits().pages;
-        let written = {
-            let _structure = self.collab().changing_structure(self, wiki_id).await;
-            self.store()
-                .create_page(wiki_id, new, limits, user_id)
-                .await?
-        };
-        log_notification(
-            ChangeNotification::Send,
-            ChangeAction::Add,
-            &written.page.id,
-        );
-        Ok(self.announce_pages(&wiki.workspace_id, written))
+        let page = self
+            .write_tree(wiki, ChangeAction::Add, async || {
+                self.store()
+                    .create_page(wiki_id, new, limits, user_id)
+                    .await
+            })
+            .await?;
+        Ok(Page::from(page))
     }
 
-    /// Moves a page of the wiki, with every page below it, where `to` says, and tells
-    /// websocket listeners and webhooks in the background of it and of the pages
-    /// numbered anew for it. The pages below it are not told of: their parents stay.
+    /// Changes the page of the wiki `on` reached as `patch` says, for an editor of it:
+    /// its title, its icon or its whole body, as the agent of `agent` if one writes.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the wiki has no such page, and a bad request if the
-    /// parent is no page of the wiki, the page itself or one below it, or would leave a
-    /// page deeper than the limit, or the page to go after is no other page there.
+    /// Returns [`PATCH_PAGE_DENIED`] as [`Reached::require`] does, a not-found error for
+    /// a block that is no page of the wiki, a bad request if the patch's shape is refused
+    /// or its body names a file the wiki does not have, and what `App::patch_block_as`
+    /// returns.
+    pub async fn patch_page(
+        &self,
+        on: &Reached,
+        page: &Block,
+        patch: PagePatch,
+        agent: Option<ByAgent<'_>>,
+    ) -> Result<Page, AppError> {
+        editing_page(on, page, PATCH_PAGE_DENIED)?;
+        patch.check_request()?;
+        self.check_body_files(on.container_id(), patch.body.new_body())
+            .await?;
+        let patched = self
+            .patch_block_as(
+                &page.id,
+                &patch.into_block_patch(),
+                on.user_id(),
+                ChangeNotification::Send,
+                agent,
+            )
+            .await?;
+        Ok(Page::from(patched))
+    }
+
+    /// Moves a page of the wiki `on` reached, with every page below it, where `to` says,
+    /// for an editor of it, and tells websocket listeners and webhooks in the background
+    /// of it and of the pages numbered anew for it. The pages below it are not told of:
+    /// their parents stay.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MOVE_PAGE_DENIED`] as [`Reached::require`] does, a not-found error if
+    /// the wiki has no such page, and a bad request if the parent is no page of the
+    /// wiki, the page itself or one below it, or would leave a page deeper than the
+    /// limit, or the page to go after is no other page there.
     pub async fn move_page(
         &self,
-        wiki_id: &str,
-        page_id: &str,
+        on: &Reached,
+        page: &Block,
         to: &PageMove,
-        user_id: &str,
     ) -> Result<Page, AppError> {
-        let wiki = self.store().get_container(wiki_id).await?;
+        let wiki = editing_page(on, page, MOVE_PAGE_DENIED)?;
+        let (wiki_id, page_id, user_id) = (on.container_id(), page.id.as_str(), on.user_id());
         let limits = self.limits().pages;
-        let written = {
-            let _structure = self.collab().changing_structure(self, wiki_id).await;
-            self.store()
-                .move_page(wiki_id, page_id, to, limits, user_id)
-                .await?
-        };
-        log_notification(ChangeNotification::Send, ChangeAction::Update, page_id);
-        Ok(self.announce_pages(&wiki.workspace_id, written))
+        let page = self
+            .write_tree(wiki, ChangeAction::Update, async || {
+                self.store()
+                    .move_page(wiki_id, page_id, to, limits, user_id)
+                    .await
+            })
+            .await?;
+        Ok(Page::from(page))
     }
 
-    /// Copies a page of the wiki with every page below it, right after the page, the copy
-    /// titled `title` if given; the bodies are copied, what is typed in them now
-    /// included, and their images and file blocks get files of their own, as a card's
-    /// duplicate's do. Their versions and comments are not copied. The wiki's members are told of
-    /// each copy and each sibling numbered anew. Returns the copy of the page.
+    /// Copies a page of the wiki `on` reached with every page below it, for an editor of
+    /// it, right after the page, the copy titled as `copy` says if it does; the bodies
+    /// are copied, what is typed in them now included, and their images and file blocks
+    /// get files of their own, as a card's duplicate's do. Their versions and comments
+    /// are not copied. The wiki's members are told of each copy and each sibling
+    /// numbered anew. Returns the copy of the page.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the wiki has no such page, and a bad request if the
-    /// copies would be deeper, or the wiki larger, than the organization's limits.
+    /// Returns [`DUPLICATE_PAGE_DENIED`] as [`Reached::require`] does, a not-found error
+    /// if the wiki has no such page, and a bad request if the title may not be stored or
+    /// the copies would be deeper, or the wiki larger, than the organization's limits.
     pub async fn duplicate_page(
         &self,
-        wiki_id: &str,
-        page_id: &str,
-        title: Option<&str>,
-        user_id: &str,
+        on: &Reached,
+        page: &Block,
+        copy: &PageDuplicate,
     ) -> Result<Page, AppError> {
-        let wiki = self.store().get_container(wiki_id).await?;
+        let wiki = editing_page(on, page, DUPLICATE_PAGE_DENIED)?;
+        copy.check_request()?;
+        let (wiki_id, page_id, user_id) = (on.container_id(), page.id.as_str(), on.user_id());
+        let title = copy.title.as_deref();
         let limits = self.limits().pages;
         let family: Vec<String> = self
             .store()
@@ -133,9 +197,11 @@ impl App {
             .collect();
         // What is typed in the bodies now is copied too.
         self.collab().write_bodies(self, &family).await?;
-        let PageCopies {
-            mut pages,
+        // Told of once the copies have their files, not as soon as they are stored.
+        let Written {
+            first,
             renumbered,
+            below,
         } = {
             let _structure = self.collab().changing_structure(self, wiki_id).await;
             self.store()
@@ -143,16 +209,18 @@ impl App {
                 .await
                 .map_err(refused_without_parent)?
         };
-        self.give_copies_their_files(wiki_id, &mut pages).await;
+        let mut copies: Vec<Block> = std::iter::once(first).chain(below).collect();
+        self.give_copies_their_files(wiki_id, &mut copies).await;
         log_notification(ChangeNotification::Send, ChangeAction::Add, page_id);
-        let page = pages
+        // The copy answered with the files it was given; one deleted meanwhile, with
+        // every copy below it, is no longer there to answer.
+        let page = copies
             .first()
             .cloned()
             .map(Page::from)
             .ok_or_else(|| AppError::not_found("page"))?;
-        let mut told = renumbered;
-        told.extend(pages);
-        self.announce(&wiki.workspace_id, told);
+        let told = renumbered.into_iter().chain(copies);
+        self.tell(Changes::in_workspace(&wiki.workspace_id).changed(told));
         Ok(page)
     }
 
@@ -204,78 +272,62 @@ impl App {
         }
     }
 
-    /// The wiki's pages in the trash at the top of what went with them, one page of the
-    /// list ([`ListPage`]).
+    /// Deletes a page of the wiki `on` reached, for an editor of it, with every page
+    /// below it and the comments on them, as any block is deleted
+    /// (`App::delete_block`).
     ///
     /// # Errors
     ///
-    /// Returns the store's error if the trash cannot be read.
+    /// Returns [`DELETE_PAGE_DENIED`] as [`Reached::require`] does, a not-found error for
+    /// a block that is no page of the wiki, and what `App::delete_block` returns.
+    pub async fn delete_page(&self, on: &Reached, page: &Block) -> Result<(), AppError> {
+        editing_page(on, page, DELETE_PAGE_DENIED)?;
+        self.delete_block(&page.id, on.user_id(), ChangeNotification::Send)
+            .await
+    }
+
+    /// The pages in the trash of the wiki `on` reached, for an editor of it, at the top
+    /// of what went with them, one page of the list ([`ListPage`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PAGE_TRASH_DENIED`] as [`Reached::require`] does, and the store's error
+    /// if the trash cannot be read.
     pub async fn deleted_pages(
         &self,
-        wiki_id: &str,
+        on: &Reached,
         page: ListPage,
     ) -> Result<Vec<DeletedPage>, AppError> {
+        on.require(ContainerPermission::ManageCards, PAGE_TRASH_DENIED)?;
         Ok(self
             .store()
-            .get_deleted_pages(wiki_id, Some(page.paging()))
+            .get_deleted_pages(on.container_id(), Some(page.paging()))
             .await?)
     }
 
-    /// Brings a page of the wiki back from the trash with the pages that went with it,
-    /// held to the organization's limits, and tells websocket listeners and webhooks
-    /// in the background of each page that came back and each numbered anew for it.
+    /// Brings a page of the wiki `on` reached back from the trash, for an editor of it,
+    /// with the pages that went with it, held to the organization's limits, and tells
+    /// websocket listeners and webhooks in the background of each page that came back
+    /// and each numbered anew for it.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the wiki's trash has no such page, and a bad
-    /// request if the pages would be deeper, or the wiki larger, than the limits.
-    pub async fn undelete_page(
-        &self,
-        wiki_id: &str,
-        page_id: &str,
-        user_id: &str,
-    ) -> Result<Page, AppError> {
-        let wiki = self.store().get_container(wiki_id).await?;
+    /// Returns [`UNDELETE_PAGE_DENIED`] as [`Reached::require`] does, a not-found error
+    /// if the wiki's trash has no such page, and a bad request if the pages would be
+    /// deeper, or the wiki larger, than the limits.
+    pub async fn undelete_page(&self, on: &Reached, page_id: &str) -> Result<Page, AppError> {
+        let wiki = on.require(ContainerPermission::ManageCards, UNDELETE_PAGE_DENIED)?;
+        let (wiki_id, user_id) = (on.container_id(), on.user_id());
         let limits = self.limits().pages;
-        let restored = {
-            let _structure = self.collab().changing_structure(self, wiki_id).await;
-            self.store()
-                .undelete_page(wiki_id, page_id, limits, user_id)
-                .await
-        };
-        let PageRestore { pages, renumbered } = restored.map_err(refused_without_parent)?;
-        log_notification(ChangeNotification::Send, ChangeAction::Add, page_id);
-        let page = pages
-            .first()
-            .cloned()
-            .map(Page::from)
-            .ok_or_else(|| AppError::not_found("page"))?;
-        let mut told = renumbered;
-        told.extend(pages);
-        self.announce(&wiki.workspace_id, told);
-        Ok(page)
-    }
-
-    /// Tells websocket listeners and webhooks in the background of the pages written,
-    /// the siblings numbered anew first, and returns the page the write was about.
-    fn announce_pages(&self, workspace_id: &str, written: PageWrite) -> Page {
-        let PageWrite { page, renumbered } = written;
-        let mut told: Vec<Block> = renumbered;
-        told.push(page.clone());
-        self.announce(workspace_id, told);
-        Page::from(page)
-    }
-
-    /// Tells websocket listeners and webhooks in the background of the pages, in turn.
-    fn announce(&self, workspace_id: &str, told: Vec<Block>) {
-        let app = self.clone();
-        let workspace_id = workspace_id.to_owned();
-        self.spawn_background(async move {
-            for block in &told {
-                app.ws().broadcast_block_change(&workspace_id, block).await;
-                app.tell_webhooks(block);
-            }
-        });
+        let page = self
+            .write_tree(wiki, ChangeAction::Add, async || {
+                self.store()
+                    .undelete_page(wiki_id, page_id, limits, user_id)
+                    .await
+            })
+            .await
+            .map_err(refused_without_parent)?;
+        Ok(Page::from(page))
     }
 }
 

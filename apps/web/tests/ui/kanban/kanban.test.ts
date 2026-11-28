@@ -10,11 +10,9 @@ import {
   nearestRest,
   optionIdOf,
   sortedIndex,
-  toggled,
   withColumnHidden,
   withColumnShown,
   withColumnStepped,
-  withRange,
 } from '$lib/features/views/kanban/kanban.ts';
 import { createCard, type Card } from '$lib/logic/wire.ts';
 
@@ -94,33 +92,6 @@ describe('the lists as a drop leaves them', () => {
       { id: 'one', items: ['b', 'c'] },
       { id: 'two', items: [] },
     ]);
-  });
-});
-
-describe('selecting', () => {
-  it('takes a card in, and out when it was in', () => {
-    expect(toggled([], 'a')).toEqual(['a']);
-    expect(toggled(['a', 'b'], 'a')).toEqual(['b']);
-  });
-
-  const order = ['a', 'b', 'c', 'd', 'e'];
-
-  it('takes in the range from the anchor, in either direction', () => {
-    expect(withRange(order, ['b'], 'b', 'd')).toEqual(['b', 'c', 'd']);
-    expect(withRange(order, ['d'], 'd', 'b')).toEqual(['d', 'b', 'c']);
-  });
-
-  it('keeps what was selected outside the range', () => {
-    expect(withRange(order, ['a', 'e'], 'e', 'c')).toEqual(['a', 'e', 'c', 'd']);
-  });
-
-  it('adds the card alone without an anchor on the board', () => {
-    expect(withRange(order, [], undefined, 'c')).toEqual(['c']);
-    expect(withRange(order, ['a'], 'gone', 'c')).toEqual(['a', 'c']);
-  });
-
-  it('changes nothing for a card that is not on the board', () => {
-    expect(withRange(order, ['a'], 'a', 'gone')).toEqual(['a']);
   });
 });
 

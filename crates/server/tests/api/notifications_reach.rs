@@ -11,7 +11,7 @@ use fvoci_store::testing::db_type_of_the_tests;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::blocks::{block_path, delete, undelete_path};
+use crate::blocks::{delete, restore_card};
 use crate::boards::{delete_member, patch_board};
 use crate::common::{Client, HIDDEN_WORKSPACE_ID, Setup, TEST_WS, TestServer};
 use crate::content_search::set_role;
@@ -60,11 +60,11 @@ async fn watchers(th: &TestServer, block_id: &str) -> Vec<String> {
 async fn give_card(client: &Client, card: &Card, user_id: &str) {
     client
         .patch(
-            &block_path(&card.board_id, &card.id),
-            &json!({"updatedFields": {"properties": {OWNER: user_id}}}),
+            &format!("{TEST_WS}/cards/{}", card.id),
+            &json!({"updatedProperties": {OWNER: user_id}}),
         )
         .await
-        .check_no_content();
+        .check_ok();
 }
 
 /// Makes the board open (`open`) or invited-only (`private`), as the first client's user.
@@ -397,8 +397,7 @@ async fn who_watched_a_card_or_a_page_watches_it_again_once_it_is_back() {
     assert_eq!(watched(&th.client).await, Vec::<String>::new());
     assert_eq!(watched(&th.client2).await, Vec::<String>::new());
 
-    th.client
-        .post_empty(&undelete_path(&board.id, &card.id))
+    restore_card(&th.client, &board.id, &card.id)
         .await
         .check_ok();
     th.client

@@ -52,9 +52,17 @@ fn a_token_that_reads_is_told_of_every_tool_but_those_that_write() {
         .map(String::as_str)
         .filter(|name| !read.iter().any(|read| read == name))
         .collect();
-    assert_eq!(writes, ["save_card", "save_page_or_unit", "post_comment"]);
-    assert_eq!(all.len(), 13);
-    assert_eq!(read.len(), 10);
+    assert_eq!(
+        writes,
+        [
+            "save_card",
+            "save_cards",
+            "save_page_or_unit",
+            "post_comment"
+        ]
+    );
+    assert_eq!(all.len(), 15);
+    assert_eq!(read.len(), 11);
     for tool in TOOLS {
         assert_eq!(
             read.iter().any(|name| name == tool.name()),

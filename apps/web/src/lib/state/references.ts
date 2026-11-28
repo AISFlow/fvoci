@@ -4,14 +4,19 @@
  * whether the reader may see it, is asked of the backend for the reader, as
  * things are then.
  */
-import type { ContainerKind } from '../logic/wire.ts';
+import type { ContainerKind, ViewType } from '../logic/wire.ts';
 import type { VersionsOfBodies } from './body-versions.ts';
 import type { Paging } from './trash-reads.ts';
 
-/** A card, page or unit as a reference shows it: what it is, what it is called, and where it is. */
+/**
+ * A card, page or unit as a reference shows it: what it is, what it is called,
+ * and where it is. A view of a board is told of too, as the board view of a
+ * body shows it (with its board's title and how it shows its cards); no
+ * reference names one.
+ */
 export interface LinkedBlock {
   id: string;
-  kind: 'card' | 'page' | 'unit';
+  kind: 'card' | 'page' | 'unit' | 'view';
   title: string;
   /** Its icon; empty for none. */
   icon: string;
@@ -20,6 +25,10 @@ export interface LinkedBlock {
   containerKind: ContainerKind;
   /** A card's number on its board; none for a page or a unit. */
   number?: number;
+  /** A view's board's title; told of a view alone. */
+  containerTitle?: string;
+  /** How a view shows its cards; told of a view alone. */
+  viewType?: ViewType;
 }
 
 /** How many references are resolved in one request (the server's limit). */

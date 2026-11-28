@@ -5,6 +5,7 @@
  */
 import type {
   Notification,
+  NotificationFilter,
   Notifications,
   NotificationSubject,
 } from '../state/notification-types.ts';
@@ -20,11 +21,19 @@ export class ServerNotifications implements Notifications {
     this.#http = http;
   }
 
-  async list(paging?: Paging): Promise<Notification[]> {
+  async list(paging?: Paging, filter: NotificationFilter = {}): Promise<Notification[]> {
     const listed = await this.#http.request<Schemas['Notification'][]>(
       '/api/v1/notifications',
       {},
-      { query: { page: paging?.page, perPage: paging?.perPage } },
+      {
+        query: {
+          page: paging?.page,
+          perPage: paging?.perPage,
+          unread: filter.unread ? 'true' : undefined,
+          kind: filter.kind,
+          archived: filter.archived ? 'true' : undefined,
+        },
+      },
     );
     return listed.map(notificationOf);
   }
@@ -51,6 +60,34 @@ export class ServerNotifications implements Notifications {
       { method: 'POST', query: { through } },
     );
   }
+
+  async markUnread(notificationId: string): Promise<void> {
+    await this.#http.request(
+      '/api/v1/notifications/{notificationId}/unread',
+      { notificationId },
+      { method: 'POST' },
+    );
+  }
+
+  async archive(notificationId: string): Promise<void> {
+    await this.#http.request(
+      '/api/v1/notifications/{notificationId}/archive',
+      { notificationId },
+      { method: 'POST' },
+    );
+  }
+
+  async unarchive(notificationId: string): Promise<void> {
+    await this.#http.request(
+      '/api/v1/notifications/{notificationId}/archive',
+      { notificationId },
+      { method: 'DELETE' },
+    );
+  }
+
+  async archiveRead(): Promise<void> {
+    await this.#http.request('/api/v1/notifications/archive', {}, { method: 'POST' });
+  }
 }
 
 function notificationOf(notification: Schemas['Notification']): Notification {
@@ -60,6 +97,7 @@ function notificationOf(notification: Schemas['Notification']): Notification {
     createdAt: notification.createdAt,
     updatedAt: notification.updatedAt,
     readAt: notification.readAt,
+    archivedAt: notification.archivedAt,
     subject: subject ? subjectOf(subject) : null,
   };
 }

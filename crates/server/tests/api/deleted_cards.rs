@@ -5,7 +5,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use crate::blocks::{
-    NO_BOARD, block_path, blocks_of, boards_with_roles, child_of, delete, insert_one, new_block,
+    NO_BOARD, blocks_of, boards_with_roles, child_of, delete, insert_one, new_block, restore_card,
 };
 use crate::common::TEST_WS;
 use crate::common::{Setup, TEST_WORKSPACE_ID};
@@ -68,8 +68,7 @@ async fn the_deleted_cards_of_a_board_are_listed_for_its_editors() {
     th.anonymous().get(&trash).await.check_unauthorized();
 
     // Brought back, a card is no longer listed.
-    th.client
-        .post_empty(&format!("{}/restore", block_path(board_id, &second.id)))
+    restore_card(&th.client, board_id, &second.id)
         .await
         .check_ok();
     let listed: Vec<Value> = th.client.get(&trash).await.ok_json();
@@ -81,7 +80,7 @@ async fn a_moment() {
     tokio::time::sleep(std::time::Duration::from_millis(3)).await;
 }
 
-/// The list of a board's deleted cards has each card that `restoreBlock` brings back by
+/// The list of a board's deleted cards has each card that `batchRestoreCards` brings back by
 /// itself: a card on another one deleted alone is there, a card that went with the card
 /// it was on comes back with that
 /// one and is not; no comment is a card. Paging as `getCards`; no list for a board in the
@@ -133,8 +132,7 @@ async fn the_deleted_cards_are_those_that_come_back_by_themselves() {
     }
 
     // The inner card is not listed, and comes back with the outer one.
-    th.client
-        .post_empty(&format!("{}/restore", block_path(board_id, &outer.id)))
+    restore_card(&th.client, board_id, &outer.id)
         .await
         .check_ok();
     let blocks = blocks_of(&th.client, board_id).await;

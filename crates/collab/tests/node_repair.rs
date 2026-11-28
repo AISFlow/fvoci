@@ -94,8 +94,7 @@ fn assert_repair_parity(state: &[u8], update: &[u8], label: &str) {
                 .repair
                 .body
                 .as_ref()
-                .map(|b| b.file_ids().into_iter().map(str::to_owned).collect())
-                .unwrap_or_default();
+                .map_or_default(|b| b.file_ids().into_iter().map(str::to_owned).collect());
             assert_eq!(got.doc.file_ids(), expected_files, "{label}: file_ids");
         }
         (Err(BodyTakeError::Untouched { error, .. } | BodyTakeError::Dirty(error)), Err(exp)) => {

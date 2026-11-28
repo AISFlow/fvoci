@@ -15,7 +15,7 @@ use super::contract::tag;
 use super::workspace::{InCourse, InWorkspace};
 use super::{ApiResult, decode_object, json_response, require_granted};
 use super::{Delegated, Read, Write};
-use crate::app::{App, ContainerAccess};
+use crate::app::{App, ContainerAccess, Reached, require_progress_recorder};
 use crate::error::AppError;
 use crate::permissions::{ContainerPermission, Grant};
 
@@ -133,13 +133,14 @@ pub(super) async fn put_progress_from(
     body: &Bytes,
 ) -> Result<UnitProgress, AppError> {
     let progress = progress_to_record(ws, course_id, body).await?;
-    record_progress(ws, course_id, unit_id, &progress).await
+    record_progress(ws, unit_id, &progress).await
 }
 
 /// The caller's progress in a course, as `body` says it and checked as
 /// `putUnitProgress` checks it, before it is recorded ([`record_progress`]).
 pub(super) struct ProgressToRecord {
-    access: ContainerAccess,
+    /// The course, as the caller reached it.
+    on: Reached,
     change: UnitProgressChange,
 }
 
@@ -155,42 +156,44 @@ pub(super) async fn progress_to_record(
     course_id: &str,
     body: &Bytes,
 ) -> Result<ProgressToRecord, AppError> {
-    let access = course_view_access(
-        &ws.app,
-        &ws.caller.user_id,
-        course_id,
-        "access denied to update unit progress",
-    )
-    .await?;
-    if !access.has_membership() {
-        return Err(AppError::forbidden(
-            "join the course before recording progress",
-        ));
-    }
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    // Asked before the body is read, as every route asks.
+    require_progress_recorder(&on)?;
     let update: UnitProgressUpdate = decode_object(body)?;
     let change = update.check_request()?;
-    Ok(ProgressToRecord { access, change })
+    Ok(ProgressToRecord { on, change })
 }
 
-/// Records `progress` on the unit `unit_id` of the course `course_id`.
+/// Checks `update`, the progress of the caller in the course `course_id`, as
+/// [`progress_to_record`] checks the progress a body says: for what records as
+/// `putUnitProgress` does. Nothing is written.
+///
+/// # Errors
+///
+/// As `putUnitProgress` answers, but for the unit.
+pub(super) async fn progress_update_to_record(
+    ws: &InWorkspace,
+    course_id: &str,
+    update: &UnitProgressUpdate,
+) -> Result<ProgressToRecord, AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    require_progress_recorder(&on)?;
+    let change = update.check_request()?;
+    Ok(ProgressToRecord { on, change })
+}
+
+/// Records `progress` on the unit `unit_id` of the course it was checked in.
 ///
 /// # Errors
 ///
 /// As `putUnitProgress` answers for the unit.
 pub(super) async fn record_progress(
     ws: &InWorkspace,
-    course_id: &str,
     unit_id: &str,
     progress: &ProgressToRecord,
 ) -> Result<UnitProgress, AppError> {
     ws.app
-        .put_unit_progress(
-            course_id,
-            unit_id,
-            &ws.caller.user_id,
-            &progress.change,
-            &progress.access.container.properties,
-        )
+        .put_unit_progress(&progress.on, unit_id, &progress.change)
         .await
 }
 

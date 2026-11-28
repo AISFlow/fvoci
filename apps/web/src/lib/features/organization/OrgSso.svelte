@@ -233,8 +233,10 @@
         variant="link"
         class="h-auto px-0 roomy:min-h-touch"
         data-testid="sso-set-up"
-        onclick={() => void setUp()}>{m.org_sso_set_up()}</Button
+        onclick={() => void setUp()}
       >
+        {m.org_sso_set_up()}
+      </Button>
     </div>
   {:else}
     <h2 id="{uid}-title" class="text-base font-semibold">{m.org_sso_title()}</h2>
@@ -303,16 +305,16 @@
               onclick={() => {
                 replaceSecret = false;
                 secret = '';
-              }}>{m.org_sso_keep_secret()}</Button
+              }}
             >
+              {m.org_sso_keep_secret()}
+            </Button>
           {/if}
         {:else}
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-sm"
-              >{provider?.hasClientSecret
-                ? m.org_sso_secret_stored()
-                : m.org_sso_secret_none()}</span
-            >
+            <span class="text-sm">
+              {provider?.hasClientSecret ? m.org_sso_secret_stored() : m.org_sso_secret_none()}
+            </span>
             <Button
               variant="outline"
               size="sm"
@@ -320,8 +322,10 @@
               onclick={() => {
                 replaceSecret = true;
                 secret = '';
-              }}>{m.org_sso_change_secret()}</Button
+              }}
             >
+              {m.org_sso_change_secret()}
+            </Button>
           </div>
         {/if}
       </div>
@@ -334,9 +338,14 @@
             value={provider.redirectUri}
             data-testid="sso-callback"
           />
-          <Button class="justify-self-start" size="sm" variant="outline" onclick={() => void copy()}
-            >{m.org_sso_copy()}</Button
+          <Button
+            class="justify-self-start"
+            size="sm"
+            variant="outline"
+            onclick={() => void copy()}
           >
+            {m.org_sso_copy()}
+          </Button>
           <p class="text-xs text-muted-foreground">{m.org_sso_callback_hint()}</p>
         </div>
       {:else}
@@ -371,8 +380,10 @@
               variant="outline"
               disabled={busy}
               data-testid="sso-sign-in"
-              onclick={() => void signIn()}>{m.org_sso_sign_in()}</Button
+              onclick={() => void signIn()}
             >
+              {m.org_sso_sign_in()}
+            </Button>
             <p class="text-xs text-muted-foreground">{m.org_sso_link_hint()}</p>
           {/if}
         {/if}
@@ -402,8 +413,10 @@
         <Button
           type="submit"
           disabled={busy || !issuer.trim() || !clientId.trim()}
-          data-testid="sso-save">{busy ? m.account_working() : m.org_sso_save()}</Button
+          data-testid="sso-save"
         >
+          {busy ? m.account_working() : m.org_sso_save()}
+        </Button>
         {#if provider}
           <Button
             variant="outline"
@@ -411,8 +424,10 @@
             data-testid="sso-delete"
             onclick={() => {
               confirmRemove = true;
-            }}>{m.org_sso_delete()}</Button
+            }}
           >
+            {m.org_sso_delete()}
+          </Button>
         {/if}
       </div>
     </form>

@@ -4,9 +4,11 @@
  * `getCardByNumber`): a card is told
  * to whoever has a role on its board, a page to whoever reads its wiki (a role
  * on it, or work in the workspace of an open one), and neither to anybody else,
- * whatever is asked.
+ * whatever is asked. A view of a board, which a board view shows, is resolved
+ * as a card is told, and is nothing else here.
  */
 import type { DocNode } from '../../editor/schema.ts';
+import type { ViewType } from '../../logic/wire.ts';
 import { REFERENCES_AT_ONCE, type LinkedBlock, type References } from '../references.ts';
 import type { Paging } from '../trash-reads.ts';
 
@@ -55,6 +57,32 @@ export class MemoryReferences implements References {
   }
 
   /**
+   * The view of a board as a board view shows it, if it is of the workspace
+   * and the reader reads its board, as a card is told.
+   */
+  #view(block: StoredBlock | undefined, workspaceId: string): LinkedBlock | undefined {
+    const { world, userId } = this.#asker;
+    if (block?.type !== 'view') return undefined;
+    const board = world.containers.get(block.containerId);
+    // A container of no kind is a board, as it was before there were others.
+    if (!board || (board.kind ?? 'board') !== 'board' || board.workspaceId !== workspaceId) {
+      return undefined;
+    }
+    if (!reads(world, userId, block.containerId)) return undefined;
+    const viewType = block.fields.viewType;
+    return {
+      id: block.id,
+      kind: 'view',
+      title: block.title,
+      icon: '',
+      containerId: board.id,
+      containerKind: 'board',
+      containerTitle: board.title,
+      viewType: typeof viewType === 'string' ? (viewType as ViewType) : 'board',
+    };
+  }
+
+  /**
    * The card or the page as a reference shows it, if it is of the workspace
    * and the reader is on its board or its wiki: nothing reaches across spaces.
    */
@@ -89,7 +117,10 @@ export class MemoryReferences implements References {
       fail(400, `at most ${String(REFERENCES_AT_ONCE)} references are resolved at once`);
     }
     const blocks = this.#asker.world.blocks;
-    return [...new Set(ids)].flatMap((id) => this.#shown(blocks.get(id), workspaceId) ?? []);
+    return [...new Set(ids)].flatMap((id) => {
+      const block = blocks.get(id);
+      return this.#shown(block, workspaceId) ?? this.#view(block, workspaceId) ?? [];
+    });
   }
 
   async to(workspaceId: string, blockId: string, paging?: Paging): Promise<LinkedBlock[]> {

@@ -129,11 +129,8 @@ async fn the_operator_erases_an_account_and_what_it_wrote_stays_under_no_name() 
         .check_unauthorized();
     check_it_opens_no_own_space(&th).await;
     // What they wrote is there, under their identifier, which names nobody.
-    let cards: Vec<Block> = th
-        .client
-        .get(&format!("{ROOT_WS}/boards/{}/blocks?all=true", board.id))
-        .await
-        .ok_json();
+    let cards: Vec<Block> =
+        crate::blocks::blocks_of_in(&th.client, crate::common::ROOT_WORKSPACE_ID, &board.id).await;
     let kept = cards
         .iter()
         .find(|block| block.id == card.id)

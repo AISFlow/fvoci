@@ -182,23 +182,14 @@ test('people are shown by display name and login name wherever the board names t
   });
   expect(written.ok()).toBe(true);
   const commented = await namedApi.post(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`,
     {
-      data: [
-        {
-          containerId: board.boardId,
-          parentId: cardId,
-          type: 'comment',
-          title: '',
-          createdAt: 1,
-          updatedAt: 1,
-          fields: {},
-          body: {
-            type: 'doc',
-            content: [{ type: 'paragraph', content: [{ type: 'text', text: 'On it' }] }],
-          },
+      data: {
+        body: {
+          type: 'doc',
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: 'On it' }] }],
         },
-      ],
+      },
     },
   );
   expect(commented.ok()).toBe(true);

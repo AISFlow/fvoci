@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fvoci_model::BlockType;
 use fvoci_store::{DocAsRead, StoreError, Tenant};
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit};
 use tokio::time::Instant;
@@ -103,6 +104,9 @@ pub(super) struct OpenDoc {
     pub(super) wants_fold: bool,
     /// Who sent the last update; what writes the body writes it as them.
     pub(super) last_writer: String,
+    /// What its block is: whether its body may show a board view is by it
+    /// ([`BlockType::shows_board_views`]), which the worker does not know.
+    pub(super) block_type: BlockType,
     /// When the first update whose body is not written was taken.
     pub(super) first_unwritten: Option<Instant>,
     /// When the last update was taken.

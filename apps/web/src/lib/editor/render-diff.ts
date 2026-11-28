@@ -8,7 +8,8 @@
  *   text with other marks a `<span>`; each has `data-change`.
  * - A block of another kind or other attributes than it was says how in a
  *   line before it (`doc-diff-note`): a heading's level, a code block's
- *   language, a task checked, an image's text.
+ *   language, a task checked, an image's text, a callout's tone.
+ * - A toggle that holds a change is drawn open.
  *
  * Every mark has `data-diff-label`, the words the style sheet (diff.css)
  * puts before it for whoever hears the page rather than sees it: the marks
@@ -22,6 +23,7 @@ import { m } from '$lib/i18n/paraglide/messages.js';
 import type { BodyDiff } from '$lib/logic/body-diff.ts';
 import type { DiffNode } from '$lib/logic/body-nodes.ts';
 
+import { toneName, toneOf } from './callout-tones.ts';
 import { codeLanguageOf } from './code-languages.ts';
 import { drawBlocks, type RenderBodyOptions } from './render.ts';
 import { DIAGRAM_LANGUAGE } from './schema.ts';
@@ -32,7 +34,7 @@ export const DIFF_STOP = 'data-diff-stop';
 /** Blocks that hold nothing, put in an element that can carry the marks. */
 const EMPTY = new Set(['IMG', 'HR']);
 /** Blocks of text, of which one changed in place is a stop. */
-const TEXT = new Set(['P', 'H1', 'H2', 'H3', 'PRE']);
+const TEXT = new Set(['P', 'H1', 'H2', 'H3', 'PRE', 'SUMMARY']);
 
 const LABELS: Record<string, () => string> = {
   added: m.body_diff_added,
@@ -99,6 +101,13 @@ export function noteOf(node: DiffNode): string | undefined {
       return startOf(before.start) === startOf(after.start)
         ? undefined
         : m.body_diff_start({ from: startOf(before.start), to: startOf(after.start) });
+    case 'callout':
+      return before.tone === after.tone
+        ? undefined
+        : m.body_diff_kind({
+            from: toneName(toneOf(before.tone)),
+            to: toneName(toneOf(after.tone)),
+          });
     default:
       return undefined;
   }
@@ -198,6 +207,11 @@ export function drawDiffBlocks(
   for (const element of fragment.querySelectorAll('[data-change]')) {
     const label = LABELS[element.getAttribute('data-change') ?? ''];
     if (label) element.setAttribute('data-diff-label', label());
+  }
+  // What changed in a toggle is shown, and its stops can take the focus: such a toggle is open.
+  for (const toggle of fragment.querySelectorAll('details')) {
+    if (toggle.hasAttribute('data-diff') || toggle.querySelector('[data-diff], [data-change]'))
+      toggle.open = true;
   }
   return fragment;
 }

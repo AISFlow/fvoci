@@ -1021,27 +1021,28 @@
     }
   },
   {
-    "name": "blocks of the copy",
-    "request": "GET /api/v1/w/<id:1>/boards/<id:23>/blocks as boards-alice",
+    "name": "cards of the copy",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:23>/cards as boards-alice",
     "status": 200,
     "content_type": "application/json",
     "body": [
       {
+        "boardId": "<id:23>",
         "body": null,
-        "containerId": "<id:23>",
         "createdAt": "<ts>",
         "createdBy": "<id:2>",
-        "fields": {
-          "icon": "x",
-          "isTemplate": false,
-          "properties": {}
-        },
+        "hasBody": false,
+        "icon": "x",
         "id": "<id:24>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
         "modifiedBy": "<id:2>",
         "number": 1,
         "parentId": "",
+        "properties": {},
+        "tasksDone": 0,
+        "tasksTotal": 0,
         "title": "A card",
-        "type": "card",
         "updatedAt": "<ts>"
       }
     ]
@@ -1179,27 +1180,28 @@
     }
   },
   {
-    "name": "blocks after undelete",
-    "request": "GET /api/v1/w/<id:1>/boards/<id:4>/blocks as boards-alice",
+    "name": "cards after undelete",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:4>/cards as boards-alice",
     "status": 200,
     "content_type": "application/json",
     "body": [
       {
+        "boardId": "<id:4>",
         "body": null,
-        "containerId": "<id:4>",
         "createdAt": "<ts>",
         "createdBy": "<id:2>",
-        "fields": {
-          "icon": "x",
-          "isTemplate": false,
-          "properties": {}
-        },
+        "hasBody": false,
+        "icon": "x",
         "id": "<id:22>",
+        "isTemplate": false,
+        "lastCommentAt": 0,
         "modifiedBy": "<id:2>",
         "number": 1,
         "parentId": "",
+        "properties": {},
+        "tasksDone": 0,
+        "tasksTotal": 0,
         "title": "A card",
-        "type": "card",
         "updatedAt": "<ts>"
       }
     ]

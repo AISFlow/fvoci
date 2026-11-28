@@ -109,11 +109,7 @@ async fn who_is_taken_out_of_the_workspace_is_put_out_of_the_room() {
 async fn the_room_of_a_deleted_card_is_emptied() {
     let th = seldom().start().await.init_basic().await;
     let (t, mut one, mut two) = two_in_a_room(&th, &paragraphs(&["first"])).await;
-    th.client
-        .delete(&format!(
-            "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-            t.board_id, t.card_id
-        ))
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
         .await
         .check_no_content();
     for peer in [&mut one, &mut two] {

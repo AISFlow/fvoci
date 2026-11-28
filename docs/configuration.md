@@ -1,6 +1,6 @@
 # 서버의 설정
 
-적은 때: 2026-11-11 05:05 KST, 고친 때: 2026-11-27 20:16 KST. 서버(`fvoci-server`)가 읽는 설정의 전부다. 코드는 `crates/server/src/config.rs`다.
+적은 때: 2026-11-11 05:05 KST, 고친 때: 2026-11-28 03:40 KST. 서버(`fvoci-server`)가 읽는 설정의 전부다. 코드는 `crates/server/src/config.rs`다.
 
 키를 더하거나 바꾸면 같은 커밋에서 이 문서를 고친다. 이 문서는 코드와 함께 검사된다. `config.rs`의 테스트 `the_configuration_document_lists_every_key`가 다음을 견준다.
 
@@ -48,6 +48,8 @@
 
 스키마는 기준선 하나(`crates/store/schema/<종류>/0001_baseline.sql`)에서 시작한다. 기준선 전의 서버들이 이주 1~79로 만든 데이터베이스는, 기준선 전의 마지막 서버가 그 끝(79와 그 뒤의 데이터 단계)까지 올려 둔 것이면 `_sqlx_migrations`의 기록만 기준선의 한 줄로 바뀐다: 표와 행은 그대로이고, 서버 잠금 없이 한 트랜잭션으로(PostgreSQL은 그 표를 잠그고) 바꾸므로 그 데이터베이스를 쓰는 서버가 돌고 있어도 된다. 그 끝까지 오지 않은 것(밀린 이주, 다른 체크섬, 실패한 이주, 남은 데이터 단계)은 무엇이 다른지 말하며 거절한다: 기준선 전의 마지막 서버로 먼저 연다. 기록이 바뀐 데이터베이스는 기준선 전의 서버가 열지 않으므로, 그 서버로 되돌리는 길은 바꾸기 전의 백업을 되살리는 것뿐이다.
 
+PostgreSQL은 17, 18, 19를 지원한다: 웹앱만 고친 것이 아니면 변경마다 CI가 시험을 도는 판이다(18에서는 시험 전부를, 17과 19에서는 스토어의 통합 시험 `crates/store/tests/store`를). `docker/compose.yaml`은 `postgres:18`로 뜬다. 주판(17, 18, 19처럼 주 버전의 수)마다 데이터 디렉터리의 형식이 달라, 이미지의 주판을 올리면 새 컨테이너는 옛 판이 만든 볼륨에서 시작을 거절한다(데이터는 그대로 남는다). 주판을 올릴 때는 `docker/backup.sh`로 뜬 백업을 새 볼륨에 `docker/restore.sh`로 되살리거나 `pg_upgrade`를 거친다.
+
 | 키 | 환경 변수 | 타입 | 기본값 | 뜻과 범위 |
 |---|---|---|---|---|
 | `database_kind` | `FVOCI_DATABASE_KIND` | 문자열 | `"sqlite"` | `sqlite` 또는 `postgres` |
@@ -93,11 +95,15 @@ services:
 - `work_mem=32MB`, `maintenance_work_mem=512MB`: `work_mem`은 질의의 정렬·해시 하나의 한도다(병렬 일꾼은 저마다, 해시는 그 2배까지). 40 연결이 하나씩 쓰면 1.25GB다. `maintenance_work_mem`은 색인을 만들 때(마이그레이션, `restore.sh`의 `pg_restore`)와 `VACUUM`의 것이고, autovacuum 일꾼(`autovacuum_max_workers`, 3)도 저마다 이만큼까지 쓴다. 넘치는지는 `pg_stat_database`의 `temp_files`·`temp_bytes`로 본다.
 - `wal_compression=zstd`, `default_toast_compression=lz4`: 체크포인트 뒤 처음 고치는 페이지마다 WAL에 들어가는 페이지 전체(full-page write)를 zstd로 줄인다: 본문과 Yjs 상태처럼 큰 행을 자주 고치는 쓰기의 WAL과 디스크 쓰기가 준다. `default_toast_compression`은 TOAST가 압축하는 큰 값(행이 약 2KB를 넘게 하는 JSONB 본문, Yjs의 bytea)을 `pglz`보다 빠르게 압축하고 푼다. 그 뒤로 쓰는 값에만 걸리고, 있던 값은 다시 쓰일 때까지 `pglz`다. 이미지의 PostgreSQL은 lz4와 zstd를 넣어 지었다.
 - `checkpoint_timeout=15min`, `max_wal_size=4GB`, `min_wal_size=512MB`: 체크포인트가 드물수록 full-page write가 준다. 대신 죽은 뒤 되살릴 때 최대 15분 치 WAL을 다시 읽고, 볼륨의 `pg_wal`이 `max_wal_size` 안팎까지 찬다. `pg_stat_checkpointer`의 `num_requested`가 `num_timed`보다 빨리 늘면 `max_wal_size`가 모자란 것이다. `checkpoint_completion_target`은 기본이 이미 0.9다.
-- `random_page_cost=1.1`, `effective_io_concurrency=200`, `maintenance_io_concurrency=200`(기본 4, 16, 16): SSD에서는 임의 읽기가 순차 읽기와 거의 같은 값이므로 색인 스캔을 고르게 하고, 한 번에 미리 읽는 요청을 늘린다. 하드 디스크면 기본으로 둔다.
+- `random_page_cost=1.1`, `effective_io_concurrency=200`, `maintenance_io_concurrency=200`(기본 4, 16, 16. 17은 4, 1, 10): SSD에서는 임의 읽기가 순차 읽기와 거의 같은 값이므로 색인 스캔을 고르게 하고, 한 번에 미리 읽는 요청을 늘린다. 하드 디스크면 기본으로 둔다.
 - `max_parallel_workers=4`(기본 8): 병렬 일꾼을 코어 수까지로 막아 fvoci와 OpenSearch의 몫을 남긴다. `max_parallel_workers_per_gather`와 `max_parallel_maintenance_workers`는 기본 2가 이 기기에 맞다. `max_worker_processes`는 기본 8로 둔다: 논리 복제 런처가 그 자리 하나를 차지하므로 4로 내리면 병렬 일꾼은 셋까지만 뜬다.
 - `jit=off`: fvoci의 질의는 짧아서 JIT로 얻을 것이 적고, JIT가 걸리는 것(비용 추정만 큰 것)은 컴파일이 실행보다 길어지기 쉽다.
 
 다른 기기에서는 비율을 따른다. 메모리를 따르는 것은 `shared_buffers` 15~25%(fvoci와 OpenSearch가 같은 기기면 낮은 쪽), `effective_cache_size` 65~70%, `maintenance_work_mem` 2% 안팎, `work_mem`은 그 `max_connections`배가 5% 안팎, `shm_size`는 `work_mem`의 60배 안팎이다: 8 GiB면 `1536MB`·`5GB`·`128MB`·`8MB`·`"512m"`, 16 GiB면 `3GB`·`11GB`·`256MB`·`16MB`·`"1g"`, 64 GiB면 `12GB`·`44GB`·`1GB`·`64MB`·`"4g"`. 코어를 따르는 것은 `max_parallel_workers`(코어 수), `max_parallel_workers_per_gather`와 `max_parallel_maintenance_workers`(그 절반, 4까지), `max_worker_processes`(`max_parallel_workers`+1 이상: 8코어면 `9`)이고, 병렬 해시 하나의 몫이 일꾼 수를 따라 커지므로 `shm_size`도 함께 늘린다. `max_connections`는 메모리가 아니라 `database_max_connections`를 따르고, WAL과 체크포인트의 값은 쓰는 양과 디스크를 따른다.
+
+이 절이 말하는 기본값은 `postgres:18`의 것이다. `postgres:19`는 `jit=off`와 `default_toast_compression=lz4`가 이미 이미지의 기본값이고, `postgres:17`은 데이터 체크섬이 꺼진 채(`data_checksums=off`) 만들어지며 `effective_io_concurrency=1`, `maintenance_io_concurrency=10`이 기본값이다. 위 `override.yaml`의 값 15개는 17, 18, 19 어디서나 그대로 걸린다(19에서 두 줄은 기본값과 같을 뿐이다).
+
+새 설치를 `postgres:17`로 띄우거나 백업을 17에 되살릴 때는 `override.yaml`의 `postgres`에 `image: postgres:17`과 함께 `environment: { PGDATA: /var/lib/postgresql/17/docker }`를 준다. 17 이미지는 `VOLUME /var/lib/postgresql/data`를 선언하므로, `docker/compose.yaml`의 마운트(`postgres-data:/var/lib/postgresql`)만 두면 데이터가 이름 붙은 볼륨이 아니라 그 안에 따로 걸리는 익명 볼륨에 들어간다: `down`이나 `rm`으로 컨테이너를 지운 뒤 다시 `up`하거나 볼륨을 다른 기기로 옮기면 빈 클러스터가 뜨고 표가 없다(지운 컨테이너의 데이터는 `down -v`가 아니었으면 떨어져 나간 익명 볼륨에 남는다). 값을 바꾼 뒤의 `up`처럼 컨테이너를 지우지 않고 새로 만들 때는 compose가 익명 볼륨을 새 컨테이너에 이어 붙여 데이터가 남는다. `PGDATA`를 주면 데이터가 18, 19와 같은 자리(볼륨의 `<주판>/docker`)에 들어가 새 컨테이너에서도 남는다. 마운트를 `/var/lib/postgresql/data`로 바꾸는 길은 쓰지 않는다: compose는 뒤 파일의 `volumes`를 앞 파일의 것과 합치므로 기본 마운트도 남고, 같은 마운트로 18이나 19에 올리면 그 이미지가 시작을 거절한다. `roles`는 `postgres:18` 그대로 둔다(18의 `psql`이 17 서버에 역할을 만든다).
 
 ## 키: 파일 저장소
 
@@ -192,7 +198,7 @@ Cloudflare R2는 같은 규칙이 기본으로 7일이다. 다른 S3 호환 저�
 | `max_concurrent_exports` | `FVOCI_MAX_CONCURRENT_EXPORTS` | 정수(1 이상) | `2` | 서버가 한꺼번에 하는 내보내기(`exportContainerArchive`, `exportWorkspaceArchive`)의 수. 한 사용자는 하나씩이다(설정이 아니다). 내보내기는 아카이브를 다 보낼 때까지(클라이언트가 끊거나 `export_stall_seconds` 동안 아무것도 받지 않을 때까지) 자리를 잡는다. 넘으면 429이고 `reason`이 `server_exports_busy`(사용자의 것이 돌고 있으면 `export_running`)다. 0은 시작 오류다 |
 | `export_stall_seconds` | `FVOCI_EXPORT_STALL_SECONDS` | 정수(1 이상) | `60` | 내보내기의 내려받기가 이 시간(초) 동안 한 바이트도 보내지 못하면 그만둔다: 임시 파일을 지우고 자리를 돌려주고 연결을 끊는다. 보낸 양은 서버의 버퍼(커널의 송신 버퍼와 HTTP 계층, 합쳐 몇 MiB)를 떠난 양이라, 클라이언트는 이 시간에 그만큼은 받아야 끊기지 않는다. 0은 시작 오류다 |
 | `max_concurrent_imports` | `FVOCI_MAX_CONCURRENT_IMPORTS` | 정수(1 이상) | `2` | 서버가 한꺼번에 하는 가져오기(`importArchive`)의 수. 한 사용자는 하나씩이다. 넘으면 429이고 `reason`이 `server_imports_busy`(사용자의 것이 돌고 있으면 `import_running`)이며 업로드는 열린 채 남는다. 열린 업로드의 한도(`max_pending_upload_bytes`)는 따로다. 0은 시작 오류다 |
-| `max_comment_versions` | `FVOCI_MAX_COMMENT_VERSIONS` | 정수(1 이상) | `50` | 댓글마다 남기는 고치기 전 글(판)의 수. 맨 처음 쓴 글은 늘 남고 그 수에 든다. 넘으면 그 다음으로 오래된 판부터 버린다(`getCommentVersions`). 줄이면 그 뒤에 고쳐지는 댓글부터 줄어든다. 0은 시작 오류다 |
+| `max_comment_versions` | `FVOCI_MAX_COMMENT_VERSIONS` | 정수(1 이상) | `50` | 댓글마다 남기는 고치기 전 글(판)의 수. 맨 처음 쓴 글은 늘 남고 그 수에 든다. 넘으면 그 다음으로 오래된 판부터 버린다(`getCardCommentVersions`). 줄이면 그 뒤에 고쳐지는 댓글부터 줄어든다. 0은 시작 오류다 |
 | `max_file_versions` | `FVOCI_MAX_FILE_VERSIONS` | 정수(1 이상) | `50` | 파일마다 남기는 판의 수. 지금의 판도 그 수에 든다. 새 판을 올리거나 지난 판으로 되돌려 넘으면 가장 오래된 판부터 버리고, 그 판의 바이트는 정리 작업이 지운다(`getFileVersions`). 줄이면 그 뒤에 새 판이 쓰이는 파일부터 줄어든다. 0은 시작 오류다 |
 | `wiki_page_depth` | `FVOCI_WIKI_PAGE_DEPTH` | 정수(1 이상) | `10` | 위키의 페이지가 들어갈 수 있는 깊이(맨 위의 페이지가 1). 더 깊게 만들거나 옮기거나 되살리거나 복제하거나(페이지, 위키 통째) 아카이브에서 가져오면 400이고 `reason`이 `page_too_deep`이다(만들기와 옮기기는 `errors[0].pointer`가 `/parentId`). 조직의 한도로 읽는다(`App::limits`). 0은 시작 오류다 |
 | `wiki_pages` | `FVOCI_WIKI_PAGES` | 정수(1 이상) | `5000` | 위키 하나가 가질 수 있는 페이지의 수(휴지통의 것은 세지 않는다). 넘게 만들거나 되살리거나 복제하거나(페이지, 위키 통째) 아카이브에서 가져오면 400이고 `reason`이 `too_many_pages`, `limit`이 이 값이다. 조직의 한도로 읽는다(`App::limits`). 0은 시작 오류다 |

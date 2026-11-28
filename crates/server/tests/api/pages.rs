@@ -74,6 +74,9 @@ async fn a_page_is_made_read_changed_and_deleted() {
             modified_by: me,
             created_at: page.created_at,
             updated_at: page.created_at,
+            body_markdown: None,
+            has_complex_blocks: None,
+            complex_blocks: None,
         }
     );
     assert!(!page.order.is_empty() && page.created_at > 0, "{page:?}");
@@ -264,7 +267,7 @@ async fn a_page_goes_where_the_request_says_and_takes_what_is_below_it_along() {
 }
 
 #[tokio::test]
-async fn the_operations_of_blocks_and_cards_neither_make_nor_reach_a_page() {
+async fn the_operations_of_cards_reach_no_page() {
     let ts = Setup::native().start().await.init_basic().await;
     let client = &ts.client;
     let (wiki_id, pages) = wiki(&ts).await;
@@ -284,38 +287,30 @@ async fn the_operations_of_blocks_and_cards_neither_make_nor_reach_a_page() {
     card.check_created();
     let card = card.value()["id"].as_str().expect("an id").to_owned();
 
-    // No block of a board is made a page, or becomes one.
-    let blocks = format!("{TEST_WS}/boards/{}/blocks", board.id);
-    let as_page = json!({"containerId": board.id, "type": "page", "createdAt": 1, "updatedAt": 1});
-    check_refused_at(&client.post(&blocks, &json!([as_page])).await, "/0/type");
-    let becoming = client
-        .patch(&format!("{blocks}/{card}"), &json!({"type": "page"}))
-        .await;
-    check_refused_at(&becoming, "/type");
-    let with_board = json!({
-        "containers": [{"id": "b", "visibility": "private"}],
-        "blocks": [{"id": "p", "containerId": "b", "type": "page", "createdAt": 1, "updatedAt": 1}],
-    });
-    let with_board = client
-        .post(&format!("{TEST_WS}/containers-and-blocks"), &with_board)
-        .await;
-    check_refused_at(&with_board, "/blocks/0/type");
-
-    // The page is no block and no card to the operations of boards, by its wiki or alone.
-    let of_wiki = format!("{TEST_WS}/boards/{wiki_id}/blocks");
-    let a_card = json!([{"containerId": wiki_id, "type": "card", "createdAt": 1, "updatedAt": 1}]);
+    // The page is no card to the operations of boards, by its wiki or alone.
+    let of_wiki = format!("{TEST_WS}/boards/{wiki_id}");
+    let of_board = format!("{TEST_WS}/boards/{}", board.id);
+    let the_page = json!({"cardIds": [page.id]});
     for refused in [
-        client.get(&of_wiki).await,
-        client.post(&of_wiki, &a_card).await,
+        client.get(&format!("{of_wiki}/views")).await,
         client
-            .patch(&format!("{of_wiki}/{}", page.id), &json!({"title": "x"}))
+            .post(&format!("{of_wiki}/cards"), &json!({"title": "x"}))
             .await,
-        client.delete(&format!("{of_wiki}/{}", page.id)).await,
-        client.get(&format!("{blocks}?blockId={}", page.id)).await,
         client
-            .patch(&format!("{blocks}/{}", page.id), &json!({"title": "x"}))
+            .post(&format!("{of_wiki}/cards/batch-delete"), &the_page)
             .await,
-        client.delete(&format!("{blocks}/{}", page.id)).await,
+        client
+            .post(&format!("{of_board}/cards/batch-delete"), &the_page)
+            .await,
+        client
+            .post(
+                &format!("{of_board}/cards/batch-patch"),
+                &json!({"cardIds": [page.id], "updatedProperties": {}}),
+            )
+            .await,
+        client
+            .get(&format!("{of_board}/cards/{}/comments", page.id))
+            .await,
         client.get(&format!("{TEST_WS}/cards/{}", page.id)).await,
         client
             .patch(
@@ -357,9 +352,9 @@ async fn the_operations_of_blocks_and_cards_neither_make_nor_reach_a_page() {
 }
 
 /// A page is watched as a card is: whoever reads it may subscribe to it, and to whoever
-/// does not it is as nothing. But one in the trash is not brought back as a block.
+/// does not it is as nothing. But one in the trash is not brought back as a card.
 #[tokio::test]
-async fn a_page_is_subscribed_to_by_its_readers_and_not_brought_back_as_a_block() {
+async fn a_page_is_subscribed_to_by_its_readers_and_not_brought_back_as_a_card() {
     let ts = Setup::native().start().await.init_basic().await;
     let client = &ts.client;
     let (wiki_id, pages) = wiki(&ts).await;
@@ -370,8 +365,8 @@ async fn a_page_is_subscribed_to_by_its_readers_and_not_brought_back_as_a_block(
             fvoci_model::ContainerVisibility::Private,
         )
         .await;
-    let blocks = format!("{TEST_WS}/boards/{}/blocks", board.id);
-    let of_wiki = format!("{TEST_WS}/boards/{wiki_id}/blocks");
+    let of_board = format!("{TEST_WS}/boards/{}", board.id);
+    let of_wiki = format!("{TEST_WS}/boards/{wiki_id}");
 
     // Its writer watches it already, and subscribing again is no error; somebody who
     // does not read the wiki is answered as for no block at all.
@@ -421,12 +416,18 @@ async fn a_page_is_subscribed_to_by_its_readers_and_not_brought_back_as_a_block(
         .post(&subscriptions, &subscription(&page.id, &me))
         .await
         .check_not_found();
-    for at in [&of_wiki, &blocks] {
+    let restore = async |at: &str, id: &str| {
         client
-            .post_empty(&format!("{at}/{}/restore", page.id))
+            .post(
+                &format!("{at}/cards/batch-restore"),
+                &json!({"cardIds": [id]}),
+            )
             .await
-            .check_not_found();
-    }
+    };
+    // A wiki has no cards to bring back; to a board the page in the wiki's trash is no
+    // deleted card of its own, as one of no identifier is not.
+    restore(&of_wiki, &page.id).await.check_not_found();
+    restore(&of_board, &page.id).await.check_not_found();
     client
         .get(&format!("{pages}/{}", page.id))
         .await

@@ -979,6 +979,48 @@ describe('the filter of cards', () => {
       expect(result).toBeDefined();
       expect(result.propertyId).toEqual(filterClauseIncludes.values[0]);
     });
+
+    test('looks into the groups of the filter: every part of an "and", the first of an "or"', () => {
+      const templates: PropertyTemplate[] = [
+        { id: 'status', name: 'Status', type: 'select', options: [] },
+        { id: 'phase', name: 'Phase', type: 'select', options: [] },
+        { id: 'kind', name: 'Kind', type: 'select', options: [] },
+      ];
+      const includes = (propertyId: string, value: string) =>
+        createFilterClause({ propertyId, condition: 'includes', values: [value] });
+      // A group the editor makes: the same condition, one level down.
+      const grouped = createFilterGroup({
+        operation: 'and',
+        filters: [createFilterGroup({ operation: 'or', filters: [includes('status', 'todo')] })],
+      });
+      expect(propertiesThatMeetFilterGroup(grouped, templates)).toEqual({ status: 'todo' });
+      const both = createFilterGroup({
+        operation: 'and',
+        filters: [
+          includes('status', 'todo'),
+          createFilterGroup({ operation: 'and', filters: [includes('phase', 'build')] }),
+        ],
+      });
+      expect(propertiesThatMeetFilterGroup(both, templates)).toEqual({
+        status: 'todo',
+        phase: 'build',
+      });
+      // Of an "or" the first part alone, a group or not: enough to meet it.
+      const either = createFilterGroup({
+        operation: 'or',
+        filters: [
+          createFilterGroup({
+            operation: 'and',
+            filters: [includes('status', 'todo'), includes('phase', 'build')],
+          }),
+          includes('kind', 'bug'),
+        ],
+      });
+      expect(propertiesThatMeetFilterGroup(either, templates)).toEqual({
+        status: 'todo',
+        phase: 'build',
+      });
+    });
   });
   describe('verify applyFilterGroup method', () => {
     test('should return array with card1', () => {

@@ -147,7 +147,7 @@ async fn attach_named(ts: &TestServer, board_id: &str, card_id: &str, file_id: &
     );
     let apart_id = apart["id"].as_str().expect("its id");
     ts.client
-        .delete(&format!("{TEST_WS}/boards/{board_id}/blocks/{apart_id}"))
+        .delete(&format!("{attachments}/{apart_id}"))
         .await
         .check_no_content();
 }
@@ -158,11 +158,11 @@ async fn assert_zero_cloned_refs_to_original(
     card_id: &str,
     orig_file_id: &str,
 ) {
-    let all_blocks: Vec<Value> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks?all=true"))
+    let all_blocks: Vec<Value> = crate::blocks::blocks_of(&ts.client, board_id)
         .await
-        .ok_json();
+        .iter()
+        .map(|block| serde_json::to_value(block).expect("a block as JSON"))
+        .collect();
     let refs_to_orig: Vec<&Value> = all_blocks
         .iter()
         .filter(|b| {

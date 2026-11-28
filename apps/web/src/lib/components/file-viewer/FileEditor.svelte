@@ -210,9 +210,9 @@
         sayApart && 'flex-wrap',
       ]}
     >
-      <Dialog.Title class="min-w-0 flex-1 truncate text-base font-semibold"
-        >{file.name}</Dialog.Title
-      >
+      <Dialog.Title class="min-w-0 flex-1 truncate text-base font-semibold">
+        {file.name}
+      </Dialog.Title>
       <Dialog.Description class="sr-only">{m.file_editor_description()}</Dialog.Description>
       <p
         class={[

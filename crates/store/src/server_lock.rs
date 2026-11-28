@@ -154,10 +154,7 @@ impl Store {
                         SCHEMA_KEY,
                         ")::int4::oid AND l.objsubid = 2",
                     ]);
-                    match scope.fetch_optional(sql).await? {
-                        Some(row) => row.text(0).map(Some),
-                        None => Ok(None),
-                    }
+                    scope.first(sql).await
                 })
                 .await;
         }

@@ -7,15 +7,17 @@ import { describe, expect, it } from 'vitest';
 import { containerActions, type SidebarMenus } from '$lib/features/shell/sidebar-actions.ts';
 import { menuNamed, namedAs, shownTitle } from '$lib/features/shell/shown-title.ts';
 import type { Container, ContainerKind } from '$lib/logic/wire.ts';
+import type { ReaderStars } from '$lib/components/favorite-toggle/reader-stars.ts';
 import type { Category } from '$lib/state/index.ts';
 
 import { setup } from '../../state/support.ts';
 
 const home = { id: 'home', type: 'system', name: '' } as Category;
 
-function menuOf(kind: ContainerKind): string[] {
+function menuOf(kind: ContainerKind, stars?: ReaderStars): string[] {
   const { workspace } = setup();
   const menus: SidebarMenus = {
+    stars,
     workspace,
     guest: false,
     containerId: undefined,
@@ -32,9 +34,28 @@ function menuOf(kind: ContainerKind): string[] {
 }
 
 describe('the menu of a container of the sidebar', () => {
+  it('stars a board, a wiki or a course first, once the stars are read, and never a diary', () => {
+    const starred = new Set<string>();
+    const stars: ReaderStars = {
+      scope: 'w/me',
+      has: (id) => starred.has(id),
+      read: () => Promise.resolve(),
+      toggle: () => Promise.resolve(),
+    };
+    expect(menuOf('board', stars)[0]).toBe('favorite: Add to favorites');
+    starred.add('c');
+    expect(menuOf('wiki', stars)[0]).toBe('favorite: Remove from favorites');
+    expect(menuOf('course', stars)[0]).toBe('favorite: Remove from favorites');
+    expect(menuOf('diary', stars).some((line) => line.startsWith('favorite'))).toBe(false);
+    // Not read yet, or kept nowhere (a public link): no line.
+    const unread: ReaderStars = { ...stars, has: () => undefined };
+    expect(menuOf('board', unread)[0]).toBe('export: As a .fvoci archive');
+  });
+
   it('of a board, a wiki and a diary has what each is, in its words', () => {
     expect(menuOf('board').map((line) => line.split(':')[0])).toEqual([
       'export',
+      'export-markdown',
       'duplicate',
       'template-from-board',
       'hide',
@@ -42,17 +63,20 @@ describe('the menu of a container of the sidebar', () => {
     ]);
     expect(menuOf('wiki').map((line) => line.split(':')[0])).toEqual([
       'export',
+      'export-markdown',
       'duplicate',
       'hide',
       'delete',
     ]);
     expect(menuOf('diary')).toEqual([
-      'export: Export the diary',
+      'export: As a .fvoci archive',
+      'export-markdown: As Markdown (.zip)',
       'hide: Hide diary',
       'delete: Delete diary',
     ]);
     expect(menuOf('course')).toEqual([
-      'export: Export the course',
+      'export: As a .fvoci archive',
+      'export-markdown: As Markdown (.zip)',
       'duplicate: Duplicate course',
       'hide: Hide course',
       'delete: Delete course',

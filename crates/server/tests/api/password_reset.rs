@@ -284,7 +284,7 @@ async fn reset_links(store: &fvoci_store::Store) -> Vec<(bool, String, String)> 
         .filter(|record| record.action == fvoci_model::AuditAction::PasswordResetLinkMade)
         .map(|record| {
             let operator = record.actor == fvoci_model::AuditRecordActor::ServerOperator;
-            let subject = record.subject.map(|subject| subject.id).unwrap_or_default();
+            let subject = record.subject.map_or_default(|subject| subject.id);
             (operator, record.target_id, subject)
         })
         .collect()

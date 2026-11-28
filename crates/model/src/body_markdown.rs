@@ -32,4 +32,12 @@ pub enum ComplexBlockReason {
     /// A heading holds a line break: a heading of Markdown is one line, and is written
     /// without its breaks.
     HeadingWithBreak,
+    /// The summary of a toggle has code, a formula or the target of a link with a `<`,
+    /// a `>` or an `&` (or a target with a space): the summary is in a block of HTML,
+    /// where those are written as character references, which code and a formula do not
+    /// read back.
+    MarkupInSummary,
+    /// A board view: Markdown has none, and it is written as a link to its view, named
+    /// by its board and its own title where the reader sees them.
+    BoardView,
 }

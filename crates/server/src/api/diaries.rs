@@ -25,10 +25,11 @@ use super::contract::params::{
 use super::contract::tag;
 use super::query::{PagingQuery, QueryParams};
 use super::workspace::{InDiary, InWorkspace};
-use super::{
-    ApiResult, created, decode_object, json_response, no_content, require_container_permission,
+use super::{ApiResult, created, decode_object, json_response, no_content};
+use crate::app::{
+    App, CREATE_ENTRY_DENIED, ChangeNotification, DELETE_ENTRY_DENIED, ENTRY_TRASH_DENIED,
+    EntryAnswer, PATCH_ENTRY_DENIED, Reached,
 };
-use crate::app::{App, ChangeNotification, EntryAnswer};
 use crate::auth::now_millis;
 use crate::error::AppError;
 use crate::permissions::ContainerPermission;
@@ -158,8 +159,23 @@ pub(super) async fn entry_with_permission(
     permission: ContainerPermission,
     denial: &str,
 ) -> Result<Block, AppError> {
-    require_container_permission(&ws.app, &ws.caller.user_id, diary_id, permission, denial).await?;
-    ws.app.diary_entry_of(diary_id, entry_id).await
+    let (_, entry) = entry_reached(ws, diary_id, entry_id, permission, denial).await?;
+    Ok(entry)
+}
+
+/// The diary as the caller reached it and its entry, as [`entry_with_permission`] finds
+/// them: for a route that writes the entry, which the diary's [`Reached`] is asked for.
+pub(super) async fn entry_reached(
+    ws: &InWorkspace,
+    diary_id: &str,
+    entry_id: &str,
+    permission: ContainerPermission,
+    denial: &str,
+) -> Result<(Reached, Block), AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, diary_id).await?;
+    on.require(permission, denial)?;
+    let entry = ws.app.diary_entry_of(diary_id, entry_id).await?;
+    Ok((on, entry))
 }
 
 /// The day a query names, which it must.
@@ -195,14 +211,11 @@ async fn handle_get_diary_days(
     Path((_, diary_id)): Path<(String, String)>,
     QueryParams(query): QueryParams<DiaryDaysQuery>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &diary_id,
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    on.require(
         ContainerPermission::View,
         "access denied to fetch the days of the diary",
-    )
-    .await?;
+    )?;
     let (from, to) = (day_param(&query.from, "from")?, day_param(&query.to, "to")?);
     if !from.lists_to(to) {
         return Err(AppError::bad_request(format_args!(
@@ -235,14 +248,11 @@ async fn handle_get_diary_runs(
     InDiary(ws): InDiary,
     Path((_, diary_id)): Path<(String, String)>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &diary_id,
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    on.require(
         ContainerPermission::View,
         "access denied to fetch the days of the diary",
-    )
-    .await?;
+    )?;
     let runs = ws.app.diary_runs(&diary_id).await?;
     Ok(json_response(&runs))
 }
@@ -265,14 +275,8 @@ async fn handle_get_diary_entries_on(
     InDiary(ws): InDiary,
     Path((_, diary_id, month_day)): Path<(String, String, String)>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &diary_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    on.require(ContainerPermission::View, READ_DENIED)?;
     let at: MonthDay = month_day
         .parse()
         .map_err(|error| AppError::bad_request(error).with_parameter("monthDay"))?;
@@ -320,23 +324,15 @@ async fn handle_create_diary_entry(
     Path((_, diary_id)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &diary_id,
-        ContainerPermission::ManageCards,
-        "access denied to create entry",
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    // Asked before the body is read, as every route asks.
+    on.require(ContainerPermission::ManageCards, CREATE_ENTRY_DENIED)?;
     let new: NewDiaryEntry = decode_object(&body)?;
     let today = DiaryDate::of_utc_millis(now_millis())
         .ok_or_else(|| AppError::internal("the clock of the server tells no day"))?;
     let date = new.check_request(today)?;
-    let (entry, answer) = ws
-        .app
-        .create_diary_entry(&diary_id, date, new, user_id)
-        .await?;
+    let (entry, answer) = ws.app.create_diary_entry(&on, date, new).await?;
+    let user_id = on.user_id();
     tracing::debug!(diary_id, entry_id = %entry.id, user_id, ?answer, "CreateDiaryEntry");
     Ok(match answer {
         EntryAnswer::Made => created(&entry),
@@ -398,38 +394,20 @@ async fn handle_patch_diary_entry(
     Path((_, diary_id, entry_id)): Path<(String, String, String)>,
     body: Bytes,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let entry = entry_with_permission(
-        &ws,
-        &diary_id,
-        &entry_id,
-        ContainerPermission::ManageCards,
-        "access denied to patch entry",
-    )
-    .await?;
+    let writing = ContainerPermission::ManageCards;
+    let denial = PATCH_ENTRY_DENIED;
+    let (on, entry) = entry_reached(&ws, &diary_id, &entry_id, writing, denial).await?;
     let patch = decode_diary_entry_patch(&body)?;
-    patch.check_request()?;
-    if let Some(body) = patch.body.new_body() {
-        ws.app.check_body_files(&diary_id, Some(body)).await?;
-    } else if let Some(extra) = patch.append_body.as_ref()
-        && !ws.app.has_body_files(&diary_id, Some(extra)).await?
-    {
-        return Err(
-            AppError::bad_request(fvoci_model::BlockError::BodyFileNotOfContainer)
-                .with_field("appendBody"),
-        );
-    }
     let patched = ws
         .app
-        .patch_diary_entry(
-            &diary_id,
-            &entry.id,
-            &patch,
-            user_id,
-            ChangeNotification::Send,
-        )
+        .patch_diary_entry(&on, &entry, &patch, ChangeNotification::Send)
         .await?;
-    tracing::debug!(diary_id, entry_id, user_id, "PatchDiaryEntry");
+    tracing::debug!(
+        diary_id,
+        entry_id,
+        user_id = on.user_id(),
+        "PatchDiaryEntry"
+    );
     Ok(json_response(&DiaryEntry::from(patched)))
 }
 
@@ -452,19 +430,18 @@ async fn handle_delete_diary_entry(
     InDiary(ws): InDiary,
     Path((_, diary_id, entry_id)): Path<(String, String, String)>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let entry = entry_with_permission(
-        &ws,
-        &diary_id,
-        &entry_id,
-        ContainerPermission::ManageCards,
-        "access denied to delete entry",
-    )
-    .await?;
+    let writing = ContainerPermission::ManageCards;
+    let denial = DELETE_ENTRY_DENIED;
+    let (on, entry) = entry_reached(&ws, &diary_id, &entry_id, writing, denial).await?;
     ws.app
-        .delete_diary_entry(&diary_id, &entry.id, user_id, ChangeNotification::Send)
+        .delete_diary_entry(&on, &entry, ChangeNotification::Send)
         .await?;
-    tracing::debug!(diary_id, entry_id, user_id, "DeleteDiaryEntry");
+    tracing::debug!(
+        diary_id,
+        entry_id,
+        user_id = on.user_id(),
+        "DeleteDiaryEntry"
+    );
     Ok(no_content())
 }
 
@@ -486,17 +463,12 @@ async fn handle_get_deleted_diary_entries(
     Path((_, diary_id)): Path<(String, String)>,
     QueryParams(query): QueryParams<PagingQuery>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &diary_id,
-        ContainerPermission::ManageCards,
-        "access denied to the trash of the diary",
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    // Asked before the query is read, as every route asks.
+    on.require(ContainerPermission::ManageCards, ENTRY_TRASH_DENIED)?;
     let page = query.into_list_page()?;
     Ok(json_response(
-        &ws.app.deleted_diary_entries(&diary_id, page).await?,
+        &ws.app.deleted_diary_entries(&on, page).await?,
     ))
 }
 
@@ -519,19 +491,13 @@ async fn handle_restore_diary_entry(
     InDiary(ws): InDiary,
     Path((_, diary_id, entry_id)): Path<(String, String, String)>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &diary_id,
-        ContainerPermission::ManageCards,
-        "access denied to undelete entry",
-    )
-    .await?;
-    let entry = ws
-        .app
-        .undelete_diary_entry(&diary_id, &entry_id, user_id)
-        .await?;
-    tracing::debug!(diary_id, entry_id, user_id, "UndeleteDiaryEntry");
+    let on = ws.app.reach(&ws.caller.user_id, &diary_id).await?;
+    let entry = ws.app.undelete_diary_entry(&on, &entry_id).await?;
+    tracing::debug!(
+        diary_id,
+        entry_id,
+        user_id = on.user_id(),
+        "UndeleteDiaryEntry"
+    );
     Ok(json_response(&entry))
 }

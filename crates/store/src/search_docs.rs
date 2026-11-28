@@ -8,7 +8,7 @@
 use fvoci_model::{ContainerKind, SearchKind};
 
 use crate::Store;
-use crate::db::{Dialect, Id, Row, Scope, Sql};
+use crate::db::{Dialect, FromRow, Id, Row, Scope, Sql};
 use crate::error::StoreError;
 
 /// Bounded parameters however many identifiers are asked for.
@@ -104,7 +104,7 @@ impl Store {
                     .bind_list(batch.iter().map(|id| Id(id)))
                     .push(") ORDER BY b.id");
                 for row in scope.fetch_all(sql).await? {
-                    documents.push(document_from_row(&row)?);
+                    documents.push(SearchDocument::from_row(&row)?);
                 }
             }
             Ok(documents)
@@ -132,38 +132,35 @@ impl Store {
                 sql.push_bind(" AND b.id > ", Id(after));
             }
             sql.push_bind(" ORDER BY b.id LIMIT ", limit);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(document_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
 }
 
-fn document_from_row(row: &Row) -> Result<SearchDocument, StoreError> {
-    let block_type = crate::blocks::block_type_column(row, 6, "type")?;
-    let kind = SearchKind::of_block(&block_type).ok_or_else(|| StoreError::Corrupt {
-        column: "type",
-        reason: format!("a document of a block of type {block_type}"),
-    })?;
-    let number = if kind == SearchKind::Card {
-        crate::card_numbers::number_from_row(row, 8)?
-    } else {
-        None
-    };
-    Ok(SearchDocument {
-        id: row.id(0)?,
-        org_id: row.id(1)?,
-        workspace_id: row.id(2)?,
-        container_id: row.id(3)?,
-        container_kind: crate::container_kinds::kind_from_text(&row.text(7)?)?,
-        container_title: row.text(9)?,
-        kind,
-        title: row.text(4)?,
-        text: row.text(5)?,
-        number,
-    })
+impl FromRow for SearchDocument {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let block_type = crate::blocks::block_type_column(row, 6, "type")?;
+        let kind = SearchKind::of_block(&block_type).ok_or_else(|| StoreError::Corrupt {
+            column: "type",
+            reason: format!("a document of a block of type {block_type}"),
+        })?;
+        let number = if kind == SearchKind::Card {
+            crate::card_numbers::number_from_row(row, 8)?
+        } else {
+            None
+        };
+        Ok(SearchDocument {
+            id: row.id(0)?,
+            org_id: row.id(1)?,
+            workspace_id: row.id(2)?,
+            container_id: row.id(3)?,
+            container_kind: crate::container_kinds::kind_from_text(&row.text(7)?)?,
+            container_title: row.text(9)?,
+            kind,
+            title: row.text(4)?,
+            text: row.text(5)?,
+            number,
+        })
+    }
 }

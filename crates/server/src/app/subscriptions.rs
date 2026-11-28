@@ -44,7 +44,7 @@ impl App {
         user_id: &str,
     ) -> Result<Subscription, AppError> {
         // One to a block the user no longer reads is ended all the same.
-        if let Some(workspace_id) = self.workspace.as_deref()
+        if let Some(workspace_id) = self.reach.workspace.as_deref()
             && !self
                 .store()
                 .get_subscriptions_in_workspace(user_id, workspace_id)
@@ -72,7 +72,7 @@ impl App {
     pub async fn subscriptions(&self, user_id: &str) -> Result<Vec<Subscription>, AppError> {
         let watched = self
             .store()
-            .get_watched_blocks(user_id, self.workspace.as_deref())
+            .get_watched_blocks(user_id, self.reach.workspace.as_deref())
             .await?;
         let mut reads: HashMap<String, bool> = HashMap::new();
         let mut kept = Vec::with_capacity(watched.len());

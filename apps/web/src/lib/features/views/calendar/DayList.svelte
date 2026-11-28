@@ -128,9 +128,9 @@
           }}
         >
           <PlusIcon class="size-4 shrink-0" aria-hidden="true" />
-          <span class="truncate"
-            >{m.calendar_new_card_on({ day: displayDay(date, placed.locale) })}</span
-          >
+          <span class="truncate">
+            {m.calendar_new_card_on({ day: displayDay(date, placed.locale) })}
+          </span>
         </button>
       </li>
     {/if}

@@ -150,7 +150,7 @@ async fn insert(
     written_by: &str,
     written_at: i64,
 ) -> Result<(), StoreError> {
-    let files: Vec<&str> = block.body.as_ref().map(Body::file_ids).unwrap_or_default();
+    let files: Vec<&str> = block.body.as_ref().map_or_default(Body::file_ids);
     let files = to_json_text(&files)?;
     let mut sql = scope.sql(
         "INSERT INTO comment_versions (block_id, version, body, files, written_by, written_at) \

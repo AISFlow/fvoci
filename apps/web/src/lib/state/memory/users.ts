@@ -29,6 +29,15 @@ export function userFound(user: User, wanted: string): boolean {
   );
 }
 
+/** The first ten of `users` a search for `query` finds (`userFound`), the oldest accounts first. */
+export function usersMatching(users: readonly User[], query: string): User[] {
+  const wanted = query.trim().toLowerCase();
+  return users
+    .filter((user) => userFound(user, wanted))
+    .sort((first, second) => first.createdAt - second.createdAt)
+    .slice(0, 10);
+}
+
 function listed(user: User): User {
   const { isAdmin: _isAdmin, ...rest } = copy(user);
   return rest;
@@ -57,6 +66,7 @@ export function eraseUser(world: World, userId: string): void {
   world.workspaceMembers.delete(userId);
   world.settings.delete(userId);
   world.examScores.delete(userId);
+  forgetReactionsOf(world, userId);
   for (const [boardId, members] of world.members) {
     const next = members.filter((member) => member.userId !== userId);
     world.members.set(boardId, next);
@@ -65,6 +75,22 @@ export function eraseUser(world: World, userId: string): void {
     }
   }
   world.tellUsers([...world.workspaceMembers], { kind: 'user', userId });
+}
+
+/**
+ * Takes the reactions of an account erased off every block, as the server's
+ * rows go with it: those of the blocks in a trash too, which are kept under
+ * the block. Nobody is told, as the server tells nobody.
+ */
+function forgetReactionsOf(world: World, userId: string): void {
+  for (const [blockId, reactions] of world.reactions) {
+    if (!reactions.some((reaction) => reaction.userIds.includes(userId))) continue;
+    const kept = reactions
+      .map((reaction) => ({ ...reaction, userIds: reaction.userIds.filter((id) => id !== userId) }))
+      .filter((reaction) => reaction.userIds.length > 0);
+    if (kept.length === 0) world.reactions.delete(blockId);
+    else world.reactions.set(blockId, kept);
+  }
 }
 
 /** The people who work in a workspace (`workersOf`), but who are gone. */

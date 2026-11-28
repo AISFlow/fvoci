@@ -5,7 +5,7 @@
 import type { BoardView, Card, Container } from '../logic/wire.ts';
 
 import type { CardDraft, CardSummary, ViewDraft } from './backend.ts';
-import { deleteBlockForUndo, performBoardAction } from './board-sync.ts';
+import { deleteCardForUndo, deleteViewForUndo, performBoardAction } from './board-sync.ts';
 import type { BoardWrites, BlockWrites } from './board-writes.ts';
 import type { BoardStore } from './board.svelte.ts';
 import {
@@ -16,6 +16,7 @@ import {
   isEmptyContainerPatch,
   viewPatches,
 } from './patches.ts';
+import { nextCardNotices, nextMadeBy, takeBackNext, type MadeNext } from './next-cards.svelte.ts';
 import { authorIds } from './user-names.ts';
 import { reread, take } from './write.ts';
 
@@ -32,17 +33,29 @@ export async function changeBoardCard(
   const [forward, backward] = cardPatches(change(current), current);
   if (isEmptyCardPatch(forward)) return;
   let said = false;
-  await performBoardAction(
+  /** The next card the last redo made (completing a card that repeats): its undo takes it back. */
+  let made: MadeNext | undefined;
+  const performing = performBoardAction(
     store,
     async () => {
       await cardWrites.write(cardId, forward, backward, said);
+      made = nextMadeBy(current, store.card(cardId));
       said = true;
     },
-    () => cardWrites.write(cardId, backward, forward, true),
+    async () => {
+      // Its next card goes first: the card repeats again only once it is gone.
+      const next = made && (await takeBackNext(store, made.nextId)) ? made : undefined;
+      const repeat = next ? { recurrence: next.recurrence } : {};
+      await cardWrites.write(cardId, { ...backward, ...repeat }, forward, true);
+    },
     description,
     groupId,
     cardWrites.keep(cardId, backward),
   );
+  // The step is in place as soon as it is performed.
+  const checkpoint = store.workspace.undo.currentCheckpoint;
+  await performing;
+  if (made) void nextCardNotices(store.workspace).say(store, [made], checkpoint);
 }
 
 export function createBoardCard(
@@ -64,7 +77,7 @@ export function createBoardCard(
       return card;
     },
     async (card) => {
-      await deleteBlockForUndo(store, card.id);
+      await deleteCardForUndo(store, card.id);
       store.cards = store.cards.filter((existing) => existing.id !== card.id);
     },
     'createCard',
@@ -88,7 +101,7 @@ export async function duplicateBoardCard(
       return card;
     },
     async (card) => {
-      await deleteBlockForUndo(store, card.id);
+      await deleteCardForUndo(store, card.id);
       store.cards = store.cards.filter((existing) => existing.id !== card.id);
     },
     'duplicateCard',
@@ -143,7 +156,7 @@ export function createBoardView(
       return view;
     },
     async (view) => {
-      await deleteBlockForUndo(store, view.id);
+      await deleteViewForUndo(store, view.id);
       store.views = store.views.filter((existing) => existing.id !== view.id);
     },
     'createView',
@@ -157,11 +170,11 @@ export async function deleteBoardView(store: BoardStore, viewId: string): Promis
     store,
     async () => {
       store.deleting(viewId);
-      await store.workspace.backend.deleteBlock(store.boardId, viewId);
+      await store.workspace.backend.deleteView(store.boardId, viewId);
       store.views = store.views.filter((view) => view.id !== viewId);
     },
     async () => {
-      await store.workspace.backend.restoreBlock(store.boardId, viewId);
+      await store.workspace.backend.restoreView(store.boardId, viewId);
       store.views = take(store.views, gone);
     },
     'deleteView',

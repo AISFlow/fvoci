@@ -176,6 +176,7 @@ pub(crate) fn element_node<T: ReadTxn>(
                 Fallback::None => None,
                 Fallback::Integer(number) => Some(Value::from(number)),
                 Fallback::Boolean(truth) => Some(Value::from(truth)),
+                Fallback::Text(text) => Some(Value::from(text)),
             },
             Some(Out::Any(value)) => stored_value(&value),
             // A shared type as the value of an attribute: nothing an attribute may be.
@@ -202,6 +203,7 @@ fn is_left_out(attribute: Attribute, value: &Value) -> bool {
             Fallback::None => false,
             Fallback::Integer(number) => value.as_i64() == Some(number),
             Fallback::Boolean(truth) => value.as_bool() == Some(truth),
+            Fallback::Text(text) => value.as_str() == Some(text),
         }
 }
 

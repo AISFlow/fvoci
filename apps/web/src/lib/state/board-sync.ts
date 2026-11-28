@@ -2,7 +2,7 @@
  * Live change application, background re-reading, and undo-wrapped mutations
  * for `BoardStore` (`board.svelte.ts`), extracted to keep `BoardStore` concise.
  */
-import { descendantsOf } from '../logic/card-hierarchy.ts';
+import { ancestorsOf, descendantsOf } from '../logic/card-hierarchy.ts';
 import type { BlockPatch, BoardView, Container } from '../logic/wire.ts';
 
 import {
@@ -86,6 +86,9 @@ export function applyBoardChange(internals: BoardSyncInternals, change: Change):
           store.openCard?.receive(block);
         }
       }
+      break;
+    case 'reactions':
+      store.openCard?.receiveReactions(change.blockId, change.reactions);
       break;
     case 'blocksDeleted': {
       const gone = new Set(change.blockIds);
@@ -188,24 +191,48 @@ export async function performBoardAction<T>(
   }
 }
 
-export async function deleteBlockForUndo(store: BoardStore, blockId: string): Promise<void> {
-  store.deleting(blockId);
+/** Takes back a card the user made, with what is below it; one gone already is gone. */
+export async function deleteCardForUndo(store: BoardStore, cardId: string): Promise<void> {
+  store.deleting(cardId);
+  await goneAlready(store.workspace.backend.batchDeleteCards(store.boardId, [cardId]));
+}
+
+/** Takes back a view the user made; one gone already is gone. */
+export async function deleteViewForUndo(store: BoardStore, viewId: string): Promise<void> {
+  store.deleting(viewId);
+  await goneAlready(store.workspace.backend.deleteView(store.boardId, viewId));
+}
+
+/** Waits for a deletion, of which a 404 says that it is done already. */
+async function goneAlready(deleting: Promise<void>): Promise<void> {
   try {
-    await store.workspace.backend.deleteBlock(store.boardId, blockId);
+    await deleting;
   } catch (error) {
     if (!isBackendError(error) || error.status !== 404) throw error;
   }
 }
 
+/**
+ * Deletes cards, with what is under them, as one step of the history. A card
+ * under another one of them goes with that one and is not sent itself: so
+ * the server keeps one family, which undo brings back as it was, whichever
+ * order the cards came in (one sent first would come back without its parent,
+ * at the top). Which cards are under which is read as the deletion is made,
+ * once the board takes writes (`writeJoined`), and again when it is redone.
+ */
 export async function deleteBoardCards(
   store: BoardStore,
   cardIds: readonly string[],
 ): Promise<void> {
-  const uniqueIds = [...new Set(cardIds)];
-  if (uniqueIds.length === 0) return;
+  const chosen = new Set(cardIds);
+  if (chosen.size === 0) return;
   await performBoardAction(
     store,
     async () => {
+      const { byId } = store.hierarchy;
+      const uniqueIds = [...chosen].filter(
+        (cardId) => !ancestorsOf(cardId, byId).some((above) => chosen.has(above.id)),
+      );
       const gone = new Set<string>();
       for (const cardId of uniqueIds) {
         gone.add(cardId);

@@ -97,19 +97,15 @@ async fn the_largest_body_is_written_copied_and_restored_and_a_byte_more_is_refu
     assert!(stored(&made.id).await.as_ref() == Some(&most), "restored");
 
     // A copy of the card, and copies of its board, as a board and as a template.
-    let copies: Vec<Value> = th
+    let copy: Value = th
         .client
         .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
+            "{TEST_WS}/boards/{}/cards/{}/duplicate",
             board.id, made.id
         ))
         .await
         .created_json();
-    let copy = copies
-        .iter()
-        .find(|block| block["type"] == json!("card"))
-        .and_then(|block| block["id"].as_str())
-        .expect("the copy of the card");
+    let copy = copy["id"].as_str().expect("the copy of the card");
     assert!(stored(copy).await.as_ref() == Some(&most), "copied");
     for template in [false, true] {
         let of_the_board: ContainersAndBlocks = duplicate_board(
@@ -181,10 +177,10 @@ async fn the_deepest_body_is_read_back_from_every_place_it_is_written_in() {
     assert_eq!(stored(&made.id).await.as_ref(), Some(&deep));
 
     // To the trash and back, which stores the block as one value.
-    let block = format!("{TEST_WS}/boards/{}/blocks/{}", board.id, made.id);
-    th.client.delete(&block).await.check_no_content();
-    th.client
-        .post_empty(&format!("{block}/restore"))
+    crate::blocks::trash_card(&th.client, &board.id, &made.id)
+        .await
+        .check_no_content();
+    crate::blocks::restore_card(&th.client, &board.id, &made.id)
         .await
         .check_ok();
     assert_eq!(stored(&made.id).await.as_ref(), Some(&deep));

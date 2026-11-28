@@ -25,6 +25,8 @@ struct Hidden {
     /// text that is no identifier.
     board: [String; 3],
     card: [String; 3],
+    /// A card of the board in its trash.
+    trashed_card: [String; 3],
     file: [String; 3],
     category: [String; 3],
     owner: [String; 3],
@@ -61,12 +63,22 @@ impl Hidden {
         let mut created =
             crate::blocks::insert(&th.client, &board.id, &[block(BlockType::Card, "")]).await;
         let card = created.pop().expect("the card is created");
-        let mut created: Vec<Block> = th
-            .client
-            .insert_blocks(&board.id, &[block(BlockType::Attachment, &card.id)])
+        crate::blocks::insert(
+            &th.client,
+            &board.id,
+            &[block(BlockType::Attachment, &card.id)],
+        )
+        .await;
+        let mut created =
+            crate::blocks::insert(&th.client, &board.id, &[block(BlockType::Card, "")]).await;
+        let trashed_card = created.pop().expect("the card is created");
+        th.client
+            .post(
+                &format!("{TEST_WS}/boards/{}/cards/batch-delete", board.id),
+                &json!({"cardIds": [trashed_card.id]}),
+            )
             .await
-            .created_json();
-        created.pop().expect("the text is created");
+            .check_no_content();
 
         let part = Part::bytes(b"hidden".to_vec()).file_name("hidden.txt");
         let request = th
@@ -141,15 +153,12 @@ impl Hidden {
         )
         .await;
         let own_card = created.pop().expect("the card is created");
-        let mut created: Vec<Block> = th
-            .client2
-            .insert_blocks(
-                &own_board.id,
-                &[own_block(BlockType::Attachment, &own_card.id)],
-            )
-            .await
-            .created_json();
-        created.pop().expect("the text is created");
+        crate::blocks::insert(
+            &th.client2,
+            &own_board.id,
+            &[own_block(BlockType::Attachment, &own_card.id)],
+        )
+        .await;
         th.client2
             .get(&format!("{TEST_WS}/categories"))
             .await
@@ -169,6 +178,7 @@ impl Hidden {
             own_category: own_category.id,
             board: [board.id, new_id(), "no-board".to_owned()],
             card: [card.id, new_id(), "no-card".to_owned()],
+            trashed_card: [trashed_card.id, new_id(), "no-card".to_owned()],
             file: [
                 file,
                 format!("{}.txt", fvoci_server::auth::secret::new_secret()),
@@ -215,10 +225,11 @@ fn filed_path(category: &str, board: &str, rest: &str) -> String {
 }
 
 /// Every route that names something of the hidden owner's: [`board_cases`], and what is
-/// on the board or of the owner ([`content_cases`]).
+/// on the board or of the owner ([`content_cases`], [`view_and_attachment_cases`]).
 fn cases() -> Vec<Case> {
     let mut cases = board_cases();
     cases.extend(content_cases());
+    cases.extend(view_and_attachment_cases());
     cases
 }
 
@@ -315,25 +326,25 @@ fn board_cases() -> Vec<Case> {
     ]
 }
 
-/// The routes of the board's blocks, cards and files, the combined requests, the
-/// owner's subscriptions and category.
+/// The routes of the board's views, cards, comments and files, the owner's subscriptions
+/// and category.
 #[expect(
     clippy::too_many_lines,
     reason = "a table with one entry per route, not logic"
 )]
 fn content_cases() -> Vec<Case> {
     vec![
-        // Its blocks.
+        // Its views, the comments of its card, and its cards in batches.
         case(
-            Method::GET,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks", h.board[i]),
-            no_body,
+            Method::POST,
+            |h, i| format!("{TEST_WS}/boards/{}/views", h.board[i]),
+            |_, _| json!({"title": "x", "viewType": "board"}),
         ),
         case(
             Method::GET,
             |h, i| {
                 format!(
-                    "{TEST_WS}/boards/{}/blocks?blockId={}",
+                    "{TEST_WS}/boards/{}/cards/{}/comments",
                     h.board[i], h.card[i]
                 )
             },
@@ -341,53 +352,51 @@ fn content_cases() -> Vec<Case> {
         ),
         case(
             Method::POST,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks", h.board[i]),
             |h, i| {
-                json!([{
-                    "containerId": h.board[i], "type": "view",
-                }])
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/comments",
+                    h.board[i], h.card[i]
+                )
             },
+            |_, _| json!({"body": {"type": "doc", "content": [{"type": "paragraph"}]}}),
         ),
+        // A reaction to its card, added and taken off.
         case(
-            Method::PATCH,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks", h.board[i]),
-            |h, i| json!({"blockIds": [h.card[i]], "blockPatches": [{"title": "x"}]}),
-        ),
-        case(
-            Method::PATCH,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks/{}", h.board[i], h.card[i]),
-            title,
+            Method::PUT,
+            |h, i| reaction_to(&h.board[i], &h.card[i]),
+            no_body,
         ),
         case(
             Method::DELETE,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks/{}", h.board[i], h.card[i]),
-            no_body,
-        ),
-        case(
-            Method::POST,
-            |h, i| {
-                format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/restore",
-                    h.board[i], h.card[i]
-                )
-            },
-            no_body,
-        ),
-        case(
-            Method::POST,
-            |h, i| {
-                format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/duplicate",
-                    h.board[i], h.card[i]
-                )
-            },
+            |h, i| reaction_to(&h.board[i], &h.card[i]),
             no_body,
         ),
         case(
             Method::GET,
             |h, i| {
+                let card = &h.card[i];
                 format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/versions",
+                    "{TEST_WS}/boards/{}/cards/{card}/comments/{card}/versions",
+                    h.board[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, i| format!("{TEST_WS}/boards/{}/cards/batch-delete", h.board[i]),
+            |h, i| json!({"cardIds": [h.card[i]]}),
+        ),
+        case(
+            Method::POST,
+            |h, i| format!("{TEST_WS}/boards/{}/cards/batch-restore", h.board[i]),
+            |h, i| json!({"cardIds": [h.card[i]]}),
+        ),
+        case(
+            Method::POST,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/duplicate",
                     h.board[i], h.card[i]
                 )
             },
@@ -419,6 +428,11 @@ fn content_cases() -> Vec<Case> {
             |h, i| format!("{TEST_WS}/cards/{}", h.card[i]),
             title,
         ),
+        case(
+            Method::GET,
+            |h, i| format!("{TEST_WS}/cards/{}/activity", h.card[i]),
+            no_body,
+        ),
         // Its files.
         case(
             Method::GET,
@@ -434,17 +448,6 @@ fn content_cases() -> Vec<Case> {
                 )
             },
             no_body,
-        ),
-        // Both kinds of combined request.
-        case(
-            Method::PATCH,
-            |_, _| format!("{TEST_WS}/containers-and-blocks"),
-            |h, i| json!({"containerIds": [h.board[i]], "containerPatches": [{"title": "x"}]}),
-        ),
-        case(
-            Method::DELETE,
-            |_, _| format!("{TEST_WS}/containers-and-blocks"),
-            |h, i| json!({"containers": [h.board[i]]}),
         ),
         // A subscription to one of its blocks, and the owner's subscriptions.
         case(
@@ -465,6 +468,18 @@ fn content_cases() -> Vec<Case> {
         case(
             Method::DELETE,
             |h, i| format!("{TEST_WS}/subscriptions/{}/{}", h.card[i], h.owner[i]),
+            no_body,
+        ),
+        // A star put on the board and on its card. (Taking one off is 204 whatever it
+        // was on, there or not: `favorites.rs`.)
+        case(
+            Method::PUT,
+            |h, i| format!("{TEST_WS}/favorites/{}", h.board[i]),
+            no_body,
+        ),
+        case(
+            Method::PUT,
+            |h, i| format!("{TEST_WS}/favorites/{}", h.card[i]),
             no_body,
         ),
         // The owner's category.
@@ -496,55 +511,36 @@ fn content_cases() -> Vec<Case> {
     ]
 }
 
-/// Requests that name something of the asker's own together with something hidden: the
-/// places where one part of a request passes every check and the other part must not
-/// be given away by the answer.
-#[expect(
-    clippy::too_many_lines,
-    reason = "a table with one entry per route, not logic"
-)]
-fn mixed_cases() -> Vec<Case> {
-    let case = |method: Method,
-                path: fn(&Hidden, usize) -> String,
-                body: fn(&Hidden, usize) -> Value| Case { method, path, body };
+/// The routes of the board's views, of the attachments of its card, and of a batch of
+/// its cards; the card stands in for a view and an attachment.
+fn view_and_attachment_cases() -> Vec<Case> {
     vec![
-        // A hidden block through the asker's own board.
         case(
             Method::GET,
-            |h, i| {
-                format!(
-                    "{TEST_WS}/boards/{}/blocks?blockId={}",
-                    h.own_board, h.card[i]
-                )
-            },
+            |h, i| format!("{TEST_WS}/boards/{}/views", h.board[i]),
+            no_body,
+        ),
+        case(
+            Method::GET,
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.board[i], h.card[i]),
             no_body,
         ),
         case(
             Method::PATCH,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks/{}", h.own_board, h.card[i]),
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.board[i], h.card[i]),
             title,
         ),
         case(
             Method::DELETE,
-            |h, i| format!("{TEST_WS}/boards/{}/blocks/{}", h.own_board, h.card[i]),
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.board[i], h.card[i]),
             no_body,
         ),
         case(
             Method::POST,
             |h, i| {
                 format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/restore",
-                    h.own_board, h.card[i]
-                )
-            },
-            no_body,
-        ),
-        case(
-            Method::POST,
-            |h, i| {
-                format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/duplicate",
-                    h.own_board, h.card[i]
+                    "{TEST_WS}/boards/{}/views/{}/restore",
+                    h.board[i], h.card[i]
                 )
             },
             no_body,
@@ -553,64 +549,130 @@ fn mixed_cases() -> Vec<Case> {
             Method::GET,
             |h, i| {
                 format!(
-                    "{TEST_WS}/boards/{}/blocks/{}/versions",
+                    "{TEST_WS}/boards/{}/cards/{}/attachments",
+                    h.board[i], h.card[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::DELETE,
+            |h, i| {
+                let card = &h.card[i];
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{card}/attachments/{card}",
+                    h.board[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, i| {
+                let card = &h.card[i];
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{card}/attachments/{card}/restore",
+                    h.board[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, i| format!("{TEST_WS}/boards/{}/cards/batch-patch", h.board[i]),
+            |h, i| json!({"cardIds": [h.card[i]], "updatedProperties": {"note": "x"}}),
+        ),
+    ]
+}
+
+/// The path of the reaction 👍 to the block of the container.
+fn reaction_to(container: &str, block: &str) -> String {
+    format!("{TEST_WS}/containers/{container}/blocks/{block}/reactions/%F0%9F%91%8D")
+}
+
+/// Requests that name something of the asker's own together with something hidden: the
+/// places where one part of a request passes every check and the other part must not
+/// be given away by the answer.
+fn mixed_cases() -> Vec<Case> {
+    let mut cases = mixed_card_cases();
+    cases.extend(mixed_place_cases());
+    cases
+}
+
+/// Of [`mixed_cases`], a hidden card, file or trashed card through the asker's own
+/// board.
+fn mixed_card_cases() -> Vec<Case> {
+    vec![
+        // A hidden card through the asker's own board, alone and with the asker's own.
+        case(
+            Method::GET,
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.own_board, h.card[i]),
+            no_body,
+        ),
+        case(
+            Method::GET,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/comments",
                     h.own_board, h.card[i]
                 )
             },
             no_body,
         ),
         case(
-            Method::PATCH,
-            |h, _| format!("{TEST_WS}/boards/{}/blocks", h.own_board),
-            |h, i| {
-                json!({
-                    "blockIds": [h.own_card, h.card[i]],
-                    "blockPatches": [{"title": "x"}, {"title": "y"}],
-                })
-            },
-        ),
-        // The asker's own board together with a hidden block, or a hidden board.
-        case(
-            Method::PATCH,
-            |_, _| format!("{TEST_WS}/containers-and-blocks"),
-            |h, i| {
-                json!({
-                    "containerIds": [h.own_board], "containerPatches": [{"title": "x"}],
-                    "blockIds": [h.card[i]], "blockPatches": [{"title": "y"}],
-                })
-            },
-        ),
-        case(
-            Method::PATCH,
-            |_, _| format!("{TEST_WS}/containers-and-blocks"),
-            |h, i| {
-                json!({
-                    "containerIds": [h.own_board, h.board[i]],
-                    "containerPatches": [{"title": "x"}, {"title": "y"}],
-                })
-            },
-        ),
-        case(
-            Method::DELETE,
-            |_, _| format!("{TEST_WS}/containers-and-blocks"),
-            |h, i| json!({"containers": [h.own_board], "blocks": [h.card[i]]}),
-        ),
-        // Blocks for the asker's own board, with files to copy from a hidden board.
-        case(
             Method::POST,
             |h, i| {
                 format!(
-                    "{TEST_WS}/boards/{}/blocks?sourceBoardId={}",
-                    h.own_board, h.board[i]
+                    "{TEST_WS}/boards/{}/cards/{}/duplicate",
+                    h.own_board, h.card[i]
                 )
             },
-            |h, i| {
-                json!([{
-                    "containerId": h.own_board, "type": "attachment", "createdAt": 1, "updatedAt": 1,
-                    "fields": {"fileId": h.file[i]},
-                }])
-            },
+            no_body,
         ),
+        case(
+            Method::PUT,
+            |h, i| reaction_to(&h.own_board, &h.card[i]),
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, _| format!("{TEST_WS}/boards/{}/cards/batch-patch", h.own_board),
+            |h, i| json!({"cardIds": [h.own_card, h.card[i]], "updatedProperties": {}}),
+        ),
+        case(
+            Method::POST,
+            |h, _| format!("{TEST_WS}/boards/{}/cards/batch-delete", h.own_board),
+            |h, i| json!({"cardIds": [h.own_card, h.card[i]]}),
+        ),
+        case(
+            Method::POST,
+            |h, _| format!("{TEST_WS}/boards/{}/cards/batch-restore", h.own_board),
+            |h, i| json!({"cardIds": [h.card[i]]}),
+        ),
+        // A card in the trash of a hidden board, through the asker's own board.
+        case(
+            Method::POST,
+            |h, _| format!("{TEST_WS}/boards/{}/cards/batch-restore", h.own_board),
+            |h, i| json!({"cardIds": [h.trashed_card[i]]}),
+        ),
+        // A file of a hidden board attached to the asker's own card.
+        case(
+            Method::POST,
+            |h, _| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/attachments",
+                    h.own_board, h.own_card
+                )
+            },
+            |h, i| json!({"fileId": h.file[i], "title": "x"}),
+        ),
+    ]
+}
+
+/// Of [`mixed_cases`], a hidden board in the asker's own category, somebody's category
+/// named anew, and a file of a hidden board through the asker's own board.
+fn mixed_place_cases() -> Vec<Case> {
+    vec![
         // A hidden board in the asker's own category.
         case(
             Method::POST,
@@ -655,6 +717,13 @@ fn mixed_cases() -> Vec<Case> {
             no_body,
         ),
     ]
+}
+
+/// Whether the route reads the identifiers of its body as identifiers before it looks
+/// for anything: a card batch to the trash or back, which refuses text that is no
+/// identifier by what it is (400 at the member), whatever is stored.
+fn reads_identifiers_first(path: &str) -> bool {
+    path.ends_with("/cards/batch-delete") || path.ends_with("/cards/batch-restore")
 }
 
 /// The parts of an answer a client could tell two requests apart by.
@@ -727,10 +796,7 @@ async fn what_a_user_cannot_see_answers_as_what_does_not_exist() {
         .get(&format!("{TEST_WS}/containers/{}", hidden.board[0]))
         .await
         .check_ok();
-    let blocks: Vec<Block> = owner
-        .get(&format!("{TEST_WS}/boards/{}/blocks", hidden.board[0]))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(owner, &hidden.board[0]).await;
     assert_eq!(blocks.len(), 2, "the card and its text");
     let members: Vec<Value> = owner
         .get(&format!("{TEST_WS}/containers/{}/members", hidden.board[0]))
@@ -745,14 +811,85 @@ async fn what_a_user_cannot_see_answers_as_what_does_not_exist() {
     hidden.th.teardown().await;
 }
 
+/// As [`mixed_cases`], a hidden card named as a view, as an attachment and as a card of a
+/// batch through the asker's own board.
+fn mixed_view_and_attachment_cases() -> Vec<Case> {
+    vec![
+        case(
+            Method::GET,
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.own_board, h.card[i]),
+            no_body,
+        ),
+        case(
+            Method::PATCH,
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.own_board, h.card[i]),
+            title,
+        ),
+        case(
+            Method::DELETE,
+            |h, i| format!("{TEST_WS}/boards/{}/views/{}", h.own_board, h.card[i]),
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/views/{}/restore",
+                    h.own_board, h.card[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::GET,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/attachments",
+                    h.own_board, h.card[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::DELETE,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/attachments/{}",
+                    h.own_board, h.own_card, h.card[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, i| {
+                format!(
+                    "{TEST_WS}/boards/{}/cards/{}/attachments/{}/restore",
+                    h.own_board, h.own_card, h.card[i]
+                )
+            },
+            no_body,
+        ),
+        case(
+            Method::POST,
+            |h, _| format!("{TEST_WS}/boards/{}/cards/batch-patch", h.own_board),
+            |h, i| json!({"cardIds": [h.own_card, h.card[i]], "updatedProperties": {"note": "x"}}),
+        ),
+    ]
+}
+
 /// The same where a request names something of the asker's own next to something
 /// hidden: the request is refused, and the same way as for an identifier nobody has.
 #[tokio::test]
 async fn a_hidden_thing_next_to_an_own_one_answers_as_one_that_does_not_exist() {
     let hidden = Hidden::start().await;
     let outsider = &hidden.th.client2;
+    let before = crate::blocks::blocks_of(outsider, &hidden.own_board).await;
 
-    for case in mixed_cases() {
+    for case in mixed_cases()
+        .into_iter()
+        .chain(mixed_view_and_attachment_cases())
+    {
         let path = (case.path)(&hidden, 0);
         let existing = ask(outsider, &hidden, &case, 0).await;
         let missing = ask(outsider, &hidden, &case, 1).await;
@@ -771,6 +908,15 @@ async fn a_hidden_thing_next_to_an_own_one_answers_as_one_that_does_not_exist() 
             "{} {path}: what is hidden and what is missing answer alike",
             case.method
         );
+        if reads_identifiers_first(&path) {
+            malformed.check_bad_request();
+            assert!(
+                malformed.refused_at().starts_with("/cardIds/"),
+                "{} {path}: the text is refused for what it is",
+                case.method
+            );
+            continue;
+        }
         assert_eq!(
             told(&missing),
             told(&malformed),
@@ -781,22 +927,15 @@ async fn a_hidden_thing_next_to_an_own_one_answers_as_one_that_does_not_exist() 
     }
 
     // The outsider's own things are as they were, and so are the owner's.
-    let own: Vec<Block> = outsider
-        .get(&format!("{TEST_WS}/boards/{}/blocks", hidden.own_board))
-        .await
-        .ok_json();
-    assert_eq!(own.len(), 2, "the outsider's card and text, nothing added");
-    assert!(
-        own.iter().all(|block| block.title.is_empty()),
-        "and nothing patched: {own:?}"
+    let own = crate::blocks::blocks_of(outsider, &hidden.own_board).await;
+    assert_eq!(
+        own.len(),
+        2,
+        "the outsider's card and attachment, nothing added"
     );
-    let blocks: Vec<Block> = hidden
-        .th
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", hidden.board[0]))
-        .await
-        .ok_json();
-    assert_eq!(blocks.len(), 2, "the owner's card and text");
+    assert_eq!(own, before, "and nothing patched");
+    let blocks = crate::blocks::blocks_of(&hidden.th.client, &hidden.board[0]).await;
+    assert_eq!(blocks.len(), 2, "the owner's card and attachment");
     hidden.th.teardown().await;
 }
 
@@ -1006,37 +1145,42 @@ async fn text_that_is_no_identifier_answers_as_an_identifier_of_nothing() {
         ),
         (
             Method::GET,
-            format!("{TEST_WS}/boards/{board}/blocks?blockId={{}}"),
-            Value::Null,
-        ),
-        (
-            Method::GET,
-            format!("{TEST_WS}/boards/{board}/blocks?parentId={{}}"),
+            format!("{TEST_WS}/boards/{board}/views/{{}}"),
             Value::Null,
         ),
         (
             Method::PATCH,
-            format!("{TEST_WS}/boards/{board}/blocks/{{}}"),
+            format!("{TEST_WS}/boards/{board}/views/{{}}"),
             json!({"title": "x"}),
         ),
         (
             Method::DELETE,
-            format!("{TEST_WS}/boards/{board}/blocks/{{}}"),
+            format!("{TEST_WS}/boards/{board}/views/{{}}"),
             Value::Null,
         ),
         (
             Method::POST,
-            format!("{TEST_WS}/boards/{board}/blocks/{{}}/restore"),
+            format!("{TEST_WS}/boards/{board}/views/{{}}/restore"),
             Value::Null,
         ),
         (
             Method::POST,
-            format!("{TEST_WS}/boards/{board}/blocks/{{}}/duplicate"),
+            format!("{TEST_WS}/boards/{board}/cards/{{}}/duplicate"),
             Value::Null,
         ),
         (
             Method::GET,
-            format!("{TEST_WS}/boards/{board}/blocks/{{}}/versions"),
+            format!("{TEST_WS}/boards/{board}/cards/{{}}/comments"),
+            Value::Null,
+        ),
+        (
+            Method::DELETE,
+            format!("{TEST_WS}/boards/{board}/cards/{card}/comments/{{}}"),
+            Value::Null,
+        ),
+        (
+            Method::GET,
+            format!("{TEST_WS}/boards/{board}/cards/{card}/comments/{{}}/versions"),
             Value::Null,
         ),
         (

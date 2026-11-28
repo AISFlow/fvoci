@@ -40,7 +40,7 @@ pub(super) async fn b_wiki(scene: &Scene) -> (Container, String) {
         .create_page(&wiki.id, &new, PageLimits::default(), &scene.user)
         .await
         .expect("B's page")
-        .page
+        .first
         .id;
     (wiki, page)
 }

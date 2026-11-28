@@ -131,10 +131,7 @@ impl Store {
             sql.bind(scope.org()?)
                 .push_bind(" AND c.is_template = ", false)
                 .push(&scope.same_organization(&[("f", "c"), ("c", "w")]));
-            let files = match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0)?,
-                None => 0,
-            };
+            let files: i64 = scope.first(sql).await?.unwrap_or(0);
             Ok(Some(LeavingOrganization {
                 id: organization.id,
                 kind,
@@ -403,14 +400,14 @@ pub(crate) async fn is_last_instance_admin(
 ) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT 1 FROM users WHERE is_admin = ");
     sql.bind(true).push_bind(" AND id = ", Id(user_id));
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         return Ok(false);
     }
     let mut sql = scope.sql("SELECT 1 FROM users WHERE deleted_at IS NULL AND is_admin = ");
     sql.bind(true)
         .push_bind(" AND id <> ", Id(user_id))
         .push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_none())
+    Ok(!scope.exists(sql).await?)
 }
 
 /// Whether the organization has an administrator besides the user whose account is in
@@ -428,7 +425,7 @@ async fn has_another_admin(
         .push_bind(" AND om.role = ", OrgRole::Admin.as_str())
         .push_bind(" AND om.user_id <> ", Id(user_id))
         .push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Whether anybody but the user is in the organization: a member of it, or a member or
@@ -443,7 +440,7 @@ pub(crate) async fn has_other_people(
     sql.bind(Id(org_id))
         .push_bind(" AND user_id <> ", Id(user_id))
         .push(" LIMIT 1");
-    if scope.fetch_optional(sql).await?.is_some() {
+    if scope.exists(sql).await? {
         return Ok(true);
     }
     let mut sql: Sql = scope.sql(
@@ -454,5 +451,5 @@ pub(crate) async fn has_other_people(
         .push_bind(" AND wm.user_id <> ", Id(user_id))
         .push(&scope.same_organization(&[("wm", "w")]))
         .push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }

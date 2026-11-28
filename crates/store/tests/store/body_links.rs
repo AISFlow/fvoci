@@ -240,7 +240,7 @@ async fn cards_pages_and_comments_name_each_other_across_a_board_and_a_wiki() {
         .create_page(&wiki.id, &NewPage::default(), PageLimits::default(), &user)
         .await
         .expect("the page is made")
-        .page
+        .first
         .id;
 
     write_body(store, &card, body_naming("see the page", &[&page]), &user).await;

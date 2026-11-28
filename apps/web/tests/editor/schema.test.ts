@@ -24,13 +24,18 @@ const paragraph = (...content: DocNode[]): DocNode => ({ type: 'paragraph', cont
 const doc = (...content: DocNode[]): DocNode => ({ type: 'doc', content });
 
 describe('the list of what a body may contain', () => {
-  it('has the twenty-three nodes and five marks of version 5', () => {
-    expect(BODY_VERSION).toBe(5);
+  it('has the twenty-eight nodes and five marks of version 7', () => {
+    expect(BODY_VERSION).toBe(7);
     expect(Object.keys(NODE_SPECS).sort()).toEqual([
       'blockMath',
       'blockquote',
+      'boardView',
       'bulletList',
+      'callout',
       'codeBlock',
+      'details',
+      'detailsContent',
+      'detailsSummary',
       'doc',
       'file',
       'hardBreak',

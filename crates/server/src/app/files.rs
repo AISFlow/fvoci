@@ -21,7 +21,7 @@ use super::App;
 use super::loose_objects::WrittenPlace;
 use crate::auth::now_millis;
 use crate::auth::secret::new_secret;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 use crate::storage::StorageError;
 
 /// What a request misses that asks for a file that is not there.
@@ -352,15 +352,10 @@ impl App {
         if stored_name.is_empty() {
             return Ok(None);
         }
-        match self
-            .store()
+        self.store()
             .get_file_record(container_id, stored_name)
             .await
-        {
-            Ok(record) => Ok(Some(record)),
-            Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+            .found()
     }
 
     /// Checks that every image and file block of a body names a file of the board. The write

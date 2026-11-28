@@ -178,8 +178,8 @@
         <p role="alert" data-testid="verify-problem">{problemOf(error)}</p>
       {/if}
     {/await}
-    <a href={homeHref} class="text-center text-sm underline underline-offset-4"
-      >{m.reset_sign_in()}</a
-    >
+    <a href={homeHref} class="text-center text-sm underline underline-offset-4">
+      {m.reset_sign_in()}
+    </a>
   </div>
 </main>

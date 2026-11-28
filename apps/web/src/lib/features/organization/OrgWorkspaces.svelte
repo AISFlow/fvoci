@@ -63,9 +63,9 @@
         <div class="min-w-0 flex-1 basis-56">
           <p class="truncate font-medium">
             {#if workspace.role}
-              <a class="underline-offset-4 hover:underline" href={workspaceHref(workspace.id)}
-                >{nameOf(workspace)}</a
-              >
+              <a class="underline-offset-4 hover:underline" href={workspaceHref(workspace.id)}>
+                {nameOf(workspace)}
+              </a>
             {:else}
               {nameOf(workspace)}
             {/if}
@@ -84,8 +84,10 @@
               variant="outline"
               disabled={admin.busy}
               aria-label={m.org_leave_named({ name: nameOf(workspace) })}
-              onclick={() => void admin.leaveWorkspace(workspace.id)}>{m.org_leave()}</Button
+              onclick={() => void admin.leaveWorkspace(workspace.id)}
             >
+              {m.org_leave()}
+            </Button>
           {:else if workspace.role !== 'admin'}
             <div class="flex max-w-64 flex-col items-start gap-1">
               <Button
@@ -94,8 +96,10 @@
                 disabled={admin.busy}
                 aria-label={m.org_join_named({ name: nameOf(workspace) })}
                 aria-describedby={`org-join-${workspace.id}`}
-                onclick={() => void admin.joinWorkspace(workspace.id)}>{m.org_join()}</Button
+                onclick={() => void admin.joinWorkspace(workspace.id)}
               >
+                {m.org_join()}
+              </Button>
               <p id={`org-join-${workspace.id}`} class="text-xs text-muted-foreground">
                 {m.org_join_hint()}
               </p>
@@ -109,8 +113,10 @@
             onclick={() => {
               renaming = workspace;
               renameOpen = true;
-            }}>{m.org_rename()}</Button
+            }}
           >
+            {m.org_rename()}
+          </Button>
           {#if !workspace.isDefault}
             <Button
               size="sm"
@@ -121,8 +127,10 @@
               onclick={() => {
                 deleting = workspace;
                 deleteOpen = true;
-              }}>{m.org_delete()}</Button
+              }}
             >
+              {m.org_delete()}
+            </Button>
           {/if}
         </div>
       </li>
@@ -139,8 +147,10 @@
             variant="outline"
             disabled={admin.busy}
             aria-label={m.org_restore_named({ name: nameOf(workspace) })}
-            onclick={() => void admin.restoreWorkspace(workspace.id)}>{m.org_restore()}</Button
+            onclick={() => void admin.restoreWorkspace(workspace.id)}
           >
+            {m.org_restore()}
+          </Button>
         </li>
       {/each}
     </ul>

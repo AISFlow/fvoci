@@ -357,11 +357,7 @@ async fn a_refused_visit_ends_the_one_before_and_a_deleted_card_leaves_the_board
         entry_of(&shown, &other).expect("the other reader")["cardIds"],
         json!([t.card_id])
     );
-    th.client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            t.board_id, t.card_id
-        ))
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
         .await
         .check_no_content();
     let after = people(&mut one, 2).await;

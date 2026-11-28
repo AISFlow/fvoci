@@ -69,17 +69,19 @@
               oninput={() => onNameEdit?.()}
               disabled={working}
             />
-            <Button size="sm" type="submit" disabled={working || !name.trim()}
-              >{m.groups_save()}</Button
-            >
+            <Button size="sm" type="submit" disabled={working || !name.trim()}>
+              {m.groups_save()}
+            </Button>
             <Button
               size="sm"
               variant="ghost"
               disabled={working}
               onclick={() => {
                 renaming = false;
-              }}>{m.shared_cancel()}</Button
+              }}
             >
+              {m.shared_cancel()}
+            </Button>
           </form>
         {:else}
           <div class="flex flex-wrap gap-2">
@@ -90,11 +92,13 @@
               onclick={() => {
                 name = team.name;
                 renaming = true;
-              }}>{m.groups_rename()}</Button
+              }}
             >
-            <Button size="sm" variant="ghost" disabled={working} onclick={onDelete}
-              >{m.groups_delete()}</Button
-            >
+              {m.groups_rename()}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={working} onclick={onDelete}>
+              {m.groups_delete()}
+            </Button>
           </div>
         {/if}
       {/if}
@@ -111,8 +115,10 @@
                 variant="ghost"
                 disabled={working}
                 aria-label={m.groups_remove_member({ name: userDisplayName(member) })}
-                onclick={() => void onRemove(member.userId)}>{m.people_remove()}</Button
+                onclick={() => void onRemove(member.userId)}
               >
+                {m.people_remove()}
+              </Button>
             {/if}
           </li>
         {/each}
@@ -139,17 +145,18 @@
           >
             <option value="">{m.groups_choose_member()}</option>
             {#each candidates as person (person.userId)}
-              <option value={person.userId} disabled={person.userId === restrictedSelf}
-                >{userDisplayName(person)}</option
-              >
+              <option value={person.userId} disabled={person.userId === restrictedSelf}>
+                {userDisplayName(person)}
+              </option>
             {/each}
           </select>
           <Button
             size="sm"
             type="submit"
             disabled={working || !selected || selected === restrictedSelf}
-            >{m.groups_add_member()}</Button
           >
+            {m.groups_add_member()}
+          </Button>
         </form>
       {/if}
     </div>

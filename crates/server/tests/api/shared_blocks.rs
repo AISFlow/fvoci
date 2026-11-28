@@ -6,8 +6,8 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use crate::blocks::{
-    NO_BLOCK, NO_BOARD, blocks_path, boards_with_roles, card_with_content, fields, insert_one,
-    new_block, titles,
+    NO_BLOCK, NO_BOARD, blocks_of, boards_with_roles, card_with_content, fields, insert_one,
+    new_block,
 };
 use crate::common::{Setup, TEST_WS, TestServer};
 
@@ -122,7 +122,8 @@ async fn a_reader_by_read_token_is_not_told_who_is_mentioned() {
             "nobody, to whoever is signed in"
         );
     }
-    let shown = people_in(&th.client.get(&blocks_path(&boards.board.id)).await.value());
+    let own = blocks_of(&th.client, &boards.board.id).await;
+    let shown = people_in(&serde_json::to_value(own).expect("blocks are JSON"));
     assert_eq!(shown["mention"], json!(me.id), "the user, to a member");
     assert_eq!(
         shown["properties"]["workspace"],
@@ -151,9 +152,11 @@ async fn get_blocks_with_a_read_token() {
         |board: &Container| format!("/shared/{}/blocks?readToken={read_token}", board.id);
 
     let blocks: Vec<Block> = anonymous.get(&with_token(&boards.board)).await.ok_json();
+    let mut kinds: Vec<BlockType> = blocks.iter().map(|block| block.block_type).collect();
+    kinds.sort_unstable_by_key(ToString::to_string);
     assert_eq!(
-        titles(&blocks),
-        ["card", "comment", "text"],
+        kinds,
+        [BlockType::Attachment, BlockType::Card, BlockType::Comment],
         "the token reads the board"
     );
 
@@ -184,11 +187,13 @@ async fn get_blocks_with_a_read_token() {
     response.check_error(StatusCode::NOT_FOUND, NO_BLOCK);
 
     // It does not let anyone write.
-    let block = new_block(&boards.board.id, BlockType::Card, "");
     anonymous
         .post(
-            &format!("{}?readToken={read_token}", blocks_path(&boards.board.id)),
-            &[block],
+            &format!(
+                "{TEST_WS}/boards/{}/cards?readToken={read_token}",
+                boards.board.id
+            ),
+            &json!({"title": "by the link"}),
         )
         .await
         .check_unauthorized();

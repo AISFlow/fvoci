@@ -106,14 +106,18 @@ impl From<StoredFiles> for Vec<FileRecord> {
     }
 }
 
+/// Takes a block out of the trash with what was deleted with it, its reactions kept in
+/// `reactions` to be made again at the end of the transaction
+/// ([`super::KeptReactions::make_again`]). Returns the blocks, parents first.
 pub(crate) async fn undelete_block(
     scope: &mut super::Scope<'_>,
     block_id: &str,
     user_id: &str,
+    reactions: &mut super::KeptReactions,
 ) -> Result<Vec<fvoci_model::Block>, crate::StoreError> {
     use super::{
         Block, Id, StoreError, block_from_json, block_not_in_trash, card_hierarchy, containers,
-        parents_first, take_blocks_out_of_trash,
+        parents_first, take_out_keeping_reactions,
     };
     let mut sql = scope.sql("SELECT container_id FROM deleted_blocks WHERE id = ");
     sql.bind(Id(block_id));
@@ -143,15 +147,17 @@ pub(crate) async fn undelete_block(
     let rerooted = card_hierarchy::check_restore(scope, &family).await?;
 
     let now = scope.now_millis();
-    let restored = take_blocks_out_of_trash(scope, &deletion_id, user_id, now, |block| {
+    let unroot = |block: &mut Block| {
         if rerooted.contains(&block.id) {
             block.parent_id.clear();
         }
-    })
-    .await?;
+    };
+    let restored =
+        take_out_keeping_reactions(scope, &deletion_id, user_id, now, unroot, reactions).await?;
     if !restored.iter().any(|block| block.id == block_id) {
         return Err(block_not_in_trash());
     }
+    crate::card_events::note_restored(scope, &restored, user_id, now).await?;
     let order = parents_first(&restored);
     let mut slots: Vec<Option<Block>> = restored.into_iter().map(Some).collect();
     let ordered: Vec<Block> = order

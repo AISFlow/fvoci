@@ -11,6 +11,9 @@
   open what it said before (`CommentHistory`). The field for a new comment is not here: it is pinned to the
   bottom edge of the card (CommentComposer).
 
+  Under each its reactions (`CommentReactions`); a long press of a finger on
+  a comment opens the emoji to answer it with, for who may comment.
+
   A wiki's page has comments of the same kind: they are shown by this too,
   with the page's comments (`PageComments`) in place of both the board and
   the card; "Undo" brings a deleted one back there too, and the heading is
@@ -26,9 +29,11 @@
   import IconButton from '$lib/components/icon-button/IconButton.svelte';
   import { isComposing, isSaveKey, primaryModifier, shortcutKeys } from '$lib/keys.ts';
   import BodyView from '$lib/editor/BodyView.svelte';
+  import { longPress } from '$lib/editor/touch-press.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import { displayDateTime, relativeTime } from '$lib/logic/format.ts';
   import { agentTokenNameOf } from '$lib/logic/wire-blocks.ts';
+  import type { ThreadReactions } from '$lib/state/comment-thread.svelte.ts';
   import type { BoardStore, CardStore, CommentVersion } from '$lib/state/index.ts';
   import { Button } from '$lib/ui/button/index.js';
 
@@ -36,6 +41,7 @@
   import { bodyReferences } from './body-references.ts';
   import { commentDoc, commentText } from './comment-doc.ts';
   import CommentHistory from './CommentHistory.svelte';
+  import CommentReactions from './CommentReactions.svelte';
 
   interface Props {
     /** The board, or the page's comments: who may do what, and who the names are. */
@@ -47,11 +53,16 @@
     card: Pick<CardStore, 'comments' | 'comment' | 'editComment' | 'deleteComment'>;
     /** What a comment said before (`CommentHistory`). */
     readVersions: (commentId: string) => Promise<CommentVersion[]>;
+    /** The reactions to the comments. */
+    reactions: ThreadReactions;
     /** The level of the heading: under a card's title, or under a page's. */
     heading?: 'h2' | 'h3';
   }
 
-  let { board, card, readVersions, heading = 'h3' }: Props = $props();
+  let { board, card, readVersions, reactions, heading = 'h3' }: Props = $props();
+
+  /** The comment whose emoji to answer it with are open. */
+  let reacting = $state<string | undefined>();
 
   /** Deletes the comment; its field and its history, if open, go with it. */
   function remove(commentId: string): void {
@@ -185,9 +196,16 @@
       {@const author = workspace.userName(comment.createdBy) ?? m['centerPanel.unknown-user']()}
       {@const text = commentText(comment.body)}
       {@const agent = agentTokenNameOf(comment)}
+      <!-- A long press that can react takes the press; one that cannot leaves the browser's own. -->
+      {@const pressable = reactions.canReact && editing?.id !== comment.id}
       <li
         class="flex gap-3 rounded-md transition-colors data-revealed:bg-accent"
         data-comment={comment.id}
+        {@attach pressable
+          ? longPress(() => {
+              reacting = comment.id;
+            })
+          : undefined}
       >
         <Avatar
           name={author}
@@ -200,9 +218,12 @@
           <p class="flex flex-wrap items-baseline gap-x-2">
             <span class="font-medium">{author}</span>
             {#if agent}
-              <span class="rounded-sm bg-muted px-1 text-xs font-medium" data-testid="comment-agent"
-                >{m.agent_badge({ name: agent })}</span
+              <span
+                class="rounded-sm bg-muted px-1 text-xs font-medium"
+                data-testid="comment-agent"
               >
+                {m.agent_badge({ name: agent })}
+              </span>
             {/if}
             <time
               class="text-xs text-muted-foreground"
@@ -281,6 +302,20 @@
               {/snippet}
             </BodyView>
           {/if}
+          <CommentReactions
+            class="mt-1.5"
+            {reactions}
+            blockId={comment.id}
+            addLabel={m.reaction_add_to_comment({
+              when: displayDateTime(comment.createdAt, context),
+            })}
+            bind:open={
+              () => reacting === comment.id,
+              (now: boolean) => {
+                reacting = now ? comment.id : undefined;
+              }
+            }
+          />
           {#if historyOf === comment.id && comment.editedAt && board.canReadCommentHistory}
             <CommentHistory
               id="{uid}-history-{comment.id}"

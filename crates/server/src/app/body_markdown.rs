@@ -8,10 +8,13 @@
 mod tests;
 mod write;
 
+pub(super) use write::{ExportPlaces, Exported, relative};
+
 use std::collections::{BTreeSet, HashMap};
 
 use fvoci_model::{
-    Body, BodyChange, Card, ComplexBlock, RefusalReason, Refusals, WorkspaceRole, is_id,
+    Body, BodyChange, Card, ComplexBlock, LinkedKind, Page, RefusalReason, Refusals, Unit,
+    WorkspaceRole, is_id,
 };
 use serde_json::Value;
 
@@ -20,6 +23,7 @@ use super::caller::Caller;
 use super::import::markdown::{
     AssetResolver, ExternalOnlyResolver, ResolvedTarget, blocks_to_body, fvoci_markdown_to_blocks,
 };
+use super::references::MAX_REFERENCE_IDS;
 use crate::collab::Appender;
 use crate::error::{AppError, Reason};
 pub(crate) use write::{Names, body_to_markdown};
@@ -29,6 +33,9 @@ const FILE_SCHEME: &str = "fvoci-file://";
 
 /// The scheme a person is named by, in a mention.
 const USER_SCHEME: &str = "fvoci-user://";
+
+/// The scheme the view of a board view is named by: written, never read back.
+const VIEW_SCHEME: &str = "fvoci-view://";
 
 /// How deep Markdown may nest.
 const MAX_DEPTH: usize = 16;
@@ -92,6 +99,18 @@ pub struct BodyInMarkdown {
     pub complex_blocks: Vec<ComplexBlock>,
 }
 
+impl BodyInMarkdown {
+    /// `bodyMarkdown`, `hasComplexBlocks` and `complexBlocks` of what is read with
+    /// `format=markdown`.
+    fn into_members(self) -> (Option<String>, Option<bool>, Option<Vec<ComplexBlock>>) {
+        (
+            Some(self.markdown),
+            Some(!self.complex_blocks.is_empty()),
+            Some(self.complex_blocks),
+        )
+    }
+}
+
 /// Reads Markdown into a body, `None` for Markdown that says nothing.
 ///
 /// # Errors
@@ -117,7 +136,7 @@ pub(crate) fn comment_text_of_markdown(markdown: &str, field: &str) -> Result<Bo
 }
 
 /// The identifiers a document names, of files and of people.
-fn named_in(document: &Value, files: &mut BTreeSet<String>, users: &mut BTreeSet<String>) {
+fn named_in(document: &Value, named: &mut Named) {
     let attr = |name: &str| {
         document
             .get("attrs")
@@ -126,8 +145,9 @@ fn named_in(document: &Value, files: &mut BTreeSet<String>, users: &mut BTreeSet
             .map(str::to_owned)
     };
     match document.get("type").and_then(Value::as_str) {
-        Some("file") => files.extend(attr("fileId")),
-        Some("mention") => users.extend(attr("userId")),
+        Some("file") => named.files.extend(attr("fileId")),
+        Some("mention") => named.users.extend(attr("userId")),
+        Some("boardView") => named.views.extend(attr("viewId")),
         _ => {}
     }
     for child in document
@@ -136,8 +156,16 @@ fn named_in(document: &Value, files: &mut BTreeSet<String>, users: &mut BTreeSet
         .into_iter()
         .flatten()
     {
-        named_in(child, files, users);
+        named_in(child, named);
     }
+}
+
+/// What a body names by identifier, that its Markdown calls by a name.
+#[derive(Debug, Default)]
+struct Named {
+    files: BTreeSet<String>,
+    users: BTreeSet<String>,
+    views: BTreeSet<String>,
 }
 
 /// The body `markdown` writes whole over `current`, the body of a card: Markdown
@@ -180,43 +208,80 @@ pub struct MarkdownReader<'a> {
 }
 
 impl App {
-    /// What the Markdown of a body of the board `container_id` calls the files and
-    /// the people it names, for `reader`: the files by their names on the board, the
-    /// people by the names they are shown by to the reader in the workspace. Whom the
-    /// reader does not see there (another organization's account, an identifier of
-    /// nobody) has no name, and is told of by the identifier the body holds.
+    /// What the Markdown of a body of the board `container_id` calls the files, the
+    /// people and the views it names, for `reader`: the files by their names on the
+    /// board, the people by the names they are shown by to the reader in the workspace,
+    /// the views by their boards' titles and theirs. Whom the reader does not see there
+    /// (another organization's account, an identifier of nobody) has no name, and is
+    /// told of by the identifier the body holds; a view the reader does not read is a
+    /// board view, unnamed.
     async fn names_in(
         &self,
         reader: MarkdownReader<'_>,
         container_id: &str,
         document: &Value,
     ) -> Result<Names, AppError> {
-        let (mut files, mut users) = (BTreeSet::new(), BTreeSet::new());
-        named_in(document, &mut files, &mut users);
+        let mut asked = Named::default();
+        named_in(document, &mut asked);
+        let Named {
+            files,
+            users,
+            views,
+        } = asked;
         let mut names = Names::default();
         for file_id in files {
             if let Some(record) = self.file_record(container_id, &file_id).await? {
                 names.files.insert(file_id, record.name);
             }
         }
-        let users: Vec<String> = users.into_iter().filter(|id| is_id(id)).collect();
-        if !users.is_empty() {
-            let found = self
-                .users_in_workspace(reader.user_id, reader.workspace_id, reader.role, &users)
-                .await?;
-            names.users = found
-                .into_iter()
-                .map(|user| {
-                    let shown = if user.display_name.is_empty() {
-                        user.username
-                    } else {
-                        user.display_name
-                    };
-                    (user.id, shown)
-                })
-                .collect::<HashMap<_, _>>();
+        let users: Vec<String> = users.into_iter().collect();
+        names.users = self.names_seen_by(reader, &users).await?;
+        // A view is named for whoever reads its board, as a reference is told of.
+        // As many as a body shows, a resolver's worth at a time.
+        let views: Vec<String> = views.into_iter().filter(|id| is_id(id)).collect();
+        for some in views.chunks(MAX_REFERENCE_IDS) {
+            for linked in self.resolve_references(reader.user_id, some).await? {
+                if linked.kind == LinkedKind::View {
+                    let board = linked.container_title.unwrap_or_default();
+                    names
+                        .views
+                        .insert(linked.id, format!("{board} / {}", linked.title));
+                }
+            }
         }
         Ok(names)
+    }
+
+    /// The names `reader` sees the people `user_ids` by in the workspace, by their
+    /// identifiers: whom the reader does not see there (another organization's account,
+    /// an identifier of nobody) is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error if the people cannot be read.
+    pub(super) async fn names_seen_by(
+        &self,
+        reader: MarkdownReader<'_>,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, String>, AppError> {
+        let users: Vec<String> = user_ids.iter().filter(|id| is_id(id)).cloned().collect();
+        if users.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let found = self
+            .users_in_workspace(reader.user_id, reader.workspace_id, reader.role, &users)
+            .await?;
+        Ok(found
+            .into_iter()
+            .map(|user| {
+                let shown = if user.display_name.is_empty() {
+                    user.username
+                } else {
+                    user.display_name
+                };
+                (user.id, shown)
+            })
+            .collect())
     }
 
     /// `body`, a body of the board `container_id` (a card's, a page's, a unit's or a
@@ -245,6 +310,28 @@ impl App {
         })
     }
 
+    /// `body`, of the container `container_id`, in Markdown as an export of Markdown
+    /// files writes it (`export_markdown`), where `exported` says: what the export
+    /// holds linked where it is, the people in plain text.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error if a file or a person cannot be read.
+    pub(super) async fn body_in_exported_markdown(
+        &self,
+        reader: MarkdownReader<'_>,
+        container_id: &str,
+        body: Option<&Body>,
+        exported: Exported,
+    ) -> Result<String, AppError> {
+        let Some(body) = body else {
+            return Ok(String::new());
+        };
+        let mut names = self.names_in(reader, container_id, body.document()).await?;
+        names.export = Some(exported);
+        Ok(body_to_markdown(body.document(), &names).markdown)
+    }
+
     /// Gives `card` its body in Markdown as `reader` reads it, in place of the body,
     /// with the blocks the Markdown does not hold as they are.
     ///
@@ -256,13 +343,78 @@ impl App {
         reader: MarkdownReader<'_>,
         card: &mut Card,
     ) -> Result<(), AppError> {
-        let body = card.body.take();
+        card.body = None;
+        let body = self.body_now(&card.id).await?;
         let written = self
             .body_in_markdown(reader, &card.board_id, body.as_ref())
             .await?;
-        card.has_complex_blocks = Some(!written.complex_blocks.is_empty());
-        card.complex_blocks = Some(written.complex_blocks);
-        card.body_markdown = Some(written.markdown);
+        (
+            card.body_markdown,
+            card.has_complex_blocks,
+            card.complex_blocks,
+        ) = written.into_members();
+        Ok(())
+    }
+
+    /// The body of the block `block_id` as it is now: what its room holds that is not
+    /// written yet is written first, so that what is taken out in Markdown is what the
+    /// editors show.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of writing the room's body, and the store's.
+    async fn body_now(&self, block_id: &str) -> Result<Option<Body>, AppError> {
+        self.collab()
+            .write_bodies(self, &[block_id.to_owned()])
+            .await?;
+        Ok(self.block(block_id).await?.body)
+    }
+
+    /// Gives `page` its body in Markdown as `reader` reads it, in place of the body, as
+    /// [`App::put_card_in_markdown`] does a card's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error if a file or a person cannot be read.
+    pub async fn put_page_in_markdown(
+        &self,
+        reader: MarkdownReader<'_>,
+        page: &mut Page,
+    ) -> Result<(), AppError> {
+        page.body = None;
+        let body = self.body_now(&page.id).await?;
+        let written = self
+            .body_in_markdown(reader, &page.wiki_id, body.as_ref())
+            .await?;
+        (
+            page.body_markdown,
+            page.has_complex_blocks,
+            page.complex_blocks,
+        ) = written.into_members();
+        Ok(())
+    }
+
+    /// Gives `unit` its body in Markdown as `reader` reads it, in place of the body, as
+    /// [`App::put_card_in_markdown`] does a card's.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error if a file or a person cannot be read.
+    pub async fn put_unit_in_markdown(
+        &self,
+        reader: MarkdownReader<'_>,
+        unit: &mut Unit,
+    ) -> Result<(), AppError> {
+        unit.body = None;
+        let body = self.body_now(&unit.id).await?;
+        let written = self
+            .body_in_markdown(reader, &unit.course_id, body.as_ref())
+            .await?;
+        (
+            unit.body_markdown,
+            unit.has_complex_blocks,
+            unit.complex_blocks,
+        ) = written.into_members();
         Ok(())
     }
 

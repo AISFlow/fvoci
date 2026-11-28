@@ -70,7 +70,7 @@
       onCreateOrganization={starts ? createOrganization : undefined}
     />
   </div>
-  <output data-testid="workspace-choice" class="text-xs text-muted-foreground"
-    >{current ?? ''}</output
-  >
+  <output data-testid="workspace-choice" class="text-xs text-muted-foreground">
+    {current ?? ''}
+  </output>
 </div>

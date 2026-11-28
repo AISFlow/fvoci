@@ -290,9 +290,9 @@
             <p class="min-w-0 flex-1">
               {groupLabel}
               {#if running.length > 0 && failed.length > 0}
-                <span class="text-destructive"
-                  >· {m.shell_uploads_failed({ count: failed.length })}</span
-                >
+                <span class="text-destructive">
+                  · {m.shell_uploads_failed({ count: failed.length })}
+                </span>
               {/if}
             </p>
             <Button

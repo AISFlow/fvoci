@@ -27,6 +27,8 @@ use sqlx::migrate::{MigrateError, Migration, MigrationType, Migrator};
 pub(crate) use self::inspect::{
     SchemaState, may_change, refuse_unrecorded_schemas, state, ungranted_tables, whereabouts,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) use self::steps::UNDONE_FOR_TESTS;
 pub(crate) use self::steps::{STEPS, Step};
 use crate::db::{Dialect, Param};
 use crate::error::StoreError;
@@ -71,7 +73,7 @@ pub(crate) const GLOBAL_TABLES: [&str; 14] = [
 /// policy `org_wall`. A test of the store reads the catalog to see that every table of
 /// the schema is in this list or in [`GLOBAL_TABLES`], and that it is so.
 #[cfg(any(test, feature = "test-util"))]
-pub(crate) const ORG_TABLES: [&str; 51] = [
+pub(crate) const ORG_TABLES: [&str; 54] = [
     "api_token_workspaces",
     "audit_log",
     "blocks",
@@ -82,6 +84,7 @@ pub(crate) const ORG_TABLES: [&str; 51] = [
     "body_versions",
     "card_assignees",
     "card_due_notices",
+    "card_events",
     "categories",
     "category_containers",
     "comment_versions",
@@ -95,6 +98,7 @@ pub(crate) const ORG_TABLES: [&str; 51] = [
     "deleted_containers",
     "diary_days",
     "exam_scores",
+    "favorites",
     "file_refs",
     "file_versions",
     "files",
@@ -111,6 +115,7 @@ pub(crate) const ORG_TABLES: [&str; 51] = [
     "organization_members",
     "organizations",
     "public_links",
+    "reactions",
     "search_outbox",
     "subscriptions",
     "team_members",
@@ -134,6 +139,11 @@ const A_SCHEMA_TABLE: &str = "blocks";
 
 /// Applies the migrations the database does not have yet.
 ///
+/// SQLite's migrator holds no lock while it applies them, as PostgreSQL's holds one: of
+/// two openings at once, the second may take up a migration that the first is
+/// applying, and fail when the database has it. It reads the record again then, and
+/// goes on from where the first is.
+///
 /// # Errors
 ///
 /// Returns [`StoreError::Schema`] with the reason if the database holds this server's
@@ -144,11 +154,30 @@ pub(crate) async fn migrate(store: &Store, steps: &[Step]) -> Result<(), StoreEr
     store.with_conn(inspect::refuse_unrecorded_schemas).await?;
 
     let migrator = migrator(store.dialect(), steps);
-    let result = match &store.inner.pool {
-        Pool::Sqlite(pool) => migrator.run(pool).await,
-        Pool::Postgres(pool) => migrator.run(pool).await,
-    };
-    result.map_err(|error| match error {
+    let mut tries = steps.len();
+    loop {
+        let result = match &store.inner.pool {
+            Pool::Sqlite(pool) => migrator.run(pool).await,
+            Pool::Postgres(pool) => migrator.run(pool).await,
+        };
+        let Err(error) = result else {
+            return Ok(());
+        };
+        tries = tries.saturating_sub(1);
+        if store.dialect() == Dialect::Sqlite {
+            match state(store, steps).await? {
+                SchemaState::Current => return Ok(()),
+                SchemaState::Behind if tries > 0 => continue,
+                _ => {}
+            }
+        }
+        return Err(migrate_error(error));
+    }
+}
+
+/// What a failure of the migrator is to the store.
+fn migrate_error(error: MigrateError) -> StoreError {
+    match error {
         MigrateError::Execute(error) | MigrateError::ExecuteMigration(error, _) => {
             StoreError::Database(error)
         }
@@ -161,15 +190,16 @@ pub(crate) async fn migrate(store: &Store, steps: &[Step]) -> Result<(), StoreEr
              database was created by a different build"
         )),
         other => StoreError::Schema(other.to_string()),
-    })
+    }
 }
 
 /// Replaces the record of a database that the last server before the baseline brought
 /// up to date ([`SchemaState::BeforeBaseline`]) with the record of the baseline. Its
 /// schema is the baseline's already: no statement changes it, and a server that serves
 /// the database meanwhile goes on serving it. Of two that do it at once, the second
-/// finds it done: the record is locked (PostgreSQL) or the database is (SQLite's
-/// `BEGIN IMMEDIATE`), and read again under the lock.
+/// finds it done, the baseline's record first in the record, and the first maybe gone
+/// on to the migrations after it: the record is locked (PostgreSQL) or the database is
+/// (SQLite's `BEGIN IMMEDIATE`), and read again under the lock.
 ///
 /// # Errors
 ///
@@ -200,7 +230,7 @@ pub(crate) async fn re_anchor(store: &Store, steps: &[Step]) -> Result<(), Store
                 scope.execute(lock).await?;
             }
             let recorded = inspect::record(scope).await?;
-            if recorded == anchored {
+            if recorded.first() == anchored.first() {
                 return Ok(());
             }
             match inspect::before_baseline(scope, &recorded).await? {
@@ -421,16 +451,36 @@ mod tests {
         }
     }
 
+    /// Every migration after the baseline can be taken away again for the tests that
+    /// make a database the one the last server before the baseline left: each has its
+    /// statement, newest first, and nothing else has one.
+    #[test]
+    fn every_migration_after_the_baseline_is_undone_for_the_tests() {
+        let mut after: Vec<i64> = STEPS.iter().skip(1).map(|step| step.version).collect();
+        after.reverse();
+        let undone: Vec<i64> = UNDONE_FOR_TESTS
+            .iter()
+            .map(|(version, _)| *version)
+            .collect();
+        assert_eq!(undone, after, "UNDONE_FOR_TESTS, newest first");
+    }
+
+    /// The baseline alone: the migrations of a server that has none after it.
+    fn the_baseline() -> [Step; 1] {
+        let [baseline, ..] = &STEPS;
+        [Step {
+            version: baseline.version,
+            description: baseline.description,
+            sqlite: baseline.sqlite,
+            postgres: baseline.postgres,
+        }]
+    }
+
     /// The baseline, and a migration after it as a later server has one.
     fn baseline_and_one_more() -> [Step; 2] {
-        let [baseline] = &STEPS;
+        let [baseline] = the_baseline();
         [
-            Step {
-                version: baseline.version,
-                description: baseline.description,
-                sqlite: baseline.sqlite,
-                postgres: baseline.postgres,
-            },
+            baseline,
             Step {
                 version: 2,
                 description: "after the baseline",
@@ -454,7 +504,10 @@ mod tests {
         let store = Store::open(crate::DbType::Sqlite, ":memory:")
             .await
             .expect("the database opens");
-        store.migrate().await.expect("the baseline is applied");
+        store
+            .migrate_with(&the_baseline())
+            .await
+            .expect("the baseline is applied");
         store
             .system()
             .transaction(async |scope| {
@@ -533,9 +586,12 @@ mod tests {
         );
         assert_eq!(recorded_versions(&store).await, [1]);
         assert_eq!(
-            store.re_anchor_with(&STEPS).await.expect("read again"),
+            store
+                .re_anchor_with(&the_baseline())
+                .await
+                .expect("read again"),
             SchemaCheck::Current,
-            "this server's: nothing is left"
+            "a server without the migration after it: nothing is left"
         );
         store.close().await;
     }

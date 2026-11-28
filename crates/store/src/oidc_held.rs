@@ -16,13 +16,13 @@ use fvoci_model::{AuditAction, LoginOrigin, Session};
 
 use crate::Store;
 use crate::audit::{self, AuditEntry};
-use crate::db::{Dialect, Id, Row, Scope};
+use crate::db::{FromRow, Id, LockRank, Row, RowLock, Scope};
 use crate::error::StoreError;
 use crate::oidc::{self, Identity, hold_provider_of_organization, read_provider};
 use crate::oidc_former::read_former;
 use crate::sessions;
 
-/// The columns of a held sign-in, in the order [`held_from_row`] reads them.
+/// The columns of a held sign-in, in the order [`HeldSignIn::from_row`] reads them.
 const HELD_COLUMNS: &str = "held_hash, org_id, provider_id, revision, issuer, subject, email, \
                             email_unverified, name, preferred_username, created_at, expires_at";
 
@@ -178,12 +178,7 @@ impl Store {
             sql.bind(held_hash)
                 .push_bind(" AND org_id = ", scope.org()?)
                 .push_bind(" AND expires_at > ", now);
-            scope
-                .fetch_optional(sql)
-                .await?
-                .as_ref()
-                .map(held_from_row)
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -312,12 +307,7 @@ async fn take_held(
     sql.bind(held_hash)
         .push_bind(" AND org_id = ", scope.org()?)
         .push([" RETURNING ", HELD_COLUMNS]);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(held_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// The account in use that `identity` is tied to, held until the transaction ends: a
@@ -333,13 +323,12 @@ async fn hold_account_of(
     );
     sql.bind(identity.issuer)
         .push_bind(" AND i.subject = ", identity.subject);
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE OF u");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
+    let Some(user_id) = scope
+        .first_held::<String>(LockRank::Users, sql, RowLock::Share.of("u"))
+        .await?
+    else {
         return Ok(None);
     };
-    let user_id = row.id(0)?;
     // Read again now that the account is held: unlinked meanwhile, it is nobody's.
     let mut sql = scope.sql("SELECT 1 FROM user_identities WHERE issuer = ");
     sql.bind(identity.issuer)
@@ -399,19 +388,21 @@ pub(crate) async fn tie_unless_taken(
     }
 }
 
-fn held_from_row(row: &Row) -> Result<HeldSignIn, StoreError> {
-    Ok(HeldSignIn {
-        held_hash: row.text(0)?,
-        org_id: row.id(1)?,
-        provider_id: row.id(2)?,
-        revision: row.int(3)?,
-        issuer: row.text(4)?,
-        subject: row.text(5)?,
-        email: row.text(6)?,
-        email_unverified: row.bool(7)?,
-        name: row.text(8)?,
-        preferred_username: row.text(9)?,
-        created_at: row.int(10)?,
-        expires_at: row.int(11)?,
-    })
+impl FromRow for HeldSignIn {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(HeldSignIn {
+            held_hash: row.text(0)?,
+            org_id: row.id(1)?,
+            provider_id: row.id(2)?,
+            revision: row.int(3)?,
+            issuer: row.text(4)?,
+            subject: row.text(5)?,
+            email: row.text(6)?,
+            email_unverified: row.bool(7)?,
+            name: row.text(8)?,
+            preferred_username: row.text(9)?,
+            created_at: row.int(10)?,
+            expires_at: row.int(11)?,
+        })
+    }
 }

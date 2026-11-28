@@ -41,6 +41,9 @@
     if (error?.reason === 'too_many_units' && error.limit) {
       return m.app_problem_too_many_units({ limit: error.limit });
     }
+    if (error?.reason === 'too_many_favorites' && error.limit) {
+      return m.app_problem_too_many_favorites({ limit: error.limit });
+    }
     // A diary's day holds one entry: one from the trash finds it taken.
     if (error?.reason === 'day_taken') return m.app_problem_day_taken();
     if (error?.reason === 'too_many_chapters' && error.limit) {

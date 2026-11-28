@@ -537,6 +537,83 @@ async fn subscription_ties_fall_back_to_identifiers() {
     test.teardown().await;
 }
 
+/// The reactions to a block come by the emoji, the one it was first answered with
+/// first, and the users of each in the order they answered with it; two at the same
+/// moment by the identifier of the user, and one user's by the code points of the
+/// emoji, alike on both databases.
+#[tokio::test]
+async fn reactions_come_by_the_first_answer_with_each_emoji() {
+    let test = common::setup().await;
+    let store = &test.store;
+    let users = [
+        common::user(store, "user b").await,
+        common::user(store, "user a").await,
+    ];
+    let workspace_id = common::workspace_of(store, &[&users[0], &users[1]]).await;
+    let board_id = stored_board(
+        store,
+        &workspace_id,
+        &users[0],
+        Container {
+            visibility: ContainerVisibility::Open,
+            ..Container::default()
+        },
+    )
+    .await;
+    let mut card = [Block {
+        id: new_id(),
+        container_id: board_id,
+        block_type: BlockType::Card,
+        ..Block::default()
+    }];
+    common::insert_blocks(store, &mut card, &users[0]).await;
+    let card_id = card[0].id.clone();
+    let reactions = [
+        (&users[0], "🎉", 20),
+        (&users[1], "👍", 10),
+        (&users[1], "🎉", 5),
+        (&users[0], "👍", 10),
+        (&users[0], "😄", 30),
+        (&users[0], "©️", 30),
+    ];
+    for (user_id, emoji, at) in reactions {
+        store
+            .add_reaction(&card_id, user_id, &emoji.parse().expect("an emoji"))
+            .await
+            .expect("reacted");
+        common::execute_raw(
+            &test.database_connection(),
+            &format!(
+                "UPDATE reactions SET created_at = {at} \
+                 WHERE user_id = '{user_id}' AND emoji = '{emoji}'"
+            ),
+        )
+        .await;
+    }
+
+    let read = store.reactions_of(&[&card_id]).await.expect("read");
+    let order: Vec<(&str, Vec<&str>)> = read[&card_id]
+        .iter()
+        .map(|reaction| {
+            let who = reaction.user_ids.iter().map(String::as_str).collect();
+            (reaction.emoji.as_str(), who)
+        })
+        .collect();
+    let [b, a] = users.each_ref().map(String::as_str);
+    assert_eq!(
+        order,
+        [
+            ("🎉", vec![a, b]),
+            ("👍", vec![b, a]),
+            ("©️", vec![b]),
+            ("😄", vec![b]),
+        ],
+        "{:?}",
+        common::db_type()
+    );
+    test.teardown().await;
+}
+
 /// Stores a board of the workspace with `admin_id` its admin and `editor_id` an editor.
 async fn board_administered_by(
     store: &Store,

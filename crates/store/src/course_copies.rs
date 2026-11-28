@@ -17,7 +17,7 @@ use fvoci_model::{
 };
 
 use crate::blocks::{BlockFilter, CopyChanges, CopyTitles};
-use crate::containers_and_blocks::create_containers_and_blocks_with_admin;
+use crate::containers_and_blocks::{NewContainers, create_whole};
 use crate::db::Scope;
 use crate::file_refs::NewBodyFiles;
 use crate::{Store, StoreError, blocks, containers, course_schedules, workspace_membership};
@@ -130,13 +130,8 @@ async fn duplicate_course(
         containers: vec![container],
         blocks,
     });
-    let members = create_containers_and_blocks_with_admin(
-        scope,
-        &mut copies,
-        user_id,
-        NewBodyFiles::Unchecked,
-    )
-    .await?;
+    let made = NewContainers::whole(&mut copies).body_files(NewBodyFiles::Unchecked);
+    let members = create_whole(scope, made, user_id).await?;
 
     if let (Some(schedule), Some(new_course)) = (schedule, copies.containers.first()) {
         let org = scope.org()?;

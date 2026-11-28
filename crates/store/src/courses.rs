@@ -16,33 +16,12 @@ use fvoci_model::{
 use crate::blocks::Paging;
 use crate::db::{Id, Scope};
 use crate::page_trash::{self, place_taken, push_block_types_in_trash};
-use crate::pages::{self, write_place};
+use crate::pages::{self, Written, write_place};
 use crate::trash::{block_from_json, block_not_in_trash, take_blocks_out_of_trash};
 use crate::{Store, StoreError, blocks, containers, page_places};
 
 /// The block types that make up a course's outline.
 const COURSE_TYPES: [BlockType; 2] = [BlockType::Unit, BlockType::Chapter];
-
-/// What a write of a course outline changed: the unit or chapter it was about, and any
-/// siblings whose orders were made anew to leave it room.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnitWrite {
-    /// The unit or chapter made or moved, as it is stored.
-    pub unit: Block,
-    /// The siblings numbered anew, as they are stored, in the order they are listed in.
-    pub renumbered: Vec<Block>,
-}
-
-/// What bringing a unit or chapter back from the trash changed: the blocks that came
-/// back (the asked-for block first, a chapter before its units) and any siblings
-/// numbered anew to leave it room.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnitRestore {
-    /// The units and chapters brought back, as they are stored.
-    pub units: Vec<Block>,
-    /// The siblings numbered anew, as they are stored.
-    pub renumbered: Vec<Block>,
-}
 
 /// A course's live outline read under its container lock: the tree for sibling ordering
 /// and placement, plus which nodes are chapters.
@@ -169,7 +148,7 @@ impl Store {
         new: &NewUnit,
         limits: CourseLimits,
         user_id: &str,
-    ) -> Result<UnitWrite, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             let Some(kind) = containers::lock_container_of_kind(scope, course_id).await? else {
                 return Err(StoreError::not_found(format_args!("board ID={course_id}")));
@@ -208,7 +187,7 @@ impl Store {
                 .map_err(invalid)?;
             let renumbered = write_place(scope, &mut unit, place).await?;
             blocks::insert_block(scope, &mut unit, user_id).await?;
-            Ok(UnitWrite { unit, renumbered })
+            Ok(Written::of(unit, renumbered))
         })
         .await
     }
@@ -227,7 +206,7 @@ impl Store {
         unit_id: &str,
         to: &UnitMove,
         user_id: &str,
-    ) -> Result<UnitWrite, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             let not_found = || StoreError::not_found(format_args!("unit ID={unit_id}"));
             if containers::lock_container_of_kind(scope, course_id).await?
@@ -258,10 +237,7 @@ impl Store {
                     .is_at(unit_id, parent_id, to.after.as_deref())
                     .map_err(invalid)?
             {
-                return Ok(UnitWrite {
-                    unit,
-                    renumbered: Vec::new(),
-                });
+                return Ok(Written::of(unit, Vec::new()));
             }
             let place = outline
                 .tree
@@ -270,7 +246,7 @@ impl Store {
             parent_id.clone_into(&mut unit.parent_id);
             let renumbered = write_place(scope, &mut unit, place).await?;
             blocks::insert_block(scope, &mut unit, user_id).await?;
-            Ok(UnitWrite { unit, renumbered })
+            Ok(Written::of(unit, renumbered))
         })
         .await
     }
@@ -350,7 +326,7 @@ impl Store {
         unit_id: &str,
         limits: CourseLimits,
         user_id: &str,
-    ) -> Result<UnitRestore, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             if containers::lock_container_of_kind(scope, course_id).await?
                 != Some(ContainerKind::Course)
@@ -408,7 +384,7 @@ async fn undelete(
     deletion: page_trash::Deletion,
     limits: CourseLimits,
     user_id: &str,
-) -> Result<UnitRestore, StoreError> {
+) -> Result<Written, StoreError> {
     let invalid = |source| StoreError::InvalidBlock {
         id: unit_id.to_owned(),
         source,
@@ -467,9 +443,6 @@ async fn undelete(
         }
     })
     .await?;
-    if !units.iter().any(|block| block.id == unit_id) {
-        return Err(block_not_in_trash());
-    }
     // The asked-for unit or chapter first, then parents before what is below them: a
     // comment is one below its unit.
     units.sort_by_key(|block| {
@@ -480,5 +453,14 @@ async fn undelete(
         };
         (block.id != unit_id, depth)
     });
-    Ok(UnitRestore { units, renumbered })
+    // Emptied of it meanwhile (`purge_trash` takes no lock): nothing is written.
+    let mut units = units.into_iter();
+    let Some(first) = units.next().filter(|block| block.id == unit_id) else {
+        return Err(block_not_in_trash());
+    };
+    Ok(Written {
+        first,
+        renumbered,
+        below: units.collect(),
+    })
 }

@@ -2,6 +2,7 @@
  * The files of the backend in memory: an upload, taken in parts as the
  * server takes a large one, and a file read through its board or wiki only.
  */
+import type { FileDetails } from '../../editor/files.ts';
 import type { UploadedFile, UploadOptions } from '../backend.ts';
 
 import { memberRole } from './container-access.ts';
@@ -76,6 +77,17 @@ export function readableFile(
   const file = world.files.get(fileId);
   if (file?.containerId !== containerId) fail(404, 'no such file');
   return file;
+}
+
+/** The name and size of such a file. */
+export function fileDetailsOf(
+  world: World,
+  userId: string,
+  containerId: string,
+  fileId: string,
+): FileDetails {
+  const { name, size } = readableFile(world, userId, containerId, fileId);
+  return { name, size };
 }
 
 /** The bytes of such a file; 404 for one the seed only names. */

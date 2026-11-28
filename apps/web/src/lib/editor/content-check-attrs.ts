@@ -8,7 +8,15 @@
  */
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 
-import { isAllowedHref, isBlockId, isFileId, isLanguage, isUserId, MAX_LATEX } from './schema.ts';
+import {
+  isAllowedHref,
+  isBlockId,
+  isCalloutTone,
+  isFileId,
+  isLanguage,
+  isUserId,
+  MAX_LATEX,
+} from './schema.ts';
 import { allowedSpan, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS } from './table-grid.ts';
 
 function checkNodeAttrs(node: ProseMirrorNode): void {
@@ -72,6 +80,9 @@ function checkNodeAttrs(node: ProseMirrorNode): void {
       ) {
         throw new RangeError(`Invalid ${node.type.name} span attribute`);
       }
+      break;
+    case 'callout':
+      if (!isCalloutTone(attrs.tone)) throw new RangeError('Invalid callout tone attribute');
       break;
     default:
       break;

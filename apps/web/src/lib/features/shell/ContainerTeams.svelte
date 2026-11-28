@@ -191,9 +191,9 @@
                       });
                     }}
                   >
-                    {#each roles as option (option)}<option value={option}
-                        >{labels[option]()}</option
-                      >{/each}
+                    {#each roles as option (option)}<option value={option}>
+                        {labels[option]()}
+                      </option>{/each}
                   </select>
                   <IconButton
                     label={words.teamRemove({ name: item.team.name })}
@@ -223,8 +223,9 @@
               disabled={busy}
             >
               <option value="">{m.groups_board_choose()}</option>
-              {#each candidates as team (team.id)}<option value={team.id}>{team.name}</option
-                >{/each}
+              {#each candidates as team (team.id)}<option value={team.id}>
+                  {team.name}
+                </option>{/each}
             </select>
             <select
               class="h-8 rounded-md border border-input-border bg-background px-2 text-base disabled:opacity-60 md:text-sm roomy:h-touch"
@@ -232,8 +233,9 @@
               bind:value={role}
               disabled={busy}
             >
-              {#each roles as option (option)}<option value={option}>{labels[option]()}</option
-                >{/each}
+              {#each roles as option (option)}<option value={option}>
+                  {labels[option]()}
+                </option>{/each}
             </select>
             <Button
               type="submit"

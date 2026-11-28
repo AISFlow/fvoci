@@ -16,7 +16,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::Store;
-use crate::db::{Id, Row, Scope};
+use crate::db::{FromRow, Id, Row, Scope};
 use crate::error::StoreError;
 
 /// Bounded parameters however many blocks one change notes.
@@ -160,12 +160,7 @@ impl Store {
             ]);
             sql.bind(now)
                 .push_bind(" ORDER BY due_at, scope, id LIMIT ", limit);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(change_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -349,14 +344,16 @@ fn push_row(sql: &mut crate::db::Sql, change: &SearchChange) {
         .push_bind(" AND seq = ", change.seq);
 }
 
-fn change_from_row(row: &Row) -> Result<SearchChange, StoreError> {
-    Ok(SearchChange {
-        target: SearchTarget::parse(&row.text(0)?)?,
-        id: row.id(1)?,
-        org_id: row.id(2)?,
-        seq: row.int(3)?,
-        attempts: row.int(4)?,
-    })
+impl FromRow for SearchChange {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(SearchChange {
+            target: SearchTarget::parse(&row.text(0)?)?,
+            id: row.id(1)?,
+            org_id: row.id(2)?,
+            seq: row.int(3)?,
+            attempts: row.int(4)?,
+        })
+    }
 }
 
 /// Notes that the blocks `ids` changed, in the transaction that changes them: while

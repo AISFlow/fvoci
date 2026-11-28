@@ -303,9 +303,9 @@
               </IconButton>
             {:else}
               <GaugeIcon class="size-3.5 shrink-0" aria-hidden="true" />
-              <span class="pr-1" data-testid="unit-amount-value"
-                >{formatAmount(amount, amountUnit)}</span
-              >
+              <span class="pr-1" data-testid="unit-amount-value">
+                {formatAmount(amount, amountUnit)}
+              </span>
             {/if}
           </div>
         {:else if course.canEdit}

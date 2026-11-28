@@ -168,8 +168,7 @@ pub(super) async fn files_of_card(
     let mut named: BTreeSet<String> = card
         .body
         .as_ref()
-        .map(|body| body.file_ids().into_iter().map(str::to_owned).collect())
-        .unwrap_or_default();
+        .map_or_default(|body| body.file_ids().into_iter().map(str::to_owned).collect());
     let attachments = ws
         .app
         .blocks(board_id, Some(&card.id), Some(&BlockType::Attachment))

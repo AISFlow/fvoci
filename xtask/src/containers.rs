@@ -54,11 +54,11 @@ const POSTGRES_SHM_BYTES: u64 = 1024 * 1024 * 1024;
 /// The PostgreSQL image, pinned to a multi-architecture manifest index (`linux/amd64`,
 /// `linux/arm64/v8`). Change together with `.github/scripts/test-services.sh`.
 const POSTGRES_IMAGE: &str =
-    "postgres:18@sha256:eb63372c1e05c755f55fa30cbd07aecc443676fc6c0fa90b9002d01537841e1a";
+    "postgres:18@sha256:64c8b0d31e4ab6ea665e8426ea406a94bf52de3c05b3a4a8bf713704eefa9328";
 
 /// The S3-compatible store image, pinned to a multi-architecture manifest index
 /// (`linux/amd64`, `linux/arm64`). Change together with `.github/scripts/test-services.sh`.
-const OBJECT_STORE_IMAGE: &str = "chrislusf/seaweedfs:latest@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15";
+const OBJECT_STORE_IMAGE: &str = "chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9";
 
 /// The bucket the S3 storage test writes into.
 const S3_BUCKET: &str = "fvoci-test";

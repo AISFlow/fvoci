@@ -15,6 +15,7 @@ import {
   type User,
 } from '../state/backend.ts';
 import type { ApiTokens } from '../state/api-tokens.ts';
+import type { CardActivity } from '../state/activity-types.ts';
 import type { BodyVersions } from '../state/body-versions.ts';
 import type { EmailChange } from '../state/email-change.ts';
 import type { FileVersions } from '../state/file-versions.ts';
@@ -24,16 +25,21 @@ import type { References } from '../state/references.ts';
 import { AccountRequests } from './account-requests.ts';
 import { ServerApiTokens } from './api-tokens.ts';
 import { ServerBodyVersions } from './body-versions.ts';
+import { ServerCardActivity } from './card-activity.ts';
 import { containerOf, userOf, type Schemas } from './convert.ts';
 import { ServerCourses } from './courses.ts';
 import { ServerDiaries } from './diaries.ts';
+import { downloadWithProgress } from './download.ts';
 import { ServerEmailChange } from './email-change.ts';
+import { ServerFavorites } from './favorites.ts';
 import { ServerFileVersions } from './file-versions.ts';
 import type { ApiPath, Http, RequestOptions } from './http.ts';
+import { ServerMarkdowns } from './markdowns.ts';
 import { ServerNotifications } from './notifications.ts';
 import { ServerPeople } from './people.ts';
 import { ServerReferences } from './references.ts';
 import { ServerTime } from './time.ts';
+import { ServerReactions } from './reactions.ts';
 import { ServerWatches } from './watches.ts';
 import { ServerWikis } from './wikis.ts';
 
@@ -72,6 +78,7 @@ export class ServerRequests extends AccountRequests implements TrashReads {
   readonly course: ServerCourses;
   /** The versions kept of the bodies of cards. */
   readonly bodyVersions: BodyVersions;
+  readonly cardActivity: CardActivity;
   readonly fileVersions: FileVersions;
   /** What bodies name, as the reader may see it. */
   readonly references: References;
@@ -81,6 +88,12 @@ export class ServerRequests extends AccountRequests implements TrashReads {
   readonly notifications: ServerNotifications;
   /** What the reader watches, the cards, pages and units they are told of. */
   readonly watches: ServerWatches;
+  /** The reader's stars, at the head of the sidebar and of the search. */
+  readonly favorites: ServerFavorites;
+  /** Bodies in Markdown, and containers as ZIPs of Markdown files. */
+  readonly markdown: ServerMarkdowns;
+  /** The emoji the reader answers comments, cards, pages and units with. */
+  readonly reactions: ServerReactions;
   /** Personal time tracking entries and active timer of the signed-in reader. */
   readonly time: ServerTime;
   /** The workspace the reader is in (`enter`): the paths of its boards are under it. */
@@ -103,6 +116,9 @@ export class ServerRequests extends AccountRequests implements TrashReads {
     this.bodyVersions = new ServerBodyVersions((path, params, options) =>
       this.inWorkspace(path, params, options),
     );
+    this.cardActivity = new ServerCardActivity((path, params, options) =>
+      this.inWorkspace(path, params, options),
+    );
     this.fileVersions = new ServerFileVersions(
       (path, params, options) => this.inWorkspace(path, params, options),
       (path, params, signal) => this.inWorkspaceBytes(path, params, signal),
@@ -111,6 +127,23 @@ export class ServerRequests extends AccountRequests implements TrashReads {
       this.inWorkspace(path, params, options, workspaceId),
     );
     this.watches = new ServerWatches((path, params, options, workspaceId) =>
+      this.inWorkspace(path, params, options, workspaceId),
+    );
+    this.favorites = new ServerFavorites((path, params, options, workspaceId) =>
+      this.inWorkspace(path, params, options, workspaceId),
+    );
+    this.markdown = new ServerMarkdowns(
+      (path, params, options) => this.inWorkspace(path, params, options),
+      (containerId, options) =>
+        downloadWithProgress(
+          http,
+          underWorkspace('/containers/{containerId}/markdown/export'),
+          this.workspaceOf({ containerId }),
+          'markdown.zip',
+          options,
+        ),
+    );
+    this.reactions = new ServerReactions((path, params, options, workspaceId) =>
       this.inWorkspace(path, params, options, workspaceId),
     );
     const request = this.#inContainer.bind(this);

@@ -436,6 +436,10 @@ pub(crate) async fn work_on(store: &Store, board: &str, card: &str, user_id: &st
             "INSERT INTO subscriptions (block_type, block_id, user_id, \
              created_at) VALUES ('card', '{card}', '{user_id}', {T0})"
         ),
+        format!(
+            "INSERT INTO reactions (block_id, user_id, emoji, created_at) \
+             VALUES ('{card}', '{user_id}', '👍', {T0})"
+        ),
     ] {
         store
             .execute_unchecked(&statement)
@@ -674,7 +678,7 @@ async fn record_course_progress(store: &Store, workspace_id: &str, owner: &str, 
         )
         .await
         .expect("a unit is stored")
-        .unit;
+        .first;
     store
         .save_member(&ContainerMember {
             container_id: course.id.clone(),

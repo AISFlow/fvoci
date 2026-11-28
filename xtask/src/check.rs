@@ -73,7 +73,12 @@ pub(crate) fn run(root: &Path, licenses: Licenses) -> Result<()> {
             let workspaces = crate::names::run(root);
             banned.and(workspaces)
         }),
-        Step::new("layers", || crate::layers::run(root)),
+        Step::new("layers", || {
+            // Both run, so that one's failure does not hide the other's.
+            let layers = crate::layers::run(root);
+            let locks = crate::locks::run(root);
+            layers.and(locks)
+        }),
         Step::new("lengths", || crate::lengths::run(root)),
         Step::new("contract", || {
             crate::openapi::run(root, crate::openapi::Mode::Check)

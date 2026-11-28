@@ -392,7 +392,7 @@ async fn korean_questions_find_their_cards_on_a_real_search_server() {
             if required { "" } else { ", 바람" },
             if hit.is_some() { "예" } else { "아니오" },
             titles.join(", "),
-            hit.map(shown).unwrap_or_default(),
+            hit.map_or_default(shown),
         );
     }
     // The case the search was asked for, with the piece of the body that matched.

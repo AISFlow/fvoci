@@ -179,12 +179,7 @@ fn gap_from_the_chain(recorded: &[Recorded], chain: &[(i64, &str)]) -> Option<St
 /// that are not done yet, by name.
 async fn pending_data_steps(scope: &mut Scope<'_>) -> Result<Vec<String>, StoreError> {
     let sql = scope.sql("SELECT name FROM data_steps ORDER BY name");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.text(0))
-        .collect()
+    scope.all(sql).await
 }
 
 /// Bytes in lowercase hexadecimal, as the record of the servers before the baseline is
@@ -256,10 +251,7 @@ pub(crate) async fn may_change(store: &Store) -> Result<bool, StoreError> {
                    FROM (SELECT to_regclass(quote_ident(current_schema()) \
                      || '._sqlx_migrations') AS record) AS found), false)",
             );
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.bool(0),
-                None => Ok(false),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(false))
         })
         .await
 }
@@ -274,10 +266,7 @@ pub(crate) async fn whereabouts(store: &Store) -> Result<(String, String), Store
         .with_conn(async |scope| {
             let sql =
                 scope.sql("SELECT current_user::text, COALESCE(current_schema()::text, '(none)')");
-            match scope.fetch_optional(sql).await? {
-                Some(row) => Ok((row.text(0)?, row.text(1)?)),
-                None => Ok((String::new(), String::new())),
-            }
+            Ok(scope.first(sql).await?.unwrap_or_default())
         })
         .await
 }
@@ -308,12 +297,7 @@ pub(crate) async fn ungranted_tables(store: &Store) -> Result<Vec<String>, Store
                        AND has_table_privilege(c.oid, 'DELETE')))) \
                  ORDER BY c.relname",
             );
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.text(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
 }
@@ -341,10 +325,5 @@ async fn table_names(scope: &mut Scope<'_>) -> Result<Vec<String>, StoreError> {
              WHERE table_schema = current_schema()",
         ),
     };
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.text(0))
-        .collect()
+    scope.all(sql).await
 }

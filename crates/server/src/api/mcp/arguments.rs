@@ -2,8 +2,8 @@
 //! schema is made from (`Tool::input_schema`), so that what a tool says it takes and
 //! what it reads are one thing.
 
-use fvoci_model::JsonMap;
-use serde::Deserialize;
+use fvoci_model::{JsonMap, Recurrence};
+use serde::{Deserialize, Deserializer};
 use utoipa::ToSchema;
 
 /// The arguments of a tool that takes none: an empty object.
@@ -203,6 +203,46 @@ pub(super) struct ListCommentsArguments {
     pub(super) item_id: String,
 }
 
+/// A card whose activity to read.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ListActivityArguments {
+    /// The workspace, as `list_workspaces` names it.
+    pub(super) workspace_id: String,
+    /// The card.
+    pub(super) card_id: String,
+    /// The page, from 1.
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub(super) page: Option<u32>,
+    /// How many lines a page has, from 1 to 1000; 50 if left out.
+    #[serde(default)]
+    #[schema(minimum = 1, maximum = 1000)]
+    pub(super) per_page: Option<u32>,
+}
+
+/// Cards of one board to change alike.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct SaveCardsArguments {
+    /// The workspace, as `list_workspaces` names it.
+    pub(super) workspace_id: String,
+    /// The board the cards are on.
+    pub(super) board_id: String,
+    /// The cards: 1 to 200 distinct identifiers of cards of the board that are no
+    /// templates.
+    #[schema(min_items = 1, max_items = 200)]
+    pub(super) card_ids: Vec<String>,
+    /// Values to set on each, by property identifier, as `save_card` takes them. The
+    /// cards' other values stay.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub(super) properties: Option<JsonMap>,
+    /// Properties whose value the cards are to lose.
+    #[serde(default)]
+    pub(super) deleted_properties: Option<Vec<String>>,
+}
+
 /// The files of a board or wiki, or of one card.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -265,6 +305,46 @@ pub(super) struct SaveCardArguments {
     /// other changes. Not with `bodyMarkdown`.
     #[serde(default)]
     pub(super) append_markdown: Option<String>,
+    /// How the card repeats: `{"every": 1, "unit": "week", "anchor": "due"}` (`every`
+    /// 1 to 365; `unit` `day`, `week`, `month` or `year`; counted from the due date,
+    /// `due`, or from the day it is completed, `done`); `null` makes it stop. When a
+    /// card that repeats is completed, the server makes the next card, due one period
+    /// on. Only on a board with a rule of done and a named due date property
+    /// (`recurrence_needs_board_rules`). Left out, a card that is changed keeps its own.
+    #[serde(default, deserialize_with = "given_or_null")]
+    #[schema(value_type = Option<RecurrenceShape>, inline)]
+    #[expect(
+        clippy::option_option,
+        reason = "left out keeps how the card repeats, `null` makes it stop"
+    )]
+    pub(super) recurrence: Option<Option<Recurrence>>,
+}
+
+/// How a card repeats.
+// The shape of a `Recurrence` in an input schema, which refers to no other: what
+// `save_card` reads it as is the model's.
+#[derive(ToSchema)]
+#[expect(dead_code, reason = "only its schema is used")]
+struct RecurrenceShape {
+    #[schema(minimum = 1, maximum = 365)]
+    every: u16,
+    #[schema(inline)]
+    unit: fvoci_model::RecurrenceUnit,
+    #[schema(inline)]
+    anchor: fvoci_model::RecurrenceAnchor,
+}
+
+/// A member that may be left out (`None`), `null` (`Some(None)`) or a value.
+#[expect(
+    clippy::option_option,
+    reason = "a member left out keeps what is there, `null` takes it away"
+)]
+fn given_or_null<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Whether it is a page of a wiki or a unit of a course.
@@ -285,16 +365,6 @@ pub(super) enum OutlineEntry {
     Unit,
     /// A chapter: a title at the top of the course that units go below, with no body.
     Chapter,
-}
-
-impl OutlineEntry {
-    /// The word `createUnit` takes for it.
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Unit => "unit",
-            Self::Chapter => "chapter",
-        }
-    }
 }
 
 /// The caller's own progress on a unit.

@@ -66,18 +66,6 @@ async fn every_way_a_card_is_made_gives_it_the_next_number_and_every_read_says_i
         "a template of the board's cards has none"
     );
 
-    let sent = Block {
-        id: new_id(),
-        container_id: board.id.clone(),
-        block_type: BlockType::Card,
-        title: "by blocks".to_owned(),
-        number: Some(1),
-        ..Block::default()
-    };
-    ts.client
-        .insert_blocks_in(TEST_WORKSPACE_ID, &board.id, &[sent])
-        .await
-        .check_bad_request();
     let second_req = json!({"title": "by blocks", "number": 1});
     let second = create_card(&ts.client, TEST_WS, &board.id, second_req).await;
     assert_eq!(second.number, Some(2));
@@ -86,13 +74,13 @@ async fn every_way_a_card_is_made_gives_it_the_next_number_and_every_read_says_i
         let client = &ts.client;
         let board_id = board.id.clone();
         async move {
-            let copies: Vec<Block> = client
+            let copy: Card = client
                 .post_empty(&format!(
-                    "{TEST_WS}/boards/{board_id}/blocks/{id}/duplicate{query}"
+                    "{TEST_WS}/boards/{board_id}/cards/{id}/duplicate{query}"
                 ))
                 .await
                 .created_json();
-            copies[0].number
+            copy.number
         }
     };
     assert_eq!(duplicate(first.id.clone(), "").await, Some(3), "a copy");
@@ -166,11 +154,7 @@ async fn an_imported_board_numbers_its_cards_from_one() {
     let template = json!({"title": "template", "isTemplate": true});
     create_card(&ts.client, TEST_WS, &board.id, template).await;
     // The archive has the numbers 2 and 3.
-    ts.client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            board.id, made[0].id
-        ))
+    crate::blocks::trash_card(&ts.client, &board.id, &made[0].id)
         .await
         .check_no_content();
     let exported = ts
@@ -215,7 +199,7 @@ async fn an_imported_board_numbers_its_cards_from_one() {
 }
 
 /// What a request sends as a number, which is no number of a card at all, is ignored
-/// as any number it sends is: by the route of cards and by that of blocks.
+/// as any number it sends is.
 #[tokio::test]
 async fn a_number_a_request_sends_is_never_refused_nor_taken() {
     let ts = Setup::native().start().await.init_basic().await;
@@ -233,18 +217,6 @@ async fn a_number_a_request_sends_is_never_refused_nor_taken() {
     )
     .await;
     assert_eq!(second.number, Some(2));
-    let combined: Value = ts
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{"id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "open"}],
-                "blocks": [{"id": "a", "containerId": "b1", "type": "card", "number": -1}],
-            }),
-        )
-        .await
-        .created_json();
-    assert_eq!(combined["blocks"][0]["number"], json!(1));
     ts.teardown().await;
 }
 
@@ -286,11 +258,7 @@ async fn what_is_no_card_of_the_board_now_is_not_found() {
     by_number(&ts.client, TEST_WS, &board.id, "1")
         .await
         .check_ok();
-    ts.client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            board.id, second.id
-        ))
+    crate::blocks::trash_card(&ts.client, &board.id, &second.id)
         .await
         .check_no_content();
     for number in [
@@ -436,8 +404,8 @@ async fn a_card_of_another_organization_is_no_card() {
     ts.teardown().await;
 }
 
-/// Verifies that a card template hides its number across card, block, reference,
-/// shared-board and `getCardByNumber` routes.
+/// Verifies that a card template hides its number across card, reference, shared-board
+/// and `getCardByNumber` routes and in an archive.
 async fn assert_template_hides_number_everywhere(
     ts: &TestServer,
     board_id: &str,
@@ -452,14 +420,16 @@ async fn assert_template_hides_number_everywhere(
     assert!(fetched_card.is_template, "card is marked as template");
     assert_eq!(fetched_card.number, None, "getCard hides template number");
 
-    let blocks: Vec<Block> = ts
+    let cards: Vec<Card> = ts
         .client
-        .get(&format!(
-            "{TEST_WS}/boards/{board_id}/blocks?blockId={card_id}"
-        ))
+        .get(&format!("{TEST_WS}/boards/{board_id}/cards"))
         .await
         .ok_json();
-    assert_eq!(blocks[0].number, None, "getBlocks hides template number");
+    let listed = cards
+        .iter()
+        .find(|card| card.id == card_id)
+        .expect("the template is listed");
+    assert_eq!(listed.number, None, "getCards hides template number");
 
     let resolved: Vec<Value> = ts
         .client
@@ -532,25 +502,18 @@ async fn assert_template_hides_number_everywhere(
     );
 }
 
-/// Converting a numbered card to a template hides its number across card, block,
-/// reference, shared-board and `getCardByNumber` routes while preserving it in storage;
-/// converting it back restores the old number without consuming a new one.
+/// A numbered card an older server made a template of keeps its number in storage and
+/// hides it across card, reference, shared-board and `getCardByNumber` routes; back
+/// from the trash too. Its copy is a card with a number of its own, and a template
+/// made from it has none.
 #[tokio::test]
-async fn converting_a_card_to_template_hides_and_restores_its_number_across_routes() {
+async fn a_card_made_a_template_hides_its_number_across_routes() {
     let ts = Setup::local_mode().start().await.init_basic().await;
     let board = ts
         .create_board(TEST_WORKSPACE_ID, ContainerVisibility::Open)
         .await;
     let first = create_card(&ts.client, TEST_WS, &board.id, json!({"title": "first"})).await;
-    let fresh_template = create_card(
-        &ts.client,
-        TEST_WS,
-        &board.id,
-        json!({"title": "fresh template", "isTemplate": true}),
-    )
-    .await;
     assert_eq!(first.number, Some(1), "first card takes #1");
-    assert_eq!(fresh_template.number, None, "fresh template has no number");
 
     let sharing: Value = ts
         .client
@@ -562,87 +525,41 @@ async fn converting_a_card_to_template_hides_and_restores_its_number_across_rout
         .ok_json();
     let token = sharing["token"].as_str().expect("a share token");
 
-    // Convert card #1 into a template via patchBlock (`fields.isTemplate = true`).
-    ts.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, first.id),
-            &json!({"updatedFields": {"isTemplate": true}}),
-        )
-        .await
-        .check_no_content();
+    // Card #1 made a template, as an older server's `patchBlock` did.
+    crate::blocks::make_template_unchecked(&ts, &first.id).await;
     assert_template_hides_number_everywhere(&ts, &board.id, &first.id, token).await;
 
-    // Trash & restore while a template: still hidden, then restored on conversion back.
-    ts.client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            board.id, first.id
-        ))
+    // Trash & restore while a template: still hidden.
+    crate::blocks::trash_card(&ts.client, &board.id, &first.id)
         .await
         .check_no_content();
-    let undeleted: Block = ts
-        .client
-        .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/restore",
-            board.id, first.id
-        ))
+    let restored: Value = crate::blocks::restore_card(&ts.client, &board.id, &first.id)
         .await
         .ok_json();
-    assert_eq!(undeleted.number, None, "restoreBlock hides template number");
+    assert!(
+        restored["cards"][0]["number"].is_null(),
+        "batchRestoreCards hides template number: {restored}"
+    );
 
     // Duplicate while template: ordinary copy gets #2, template copy gets None.
-    let copied: Vec<Block> = ts
-        .client
-        .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
-            board.id, first.id
-        ))
-        .await
-        .created_json();
-    assert_eq!(copied[0].number, Some(2), "duplicate gets a new number");
-    let dup_template: Vec<Block> = ts
-        .client
-        .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate?asTemplate=true",
-            board.id, first.id
-        ))
-        .await
-        .created_json();
-    assert_eq!(dup_template[0].number, None, "template duplicate has none");
-
-    // Convert back to an ordinary card: regains #1 without consuming #3.
-    ts.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, first.id),
-            &json!({"updatedFields": {"isTemplate": false}}),
-        )
-        .await
-        .check_no_content();
-    let restored_card: Card = ts
-        .client
-        .get(&format!("{TEST_WS}/cards/{}", first.id))
-        .await
-        .ok_json();
-    assert!(!restored_card.is_template, "restored card is ordinary");
-    assert_eq!(restored_card.number, Some(1), "old number is restored");
-    let found_again: Card = by_number(&ts.client, TEST_WS, &board.id, "1")
-        .await
-        .ok_json();
-    assert_eq!(found_again.id, first.id, "getCardByNumber finds #1 again");
-
-    // Fresh template converted to ordinary card consumes the next number (#3).
-    ts.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, fresh_template.id),
-            &json!({"updatedFields": {"isTemplate": false}}),
-        )
-        .await
-        .check_no_content();
-    let fresh_as_card: Card = ts
-        .client
-        .get(&format!("{TEST_WS}/cards/{}", fresh_template.id))
-        .await
-        .ok_json();
-    assert_eq!(fresh_as_card.number, Some(3), "fresh template takes #3");
+    let duplicate = async |query: &str| -> Card {
+        ts.client
+            .post_empty(&format!(
+                "{TEST_WS}/boards/{}/cards/{}/duplicate{query}",
+                board.id, first.id
+            ))
+            .await
+            .created_json()
+    };
+    assert_eq!(
+        duplicate("").await.number,
+        Some(2),
+        "duplicate gets a new number"
+    );
+    assert_eq!(
+        duplicate("?asTemplate=true").await.number,
+        None,
+        "template duplicate has none"
+    );
     ts.teardown().await;
 }

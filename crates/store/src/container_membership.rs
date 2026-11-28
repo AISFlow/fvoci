@@ -258,10 +258,7 @@ async fn standing_holds(
          WHERE w.deleted_at IS NULL AND b.id = ",
     );
     sql.bind(Id(container_id));
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("board"));
-    };
-    let workspace_id = row.id(0)?;
+    let workspace_id: String = scope.one(sql, "board").await?;
     let now_role = org_admin::membership(scope, &workspace_id, asked.user_id)
         .await?
         .map(|(role, _)| role);

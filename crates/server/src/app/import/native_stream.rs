@@ -345,10 +345,7 @@ fn scan_native_board_blocking(
     let entry = zip
         .by_index(zip_index)
         .map_err(|error| AppError::bad_request(format_args!("{error}")))?;
-    let entry_label = entry
-        .name()
-        .map(std::borrow::Cow::into_owned)
-        .unwrap_or_default();
+    let entry_label = entry.name().map_or_default(std::borrow::Cow::into_owned);
     let mut reader = BufReader::with_capacity(STREAM_READER_BUF_BYTES, entry);
     let mut state = ScanAccum::new(now_millis());
     let mut line_buf = Vec::with_capacity(4096);
@@ -543,7 +540,7 @@ impl ScanAccum {
         };
         collect_block_references(&block, &self.relations, &mut self.referenced);
         if let Some(body) = &block.body {
-            for id in body.reference_ids() {
+            for id in body.linked_ids() {
                 self.body_refs.insert(id.to_owned());
             }
         }

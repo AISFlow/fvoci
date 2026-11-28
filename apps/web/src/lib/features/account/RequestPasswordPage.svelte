@@ -72,16 +72,16 @@
             />
           </div>
           {#if problem}<p class="text-sm text-destructive" role="alert">{problem}</p>{/if}
-          <Button type="submit" disabled={working} class="roomy:min-h-touch"
-            >{m.reset_request_submit()}</Button
-          >
+          <Button type="submit" disabled={working} class="roomy:min-h-touch">
+            {m.reset_request_submit()}
+          </Button>
         </form>
       {/if}
     {:catch error}
       <p role="alert">{problemOf(error)}</p>
     {/await}
-    <a href={homeHref} class="text-center text-sm underline underline-offset-4"
-      >{m.reset_sign_in()}</a
-    >
+    <a href={homeHref} class="text-center text-sm underline underline-offset-4">
+      {m.reset_sign_in()}
+    </a>
   </div>
 </main>

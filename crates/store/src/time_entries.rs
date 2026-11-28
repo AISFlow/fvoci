@@ -18,7 +18,7 @@ use fvoci_model::{
 use crate::Store;
 use crate::blocks::Paging;
 use crate::container_team_access;
-use crate::db::{Dialect, Id, OptId, Param, Row, Scope, Sql};
+use crate::db::{Dialect, FromRow, Id, OptId, Param, Row, Scope, Sql};
 use crate::directory::{IN_USE, Making, SessionTaken};
 use crate::error::StoreError;
 use crate::snapshot::Snapshot;
@@ -356,7 +356,7 @@ impl Store {
                     .iter()
                     .map(|row| {
                         let org_id = row.id(1)?;
-                        let mut entry = row_to_entry(row)?;
+                        let mut entry = TimeEntry::from_row(row)?;
                         if former_orgs.contains(&org_id) {
                             mask_former_org_target(&mut entry);
                         }
@@ -475,11 +475,7 @@ impl Store {
                 );
                 sql.bind(Id(user_id))
                     .push(" AND o.deleted_at IS NULL AND w.deleted_at IS NULL");
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await
     }
@@ -518,11 +514,7 @@ impl Store {
                     .push_bind(" AND b.is_template = ", false)
                     .push_bind(" AND b.is_builtin = ", false);
                 push_readable_container(&mut sql, scope, user_id);
-                scope
-                    .fetch_optional(sql)
-                    .await?
-                    .map(|row| row.id(0))
-                    .transpose()
+                scope.first(sql).await
             })
             .await
     }
@@ -626,7 +618,7 @@ async fn user_present_in_active_org(
         .bind(Id(user_id))
         .push(&scope.same_organization(&[("wm", "w")]))
         .push("))");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 async fn lock_user_if_in_use(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, StoreError> {
@@ -847,7 +839,7 @@ fn org_opened_by(
 }
 
 fn row_to_visible(row: &Row, making: Making<&str>) -> Result<VisibleRow, StoreError> {
-    let mut entry = row_to_entry(row)?;
+    let mut entry = TimeEntry::from_row(row)?;
     let visible = match row.opt_text(13)? {
         Some(kind_text) => {
             let kind = parse_org_kind(&kind_text)?;
@@ -873,25 +865,27 @@ fn mask_former_org_target(entry: &mut TimeEntry) {
     entry.target_title = None;
 }
 
-fn row_to_entry(row: &Row) -> Result<TimeEntry, StoreError> {
-    let target_kind = row
-        .opt_text(5)?
-        .map(|text| parse_target_kind(&text))
-        .transpose()?;
-    Ok(TimeEntry {
-        id: row.id(0)?,
-        workspace_id: opt_id(row, 2)?,
-        container_id: opt_id(row, 3)?,
-        block_id: opt_id(row, 4)?,
-        target_kind,
-        target_title: row.opt_text(6)?,
-        kind: parse_entry_kind(&row.text(7)?)?,
-        started_at: row.int(8)?,
-        ended_at: row.opt_int(9)?,
-        note: row.text(10)?,
-        created_at: row.int(11)?,
-        updated_at: row.int(12)?,
-    })
+impl FromRow for TimeEntry {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let target_kind = row
+            .opt_text(5)?
+            .map(|text| parse_target_kind(&text))
+            .transpose()?;
+        Ok(TimeEntry {
+            id: row.id(0)?,
+            workspace_id: opt_id(row, 2)?,
+            container_id: opt_id(row, 3)?,
+            block_id: opt_id(row, 4)?,
+            target_kind,
+            target_title: row.opt_text(6)?,
+            kind: parse_entry_kind(&row.text(7)?)?,
+            started_at: row.int(8)?,
+            ended_at: row.opt_int(9)?,
+            note: row.text(10)?,
+            created_at: row.int(11)?,
+            updated_at: row.int(12)?,
+        })
+    }
 }
 
 fn opt_id(row: &Row, index: usize) -> Result<Option<String>, StoreError> {

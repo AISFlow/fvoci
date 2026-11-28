@@ -15,7 +15,8 @@
 use std::collections::{HashMap, HashSet};
 
 use fvoci_model::{
-    ContainerKind, Notification, NotificationKind, NotificationSubject, SearchKind, Session,
+    ContainerKind, Notification, NotificationFilter, NotificationKind, NotificationSubject,
+    SearchKind, Session,
 };
 use fvoci_store::{
     ContainerNotificationPlace, MeetingNotificationPlace, NotificationEvent, NotificationLimits,
@@ -320,9 +321,11 @@ impl App {
             .map(|entered| entered.app))
     }
 
-    /// A page of what the session's user was told, in every organization the session
-    /// opens, the newest first. Each is asked again whether the user reads what it is
-    /// about, as the session opens it: one they do not read now has no subject.
+    /// A page of what the session's user was told that `filter` takes, in every
+    /// organization the session opens, the newest first. Each is asked again whether
+    /// the user reads what it is about, as the session opens it: one they do not read
+    /// now has no subject, and is left out where `filter` asks for a kind, as it says
+    /// none.
     ///
     /// # Errors
     ///
@@ -330,12 +333,13 @@ impl App {
     pub async fn notifications(
         &self,
         session: &Session,
+        filter: NotificationFilter,
         page: ListPage,
     ) -> Result<Vec<Notification>, AppError> {
         let user_id = session.user_id.as_str();
         let stored = self
             .store()
-            .notifications_of_user(reader(session.into()), page.paging())
+            .notifications_found(reader(session.into()), filter, page.paging())
             .await?;
         let mut places: HashMap<&str, Seen> = HashMap::new();
         let org_ids: HashSet<&str> = stored.iter().map(|told| told.org_id.as_str()).collect();
@@ -413,18 +417,7 @@ impl App {
                 }
             }
         }
-        Ok(stored
-            .iter()
-            .map(|told| Notification {
-                id: told.id.clone(),
-                created_at: told.created_at,
-                updated_at: told.updated_at,
-                read_at: told.read_at,
-                subject: places
-                    .remove(told.id.as_str())
-                    .map(|seen| subject(told, seen)),
-            })
-            .collect())
+        Ok(as_seen(&stored, places, filter))
     }
 
     /// How many notifications the asker has not read, in every organization their
@@ -501,6 +494,30 @@ impl App {
     }
 }
 
+/// The notifications `stored`, each with its subject where the reader reads what it is
+/// about (`places`), the others with none; where `filter` asks for a kind, those alone
+/// that have one.
+fn as_seen(
+    stored: &[StoredNotification],
+    mut places: HashMap<&str, Seen>,
+    filter: NotificationFilter,
+) -> Vec<Notification> {
+    stored
+        .iter()
+        .map(|told| Notification {
+            id: told.id.clone(),
+            created_at: told.created_at,
+            updated_at: told.updated_at,
+            read_at: told.read_at,
+            archived_at: told.archived_at,
+            subject: places
+                .remove(told.id.as_str())
+                .map(|seen| subject(told, seen)),
+        })
+        .filter(|told| filter.kind.is_none() || told.subject.is_some())
+        .collect()
+}
+
 /// What a notification is about, for a reader who reads what `seen` says now.
 fn subject(told: &StoredNotification, seen: Seen) -> NotificationSubject {
     let Seen { place, comment_id } = seen;
@@ -521,7 +538,7 @@ fn subject(told: &StoredNotification, seen: Seen) -> NotificationSubject {
 }
 
 /// The asker as the store reads their notifications: with the session they ask by.
-fn reader(asker: Asker<'_>) -> NotificationReader<'_> {
+pub(super) fn reader(asker: Asker<'_>) -> NotificationReader<'_> {
     NotificationReader {
         user_id: asker.user_id,
         making: asker.making,

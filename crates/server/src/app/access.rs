@@ -82,9 +82,11 @@ impl App {
         let member = facts.member;
         let team_role = facts.team_role;
         let workspace_id = match container.as_ref() {
-            Some(container) if container.is_builtin => self.workspace.as_deref().unwrap_or(""),
+            Some(container) if container.is_builtin => {
+                self.reach.workspace.as_deref().unwrap_or("")
+            }
             Some(container) => &container.workspace_id,
-            None => self.workspace.as_deref().unwrap_or(""),
+            None => self.reach.workspace.as_deref().unwrap_or(""),
         };
         let actor = self.actor(user_id, workspace_id).await?;
         let Some(container) = container else {
@@ -121,7 +123,7 @@ impl App {
     ///
     /// Returns 400 naming `kind`.
     pub(super) fn require_makes(&self, container: &Container) -> Result<(), AppError> {
-        if self.kinds.holds(container.kind) {
+        if self.reach.kinds.holds(container.kind) {
             return Ok(());
         }
         Err(AppError::bad_request(format_args!(
@@ -147,7 +149,7 @@ impl App {
         user_id: &str,
     ) -> Result<(Upload, Vec<UploadPart>), AppError> {
         let (upload, parts) = self.upload(upload_id, user_id).await?;
-        if self.workspace.is_none() {
+        if self.reach.workspace.is_none() {
             return Ok((upload, parts));
         }
         let reached = match upload.purpose {
@@ -250,7 +252,7 @@ impl App {
     /// Returns the store's error if the membership cannot be read.
     pub async fn actor(&self, user_id: &str, workspace_id: &str) -> Result<Actor, AppError> {
         if !workspace_id.is_empty()
-            && let Some((known_user, known_ws, actor)) = self.known_actor.as_deref()
+            && let Some((known_user, known_ws, actor)) = self.reach.known_actor.as_deref()
             && known_user == user_id
             && known_ws == workspace_id
         {

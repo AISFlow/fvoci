@@ -9,6 +9,7 @@ import {
   INVALID,
   MIXED,
   REFERENCES,
+  TOGGLES,
 } from './body-samples.ts';
 
 /** The read-only view of a document body (src/lib/editor/BodyView.svelte). */
@@ -34,5 +35,7 @@ export const Formulas: Story = { args: { doc: FORMULAS } };
 export const Diagrams: Story = { args: { doc: DIAGRAMS } };
 /** References to cards and pages: with a title, too long for the line, not the reader's to see, and being asked. */
 export const References: Story = { args: { doc: REFERENCES } };
+/** Toggles, closed at first (the page's own `<details>`), and a callout of each tone. */
+export const Toggles: Story = { args: { doc: TOGGLES } };
 /** File blocks: the kind, name and size of each file and a button that saves it; a file that is gone says so. */
 export const Files: Story = { args: { doc: FILES } };

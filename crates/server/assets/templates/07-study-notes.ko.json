@@ -556,6 +556,47 @@
                 ]
               }
             ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "빈 목록이면 무엇을 돌려주나?"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None. "
+                      },
+                      {
+                        "type": "text",
+                        "text": "high",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": "가 -1에서 시작하니 반복문이 한 번도 돌지 않는다."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
           }
         ]
       }
@@ -618,6 +659,50 @@
               {
                 "type": "text",
                 "text": ". 전개해서 직접 보일 것."
+              }
+            ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "답: 제곱을 풀어 본다"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "E[(X-\\mu)^2] = E[X^2] - 2\\mu E[X] + \\mu^2 = E[X^2] - \\mu^2"
+                    }
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "여기서 "
+                      },
+                      {
+                        "type": "inlineMath",
+                        "attrs": {
+                          "latex": "E[X] = \\mu"
+                        }
+                      },
+                      {
+                        "type": "text",
+                        "text": " 이다."
+                      }
+                    ]
+                  }
+                ]
               }
             ]
           }

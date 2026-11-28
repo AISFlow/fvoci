@@ -21,7 +21,9 @@ use crate::clock::Clock;
 use crate::error::StoreError;
 
 mod locks;
-pub(crate) use locks::{DeletedContainersHeld, InstanceHeld, LockRank, OrganizationHeld};
+pub(crate) use locks::{
+    DeletedContainersHeld, InstanceHeld, LockRank, OrganizationHeld, RowLock, Unranked,
+};
 
 /// The SQL dialect of the connected database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +294,9 @@ pub(crate) struct Sql {
     invalid_id: Option<String>,
     /// Set by [`Self::changing_no_access`].
     changes_no_access: bool,
+    /// Whether it may hold a locking clause: one [`Self::push_lock`] ended it with, or
+    /// raw text of a test ([`locks::check_clause`]).
+    may_lock: bool,
 }
 
 impl Sql {
@@ -417,9 +422,9 @@ pub(crate) struct Scope<'c> {
     noting: Noting,
     /// The agent whose writes these are ([`crate::Store::by_agent`]).
     agent: Option<std::sync::Arc<crate::body_versions::AgentOfHandle>>,
-    /// Acquired `(rank, key)` locks in this scope for debug lock-order assertions.
+    /// The locks taken in this scope, for debug lock-order assertions.
     #[cfg(debug_assertions)]
-    locks: Vec<(LockRank, String)>,
+    locks: Vec<locks::TakenLock>,
 }
 
 /// Whom the writes of blocks of a handle, and of its scopes, note to be told.
@@ -431,7 +436,9 @@ pub(crate) enum Noting {
     /// Nobody, as its writer asked: what is written was said before (a copy, a change
     /// taken back or made again). Its writer watches what it writes new all the same.
     Quietly,
-    /// Nobody: what is written is no person's own words.
+    /// Nobody, and nobody comes to watch what is written: for the fixtures of tests
+    /// (`Store::telling_nobody`).
+    #[cfg(feature = "test-util")]
     Nobody,
 }
 
@@ -498,13 +505,13 @@ impl<'c> Scope<'c> {
         }
     }
 
-    /// Records a lock acquisition at `(rank, key)` and asserts global lock ordering in
-    /// debug and test builds.
-    pub(crate) fn record_lock(&mut self, rank: LockRank, key: &str) {
+    /// Records a lock acquisition at `(rank, key)`, as strong as `lock`, and asserts
+    /// global lock ordering in debug and test builds.
+    pub(crate) fn record_lock(&mut self, rank: LockRank, key: &str, lock: RowLock) {
         #[cfg(debug_assertions)]
-        locks::push_checked_lock(&mut self.locks, rank, key);
+        locks::push_checked_lock(&mut self.locks, rank, key, lock);
         #[cfg(not(debug_assertions))]
-        let _ = (rank, key);
+        let _ = (rank, key, lock);
     }
 
     /// Attaches the owning store's monotonic [`Clock`] to this scope.
@@ -757,6 +764,7 @@ impl<'c> Scope<'c> {
             params: Vec::new(),
             invalid_id: None,
             changes_no_access: false,
+            may_lock: false,
         }
     }
 
@@ -769,6 +777,7 @@ impl<'c> Scope<'c> {
             params: Vec::new(),
             invalid_id: None,
             changes_no_access: false,
+            may_lock: true,
         }
     }
 
@@ -776,6 +785,7 @@ impl<'c> Scope<'c> {
     ///
     /// A value bound as an identifier that is not one matches no row.
     pub(crate) async fn fetch_all(&mut self, sql: Sql) -> Result<Vec<Row>, StoreError> {
+        locks::check_clause(&sql);
         if !is_plain_select(&sql.text) {
             self.starts_writing(&sql);
         }
@@ -868,6 +878,7 @@ impl<'c> Scope<'c> {
         if let Some(invalid) = sql.invalid_id {
             return Err(StoreError::InvalidId(invalid));
         }
+        locks::check_clause(&sql);
         self.starts_writing(&sql);
         let text = AssertSqlSafe(sql.text);
         match &mut self.conn {
@@ -952,8 +963,10 @@ fn is_sql_ident(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+mod json;
+mod reads;
 mod row;
-pub(crate) use row::Row;
+pub(crate) use row::{FromRow, Row};
 
 #[cfg(test)]
 mod tests;

@@ -11,6 +11,12 @@
   sort: a mouse that travels with the button down, a finger that rests, or
   Space on the cell. A press that does neither is a click and edits the
   title in place.
+
+  For someone who may edit, a box at the start of the title cell selects the
+  row; it shows under a pointer that rests on the row, and on every row once
+  one is selected. A press with Ctrl or ⌘ or Shift anywhere on the row
+  selects too (`host.pick`), as does any press while selecting. Tab does not
+  stop at the box: X on a cell does what it does (Table.svelte).
 -->
 <script lang="ts">
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
@@ -65,6 +71,10 @@
     collapsed?: boolean;
     /** Whether the table displays hierarchy indentation / toggles. */
     showIndent?: boolean;
+    /** The row is in the selection. */
+    selected?: boolean;
+    /** Rows are being selected: every row shows its box. */
+    selecting?: boolean;
   }
 
   let {
@@ -81,6 +91,8 @@
     hasChildren = false,
     collapsed = false,
     showIndent = false,
+    selected = false,
+    selecting = false,
   }: Props = $props();
 
   /**
@@ -109,6 +121,7 @@
   /** A press on the title cell itself, not on one of the controls in it. */
   function onTitleClick(event: MouseEvent): void {
     if (event.target instanceof Element && event.target.closest('a, button, input')) return;
+    if (host.pick(card.id, event)) return;
     if (host.canEdit) host.editTitle(card.id);
   }
 </script>
@@ -124,6 +137,7 @@
 <div
   bind:this={row}
   role="row"
+  aria-selected={host.canEdit ? selected : undefined}
   data-nav-row
   data-row={card.id}
   data-card={card.id}
@@ -131,8 +145,9 @@
   data-drag-item={draggable ? card.id : undefined}
   data-dragging={dragging ? '' : undefined}
   data-drop-before={dropBefore ? '' : undefined}
+  data-selected={selected ? '' : undefined}
   class={[
-    'group/row relative border-t',
+    'group/row relative border-t data-selected:bg-muted',
     ROW,
     ROW_SKIPPED,
     dragging && 'opacity-50',
@@ -154,7 +169,7 @@
       // The lines between rows belong to the rows. This cell is drawn on a layer of its own, which
       // can sit a fraction of a pixel off: its fill stops short of its top and bottom edge, so that
       // the lines show whichever way it is off.
-      'flex min-w-0 items-center border-y border-e border-y-transparent bg-clip-padding ps-1 pe-1 group-hover/row:bg-muted',
+      'flex min-w-0 items-center border-y border-e border-y-transparent bg-clip-padding ps-1 pe-1 group-hover/row:bg-muted group-data-selected/row:bg-muted',
       ROW_HEIGHT,
       PINNED,
       CELL_FOCUS,
@@ -175,6 +190,39 @@
         <circle cx="6" cy="8" r="1.1" /><circle cx="10" cy="8" r="1.1" />
         <circle cx="6" cy="12.5" r="1.1" /><circle cx="10" cy="12.5" r="1.1" />
       </svg>
+    {/if}
+    {#if host.canEdit}
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={m.bulk_select_card({ title })}
+        data-select-row={card.id}
+        tabindex="-1"
+        class={[
+          'size-6 shrink-0 items-center justify-center rounded-sm roomy:size-touch',
+          selected || selecting
+            ? 'inline-flex'
+            : 'hidden can-hover:inline-flex can-hover:opacity-0 can-hover:group-focus-within/row:opacity-100 can-hover:group-hover/row:opacity-100',
+        ]}
+        onclick={(event) => {
+          host.toggleSelected(card.id, event.shiftKey);
+        }}
+      >
+        <span
+          aria-hidden="true"
+          class={[
+            'flex size-4 items-center justify-center rounded-[4px] border border-input',
+            selected && 'border-primary bg-primary text-primary-foreground',
+          ]}
+        >
+          {#if selected}
+            <svg class="size-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor">
+              <path d="M3.5 8.5l3 3 6-7" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          {/if}
+        </span>
+      </button>
     {/if}
     {#if showIndent}
       {#if level > 0}
@@ -225,8 +273,10 @@
       <span
         data-slot="row-title"
         class={['min-w-0 flex-1 truncate px-2', card.title === '' && 'text-muted-foreground']}
-        {title}>{title}</span
+        {title}
       >
+        {title}
+      </span>
     {/if}
     <CardPresence {board} cardId={card.id} class="px-1" />
     <span
@@ -302,6 +352,7 @@
       onclick={(event) => {
         if (editing) return;
         if (event.target instanceof Element && event.target.closest('a, button')) return;
+        if (host.pick(card.id, event)) return;
         host.activate(card, template);
       }}
     >

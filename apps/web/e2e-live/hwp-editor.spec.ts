@@ -85,9 +85,9 @@ test('a member edits an HWPX and saves it as a version; over a newer version, as
 
   // The server has the edit as the file's second version, by who saved it.
   const attached = (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-      params: { parentId: cardId, type: 'attachment' },
-    })
+    await api.get(
+      `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/attachments`,
+    )
   ).json()) as { fields: { fileId?: string } }[];
   const fileId = attached[0]?.fields.fileId ?? '';
   expect(fileId).not.toBe('');

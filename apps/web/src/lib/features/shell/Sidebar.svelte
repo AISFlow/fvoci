@@ -40,6 +40,7 @@
   import { BoardSearch } from './board-search.svelte.ts';
   import type { SidebarAsked } from './sidebar-actions.ts';
   import SidebarDialogs from './SidebarDialogs.svelte';
+  import type { FavoritePlaces } from './favorite-places.ts';
   import SidebarList from './SidebarList.svelte';
   import SidebarNavButton from './SidebarNavButton.svelte';
   import WorkspaceSwitcher from './WorkspaceSwitcher.svelte';
@@ -54,6 +55,8 @@
     reviewsToday?: { active: boolean; onOpen: () => void } | undefined;
     learningToday?: { active: boolean; onOpen: () => void } | undefined;
     containerHref: (container: ContainerPlace) => string;
+    /** Where the reader's stars lead; none, no stars. */
+    favoritePlaces?: FavoritePlaces | undefined;
     beside: boolean;
     onOpenContainer: (container: ContainerPlace) => void;
     onClose: () => void;
@@ -74,6 +77,7 @@
     reviewsToday,
     learningToday,
     containerHref,
+    favoritePlaces,
     beside,
     onOpenContainer,
     onClose,
@@ -279,6 +283,7 @@
     {workspace}
     {containerId}
     {containerHref}
+    {favoritePlaces}
     {query}
     found={boardSearch.found}
     searching={boardSearch.pending}

@@ -126,23 +126,13 @@ async function cardsInEveryView(
   await shoot(first, 'kanban-wide');
   for (const kind of ['table', 'gallery']) {
     const response = await api.post(
-      `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`,
+      `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`,
       {
-        data: [
-          {
-            type: 'view',
-            containerId: board.boardId,
-            title: kind,
-            fields: { viewType: kind },
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          },
-        ],
+        data: { title: kind, viewType: kind, fields: { viewType: kind } },
       },
     );
     expect(response.ok()).toBe(true);
-    const [view] = (await response.json()) as Schemas['Block'][];
-    if (!view) throw new Error('the new view');
+    const { view } = (await response.json()) as Schemas['BoardViewWrite'];
     await first.goto(boardPath(board, view.id));
     await expect(
       first

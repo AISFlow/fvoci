@@ -7,22 +7,18 @@
 //! course's, under the handle that reaches courses (`InCourse`), so that no operation of
 //! a card's or a page's versions reaches a unit. Chapters have no body and answer 404.
 
-use axum::extract::Path;
 use fvoci_model::{BodyVersion, BodyVersionContent, KeptBodyVersion, Unit};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::body_versions::{
-    get_body_version, keep_body_version, list_body_versions, restore_body_version,
+    body_version_of, body_versions_of, keep_body_version_of, restore_body_version_of,
 };
 use super::contract::params::{CourseId, MemberWorkspaceId, UnitId, UnitVersionNumber};
 use super::contract::tag;
-use super::courses::{READ_DENIED, content_unit_with_permission};
-use super::workspace::InCourse;
-use super::{ApiResult, json_response};
-use super::{Delegated, Read};
+use super::items::{ItemOf, UnitItem};
+use super::{ApiResult, Delegated, Read};
 use crate::app::App;
-use crate::permissions::ContainerPermission;
 
 pub(super) fn routes() -> OpenApiRouter<App> {
     OpenApiRouter::new()
@@ -50,18 +46,9 @@ pub(super) fn routes() -> OpenApiRouter<App> {
     responses((status = 200, description = "The versions, the newest first.", body = Vec<BodyVersion>)),
 )]
 async fn handle_get_unit_body_versions(
-    Delegated(InCourse(ws), ..): Delegated<Read, InCourse>,
-    Path((_, course_id, unit_id)): Path<(String, String, String)>,
+    Delegated(unit, ..): Delegated<Read, ItemOf<UnitItem>>,
 ) -> ApiResult {
-    let unit = content_unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    list_body_versions(&ws.app, &unit.id).await
+    body_versions_of(unit).await
 }
 
 /// Keep a unit's body as a version now
@@ -79,22 +66,8 @@ async fn handle_get_unit_body_versions(
     params(MemberWorkspaceId, CourseId, UnitId),
     responses((status = 200, description = "What became of the body.", body = KeptBodyVersion)),
 )]
-async fn handle_keep_unit_body_version(
-    InCourse(ws): InCourse,
-    Path((_, course_id, unit_id)): Path<(String, String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let unit = content_unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::ManageCards,
-        "access denied to keep a version of the unit's body",
-    )
-    .await?;
-    let kept = keep_body_version(&ws.app, &unit.id).await?;
-    tracing::debug!(course_id, unit_id, user_id, outcome = ?kept.outcome, "KeepUnitBodyVersion");
-    Ok(json_response(&kept))
+async fn handle_keep_unit_body_version(unit: ItemOf<UnitItem>) -> ApiResult {
+    keep_body_version_of(unit).await
 }
 
 /// A version kept of a unit's body
@@ -111,18 +84,9 @@ async fn handle_keep_unit_body_version(
     responses((status = 200, description = "The version.", body = BodyVersionContent)),
 )]
 async fn handle_get_unit_body_version(
-    Delegated(InCourse(ws), ..): Delegated<Read, InCourse>,
-    Path((_, course_id, unit_id, version)): Path<(String, String, String, String)>,
+    Delegated(unit, ..): Delegated<Read, ItemOf<UnitItem>>,
 ) -> ApiResult {
-    let unit = content_unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    get_body_version(&ws.app, &unit.id, &version).await
+    body_version_of(unit).await
 }
 
 /// Go back to a version of a unit's body
@@ -143,20 +107,6 @@ async fn handle_get_unit_body_version(
     params(MemberWorkspaceId, CourseId, UnitId, UnitVersionNumber),
     responses((status = 200, description = "The unit as it is now.", body = Unit)),
 )]
-async fn handle_restore_unit_body_version(
-    InCourse(ws): InCourse,
-    Path((_, course_id, unit_id, version)): Path<(String, String, String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let unit = content_unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::ManageCards,
-        "access denied to restore a version of the unit's body",
-    )
-    .await?;
-    let block = restore_body_version(&ws.app, &unit, &version, user_id).await?;
-    tracing::debug!(course_id, unit_id, user_id, "RestoreUnitBodyVersion");
-    Ok(json_response(&Unit::from(block)))
+async fn handle_restore_unit_body_version(unit: ItemOf<UnitItem>) -> ApiResult {
+    restore_body_version_of(unit).await
 }

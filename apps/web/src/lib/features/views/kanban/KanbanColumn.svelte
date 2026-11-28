@@ -44,7 +44,9 @@
     topsOf,
     WINDOW_FROM,
   } from './column-window.ts';
-  import { columnIdOf, type Activation, type MoveTarget } from './kanban.ts';
+  import type { Activation } from '../selection.svelte.ts';
+
+  import { columnIdOf, type MoveTarget } from './kanban.ts';
   import KanbanCard from './KanbanCard.svelte';
 
   interface Props {
@@ -388,7 +390,7 @@
     data-drag-scroll="y"
     data-column-cards={option.id}
     class={[
-      'relative flex min-h-12 flex-col gap-2 overflow-y-auto overscroll-y-contain p-2 pb-[max(0.5rem,var(--fab-room,0px))]',
+      'relative flex min-h-12 flex-col gap-2 overflow-y-auto overscroll-y-contain p-2 pb-[max(0.5rem,calc(var(--fab-room,0px)+var(--bulk-room,0px)))]',
       windowed && '[overflow-anchor:none]',
     ]}
     bind:clientHeight={viewHeight}

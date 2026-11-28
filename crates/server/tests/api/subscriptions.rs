@@ -81,14 +81,11 @@ async fn insert_card(client: &Client, board_id: &str) -> Block {
         )
         .await
         .created_json();
-    let mut stored: Vec<Block> = client
-        .get(&format!(
-            "{TEST_WS}/boards/{board_id}/blocks?blockId={}",
-            created.id
-        ))
+    let stored: fvoci_model::Card = client
+        .get(&format!("{TEST_WS}/cards/{}", created.id))
         .await
         .ok_json();
-    let card = stored.pop().expect("one card block was stored");
+    let card = Block::from(stored);
     let writer = client.me().await.id;
     unsubscribe(client, &card.id, &writer)
         .await
@@ -512,8 +509,9 @@ async fn a_subscription_goes_to_the_trash_with_its_block_and_comes_back_with_it(
         .await;
     let card = insert_card(&th.client, &board.id).await;
     let created = subscribe(&th.client, &card.id, &me).await;
-    let block_path = format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id);
-    th.client.delete(&block_path).await.check_no_content();
+    crate::blocks::trash_card(&th.client, &board.id, &card.id)
+        .await
+        .check_no_content();
 
     assert_eq!(
         subscriptions_of(&th.client, &me).await,
@@ -525,8 +523,7 @@ async fn a_subscription_goes_to_the_trash_with_its_block_and_comes_back_with_it(
     let response = unsubscribe(&th.client, &card.id, &me).await;
     check_error(&response, StatusCode::NOT_FOUND, NO_SUBSCRIPTION);
 
-    th.client
-        .post_empty(&format!("{block_path}/restore"))
+    crate::blocks::restore_card(&th.client, &board.id, &card.id)
         .await
         .check_ok();
     assert_eq!(

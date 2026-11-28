@@ -25,7 +25,7 @@ use crate::course_cleanup::{self, PersonalCourseTable};
 use crate::course_meetings::{
     push_active_course_members_subquery, require_active_course_member, require_live_course,
 };
-use crate::db::{Dialect, Id, Param, Row, Scope};
+use crate::db::{FromRow, Id, LockRank, Param, Row, RowLock, Scope};
 use crate::error::StoreError;
 
 /// Minimum active enrolled course members with a recorded score required to publish an
@@ -203,7 +203,7 @@ impl Store {
             let rows = scope.fetch_all(sql).await?;
             let mut stored = Vec::with_capacity(rows.len());
             for row in &rows {
-                stored.push(stored_exam_from_row(row)?);
+                stored.push(StoredExam::from_row(row)?);
             }
             if stored.is_empty() {
                 return Ok(Vec::new());
@@ -681,13 +681,8 @@ async fn require_live_exam(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("e", "c"), ("c", "w")]));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR KEY SHARE OF e");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("exam"));
-    };
-    Ok((row.id(0)?, row.float(1)?))
+    sql.push_lock(scope.row_lock(LockRank::CourseItem, exam_id, RowLock::KeyShare.of("e")));
+    scope.one(sql, "exam").await
 }
 
 async fn require_active_workspace_user(
@@ -698,21 +693,21 @@ async fn require_active_workspace_user(
     let mut member = scope.sql("SELECT 1 FROM workspace_members WHERE workspace_id = ");
     member
         .bind(Id(workspace_id))
-        .push_bind(" AND user_id = ", Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        member.push(" FOR SHARE");
-    }
-    if scope.fetch_optional(member).await?.is_none() {
+        .push_bind(" AND user_id = ", Id(user_id))
+        .push_lock(scope.row_lock(
+            LockRank::WorkspaceMembers,
+            &format!("{workspace_id}:{user_id}"),
+            RowLock::Share,
+        ));
+    if !scope.exists(member).await? {
         return Err(StoreError::not_found("exam"));
     }
     let mut user = scope.sql("SELECT 1 FROM users WHERE id = ");
     user.bind(Id(user_id))
         .push(" AND deleted_at IS NULL")
-        .push_bind(" AND erased_at = ", 0_i64);
-    if scope.dialect() == Dialect::Postgres {
-        user.push(" FOR KEY SHARE");
-    }
-    if scope.fetch_optional(user).await?.is_none() {
+        .push_bind(" AND erased_at = ", 0_i64)
+        .push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::KeyShare));
+    if !scope.exists(user).await? {
         return Err(StoreError::not_found("exam"));
     }
     Ok(())
@@ -731,14 +726,9 @@ async fn fetch_exam_for_update(
     );
     sql.bind(Id(exam_id))
         .push_bind(" AND org_id = ", org.clone())
-        .push_bind(" AND container_id = ", Id(course_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("exam"));
-    };
-    stored_exam_from_row(&row)
+        .push_bind(" AND container_id = ", Id(course_id))
+        .push_lock(scope.row_lock(LockRank::CourseItem, exam_id, RowLock::Update));
+    scope.one(sql, "exam").await
 }
 
 async fn fetch_exam_counts(
@@ -825,36 +815,38 @@ async fn fetch_my_scores(
     Ok(scores)
 }
 
-fn stored_exam_from_row(row: &Row) -> Result<StoredExam, StoreError> {
-    let results_published_at = row.opt_int(8)?;
-    let published_average_score = row.opt_float(9)?.filter(|v| v.is_finite());
-    let published_score_bucket = row
-        .opt_int(10)?
-        .map(|v| u32::try_from(v.max(0)).unwrap_or(u32::MAX));
-    let published_submission_count = row
-        .opt_int(11)?
-        .map(|v| u32::try_from(v.max(0)).unwrap_or(u32::MAX));
-    Ok(StoredExam {
-        exam: CourseExam {
-            id: row.id(0)?,
-            container_id: row.id(1)?,
-            title: row.text(2)?,
-            exam_date: row.opt_text(3)?,
-            max_score: row.float(4)?,
-            description: row.text(5)?,
-            created_at: row.int(6)?,
-            updated_at: row.int(7)?,
-            my_score: None,
-            average_score: None,
-            score_count: 0,
-            results_published_at: None,
-            published_score_bucket: None,
-        },
-        results_published_at,
-        published_average_score,
-        published_score_bucket,
-        published_submission_count,
-    })
+impl FromRow for StoredExam {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let results_published_at = row.opt_int(8)?;
+        let published_average_score = row.opt_float(9)?.filter(|v| v.is_finite());
+        let published_score_bucket = row
+            .opt_int(10)?
+            .map(|v| u32::try_from(v.max(0)).unwrap_or(u32::MAX));
+        let published_submission_count = row
+            .opt_int(11)?
+            .map(|v| u32::try_from(v.max(0)).unwrap_or(u32::MAX));
+        Ok(StoredExam {
+            exam: CourseExam {
+                id: row.id(0)?,
+                container_id: row.id(1)?,
+                title: row.text(2)?,
+                exam_date: row.opt_text(3)?,
+                max_score: row.float(4)?,
+                description: row.text(5)?,
+                created_at: row.int(6)?,
+                updated_at: row.int(7)?,
+                my_score: None,
+                average_score: None,
+                score_count: 0,
+                results_published_at: None,
+                published_score_bucket: None,
+            },
+            results_published_at,
+            published_average_score,
+            published_score_bucket,
+            published_submission_count,
+        })
+    }
 }
 
 /// Removes `course_exams` and `exam_scores` rows of courses that are gone for good:

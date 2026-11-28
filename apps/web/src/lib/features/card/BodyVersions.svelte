@@ -290,8 +290,10 @@
                         class={version.cause === 'agent'
                           ? 'rounded-sm bg-muted px-1 font-medium text-foreground'
                           : undefined}
-                        data-testid="body-version-cause">{causeOf(version)}</span
+                        data-testid="body-version-cause"
                       >
+                        {causeOf(version)}
+                      </span>
                     </span>
                     {#if version.editors.length > 0}
                       <span class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">

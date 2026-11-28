@@ -378,10 +378,7 @@ pub(crate) async fn alone(scope: &mut Scope<'_>, user: &mut User) -> Result<OwnS
 /// Whether the instance has had its first user, as the scope's transaction sees it.
 async fn has_first_user(scope: &mut Scope<'_>) -> Result<bool, StoreError> {
     let sql = scope.sql("SELECT bootstrapped FROM instance WHERE id = 1");
-    match scope.fetch_optional(sql).await? {
-        Some(row) => row.bool(0),
-        None => Ok(false),
-    }
+    Ok(scope.first(sql).await?.unwrap_or(false))
 }
 
 /// Turns on the flag that the instance has had its first user, and says what whoever
@@ -553,7 +550,7 @@ pub(crate) async fn join_workspace(
     // A member already, or no such workspace to be let into.
     let mut sql = scope.sql("SELECT 1 FROM ");
     push_workspace(&mut sql, scope, which)?;
-    if scope.fetch_optional(sql).await?.is_some() {
+    if scope.exists(sql).await? {
         return Ok(false);
     }
     Err(match which {

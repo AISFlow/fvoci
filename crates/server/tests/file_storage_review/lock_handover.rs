@@ -285,7 +285,7 @@ async fn shutdown_cannot_release_the_server_lock_before_an_old_write_commits() {
     let (completed, mut writing) = oneshot::channel();
     server.app().spawn_background(async move {
         let written = app
-            .create_card(
+            .create_card_unchecked(
                 Card {
                     title: "write surviving shutdown".to_owned(),
                     ..Card::default()

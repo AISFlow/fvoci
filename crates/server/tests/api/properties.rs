@@ -7,7 +7,7 @@
 
 use std::io::{Cursor, Write as _};
 
-use fvoci_model::{Block, Card, Container};
+use fvoci_model::{Card, Container};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -162,13 +162,6 @@ async fn board_count(client: &Client) -> usize {
     boards.len()
 }
 
-async fn blocks_of(client: &Client, board_id: &str) -> Vec<Block> {
-    client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks"))
-        .await
-        .ok_json()
-}
-
 // -- definitions --------------------------------------------------------------------------
 
 #[tokio::test]
@@ -290,62 +283,12 @@ async fn well_formed_card_property_definitions_are_stored_as_sent() {
 
 // -- values -------------------------------------------------------------------------------
 
+/// A batch with a malformed value changes none of its cards, and values that are no
+/// object are refused.
 #[tokio::test]
-async fn a_block_with_malformed_properties_is_not_inserted() {
-    let th = Setup::native().start().await.init_basic().await;
-    let board: Container = new_board(&th.client, json!([])).await.created_json();
-    let card: Card = th
-        .client
-        .post(
-            &format!("{TEST_WS}/boards/{}/cards", board.id),
-            &json!({"title": "Anchor"}),
-        )
-        .await
-        .created_json();
-    let path = format!("{TEST_WS}/boards/{}/blocks", board.id);
-    let combined = format!("{TEST_WS}/containers-and-blocks");
-    let new_board_req = |properties: Value| {
-        json!({
-            "containers": [{"id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private"}],
-            "blocks": [card_block("b1", properties)],
-        })
-    };
-
-    for (what, value) in malformed_values() {
-        let response = th
-            .client
-            .post(&combined, &new_board_req(json!({"p1": value})))
-            .await;
-        check_refused(&response, what);
-    }
-    for properties in [json!("a string"), json!(["a"]), json!(42), json!(null)] {
-        let response = th
-            .client
-            .post(&combined, &new_board_req(properties.clone()))
-            .await;
-        check_refused(&response, &format!("properties that are {properties}"));
-    }
-    // `properties` means property values on a block of any type.
-    let mut attachment = card_block(&board.id, json!({"p1": 1}));
-    attachment["type"] = json!("attachment");
-    attachment["parentId"] = json!(card.id);
-    check_refused(
-        &th.client.post(&path, &json!([attachment])).await,
-        "an attachment block",
-    );
-    assert_eq!(
-        blocks_of(&th.client, &board.id).await.len(),
-        1,
-        "only anchor card stored"
-    );
-    th.teardown().await;
-}
-
-#[tokio::test]
-async fn a_block_patch_with_malformed_properties_changes_nothing() {
+async fn a_batch_patch_with_malformed_properties_changes_nothing() {
     let th = Setup::native().start().await.init_basic().await;
     let (board, card) = board_with_card(&th).await;
-    let block_path = format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id);
     let second: Card = th
         .client
         .post(
@@ -358,44 +301,28 @@ async fn a_block_patch_with_malformed_properties_changes_nothing() {
     for (what, value) in malformed_values() {
         let response = th
             .client
-            .patch(
-                &block_path,
-                &json!({"title": "renamed", "updatedFields": {"properties": {"p1": value}}}),
-            )
-            .await;
-        check_refused(&response, what);
-
-        // In a batch, the well-formed patch beside it is not applied either.
-        let response = th
-            .client
-            .patch(
-                &format!("{TEST_WS}/boards/{}/blocks", board.id),
-                &json!({
-                    "blockIds": [second.id, card.id],
-                    "blockPatches": [
-                        {"title": "renamed"},
-                        {"updatedFields": {"properties": {"p1": value}}},
-                    ],
-                }),
+            .post(
+                &format!("{TEST_WS}/boards/{}/cards/batch-patch", board.id),
+                &json!({"cardIds": [second.id, card.id], "updatedProperties": {"p1": value}}),
             )
             .await;
         check_refused(&response, &format!("a batch with {what}"));
     }
-    let response = th
-        .client
+    // Properties that are no object are refused as the body is read.
+    th.client
         .patch(
-            &block_path,
-            &json!({"updatedFields": {"properties": "text"}}),
+            &format!("{TEST_WS}/cards/{}", card.id),
+            &json!({"updatedProperties": "text"}),
         )
-        .await;
-    check_refused(&response, "properties that are a string");
+        .await
+        .check_bad_request();
 
     let stored: Card = th
         .client
         .get(&format!("{TEST_WS}/cards/{}", card.id))
         .await
         .ok_json();
-    assert_eq!(stored.title, "Card", "the title was not changed either");
+    assert_eq!(stored.title, "Card", "the title was not changed");
     assert_eq!(
         stored.properties, card.properties,
         "the values are as they were"
@@ -480,108 +407,19 @@ async fn well_formed_property_values_are_stored_as_sent() {
         );
     }
 
-    let inserted = th
+    let batched: Vec<Value> = th
         .client
         .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{"id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private"}],
-                "blocks": [
-                    card_block("b1", values.clone()),
-                    card_block("b1", json!({})),
-                ],
-            }),
+            &format!("{TEST_WS}/boards/{}/cards/batch-patch", board.id),
+            &json!({"cardIds": [card.id], "updatedProperties": {"p1": "x"}}),
         )
-        .await;
-    inserted.check_created();
-    th.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id),
-            &json!({"updatedFields": {"properties": {"p1": "x"}}}),
-        )
-        .await
-        .check_no_content();
-    th.teardown().await;
-}
-
-// -- the combined routes and the import ---------------------------------------------------
-
-#[tokio::test]
-async fn boards_and_blocks_with_malformed_property_data_are_refused_as_a_whole() {
-    let th = Setup::native().start().await.init_basic().await;
-    let request = |card_properties: Value, values: Value| {
-        json!({
-            "containers": [{
-                "id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private", "title": "Both",
-                "cardProperties": card_properties,
-            }],
-            "blocks": [card_block("b1", values)],
-        })
-    };
-
-    let response = th
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &request(json!([{"name": "no id"}]), json!({})),
-        )
-        .await;
-    check_refused(&response, "a definition without id");
-    let response = th
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &request(json!([{"id": "p1"}]), json!({"p1": 3})),
-        )
-        .await;
-    check_refused(&response, "a number as value");
-    assert_eq!(board_count(&th.client).await, 0, "neither made a board");
-
-    let created: Value = th
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &request(json!([{"id": "p1"}]), json!({"p1": "v"})),
-        )
-        .await
-        .created_json();
-    let board_id = created["containers"][0]["id"].as_str().expect("a board id");
-    let block_id = created["blocks"][0]["id"].as_str().expect("a block id");
-
-    for (what, board_patch, block_patch) in [
-        (
-            "a definition without id",
-            json!({"title": "renamed", "updatedCardProperties": [{"name": "x"}]}),
-            json!({"title": "renamed"}),
-        ),
-        (
-            "a number as value",
-            json!({"title": "renamed"}),
-            json!({"updatedFields": {"properties": {"p1": 3}}}),
-        ),
-    ] {
-        let response = th
-            .client
-            .patch(
-                &format!("{TEST_WS}/containers-and-blocks"),
-                &json!({
-                    "containerIds": [board_id], "containerPatches": [board_patch],
-                    "blockIds": [block_id], "blockPatches": [block_patch],
-                }),
-            )
-            .await;
-        check_refused(&response, what);
-    }
-    let board: Container = th
-        .client
-        .get(&format!("{TEST_WS}/containers/{board_id}"))
         .await
         .ok_json();
-    assert_eq!(board.title, "Both", "the board is as it was");
-    let blocks = blocks_of(&th.client, board_id).await;
-    assert_eq!(blocks[0].title, "Card", "and so is the block");
+    assert_eq!(batched[0]["properties"]["p1"], json!("x"), "{batched:?}");
     th.teardown().await;
 }
+
+// -- the import ---------------------------------------------------------------------------
 
 /// An archive with one board and one card on it.
 fn archive(card_properties: &Value, values: Value) -> Vec<u8> {
@@ -742,19 +580,8 @@ async fn assert_refused_date_cases(client: &Client, cards_path: &str, card_id: &
         check_refused(
             &client
                 .post(
-                    &format!("{TEST_WS}/containers-and-blocks"),
-                    &json!({
-                        "containers": [{
-                            "id": "b1",
-                            "workspaceId": TEST_WORKSPACE_ID,
-                            "visibility": "private",
-                            "cardProperties": [
-                                {"id": "due", "name": "Due", "type": "date"},
-                                {"id": "note", "name": "Note", "type": "text"},
-                            ],
-                        }],
-                        "blocks": [card_block("b1", properties)],
-                    }),
+                    &format!("{cards_path}/batch-patch"),
+                    &json!({"cardIds": [card_id], "updatedProperties": properties}),
                 )
                 .await,
             what,
@@ -815,19 +642,15 @@ async fn values_left_behind_by_a_change_of_definitions_stay_until_written() {
         .await
         .check_ok();
 
-    let copies: Vec<Value> = th
+    let copy: Value = th
         .client
         .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
+            "{TEST_WS}/boards/{}/cards/{}/duplicate",
             board.id, card.id
         ))
         .await
         .created_json();
-    let copy = copies
-        .iter()
-        .find(|block| block["type"] == json!("card"))
-        .expect("the copy");
-    let copy_values = &copy["fields"]["properties"];
+    let copy_values = &copy["properties"];
     assert!(
         copy_values["due"].is_null(),
         "the date of the deleted property is cleared in the copy: {copy}"
@@ -841,11 +664,11 @@ async fn values_left_behind_by_a_change_of_definitions_stay_until_written() {
     th.teardown().await;
 }
 
-/// The routes of block patches take date values as the card routes do. An archive keeps
-/// a date value of a date property and clears a value of the other kind, as a copy of
-/// a card does: its board may have changed its definitions since.
+/// A batch of cards takes date values as a card does. An archive keeps a date value of
+/// a date property and clears a value of the other kind, as a copy of a card does: its
+/// board may have changed its definitions since.
 #[tokio::test]
-async fn date_values_on_the_patch_routes_and_in_an_archive() {
+async fn date_values_in_a_batch_and_in_an_archive() {
     let th = Setup::native().start().await.init_basic().await;
     let (board, card) = board_with_card(&th).await;
     th.client
@@ -855,22 +678,12 @@ async fn date_values_on_the_patch_routes_and_in_an_archive() {
         )
         .await
         .check_ok();
-    let block_path = format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id);
-    let text = json!({"updatedFields": {"properties": {"p1": "open", "due": "soon"}}});
-    check_refused(&th.client.patch(&block_path, &text).await, "patchBlock");
-    let request = json!({
-        "containerIds": [board.id], "containerPatches": [{"title": "n"}],
-        "blockIds": [card.id], "blockPatches": [text],
-    });
-    check_refused(
-        &th.client
-            .patch(&format!("{TEST_WS}/containers-and-blocks"), &request)
-            .await,
-        "patchContainersAndBlocks",
-    );
-    let date =
-        json!({"updatedFields": {"properties": {"p1": "open", "due": {"from": "2026-03-05"}}}});
-    th.client.patch(&block_path, &date).await.check_no_content();
+    let batch = format!("{TEST_WS}/boards/{}/cards/batch-patch", board.id);
+    let text = json!({"cardIds": [card.id], "updatedProperties": {"p1": "open", "due": "soon"}});
+    check_refused(&th.client.post(&batch, &text).await, "batchPatchCards");
+    let date = json!({"cardIds": [card.id],
+                      "updatedProperties": {"p1": "open", "due": {"from": "2026-03-05"}}});
+    th.client.post(&batch, &date).await.check_ok();
 
     import(
         &th.client,
@@ -890,7 +703,7 @@ async fn date_values_on_the_patch_routes_and_in_an_archive() {
         .iter()
         .find(|board| board.title == "Imported")
         .expect("the imported board");
-    let blocks = blocks_of(&th.client, &imported.id).await;
+    let blocks = crate::blocks::stored_blocks(&th, &imported.id).await;
     assert_eq!(
         blocks[0].fields["properties"],
         json!({"due": {"from": "2026-03-05"}, "note": null}),

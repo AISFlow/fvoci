@@ -448,6 +448,7 @@ const NOT_SHOWN: Record<'views' | 'properties' | 'nodes' | 'marks', Record<strin
   },
   nodes: {
     mention: 'names a user, and a template is copied to people it knows nothing of',
+    boardView: 'shows a view by its identifier, and a template is written before any view is made',
   },
   marks: {
     link: 'a link leads to an address, and the templates name none',

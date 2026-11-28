@@ -5,7 +5,7 @@
  * and by a board made from it as a template. A member who may only look has
  * nothing to move them with.
  */
-import { expect, test, type Page } from '@playwright/test';
+import { type APIRequestContext, expect, test, type Page } from '@playwright/test';
 
 import {
   boardPath,
@@ -39,6 +39,41 @@ function inOrder(views: Schemas['Block'][]): string[] {
     .map((view) => view.title);
 }
 
+/** Views titled `titles` added to the board, each like `like`. */
+async function addViews(
+  api: APIRequestContext,
+  ws: string,
+  boardId: string,
+  like: Schemas['Block'] | undefined,
+  titles: string[],
+): Promise<void> {
+  for (const title of titles) {
+    const added = await api.post(`/api/v1/w/${ws}/boards/${boardId}/views`, {
+      data: {
+        title,
+        viewType: like?.fields.viewType,
+        fields: { ...like?.fields, order: undefined },
+      },
+    });
+    expect(added.ok(), await added.text()).toBe(true);
+  }
+}
+
+/** `views` left without a place, as views are that nobody has moved since the server placed none. */
+async function unplace(
+  api: APIRequestContext,
+  ws: string,
+  boardId: string,
+  views: Schemas['Block'][],
+): Promise<void> {
+  for (const view of views) {
+    const patched = await api.patch(`/api/v1/w/${ws}/boards/${boardId}/views/${view.id}`, {
+      data: { deletedFields: ['order'] },
+    });
+    expect(patched.ok(), await patched.text()).toBe(true);
+  }
+}
+
 test('a view moved by the keys is the board’s order for another member, after a reload and in copies', async ({
   browser,
   baseURL,
@@ -58,24 +93,11 @@ test('a view moved by the keys is the board’s order for another member, after 
   });
   const ws = board.workspaceId;
   const viewsOf = async (boardId: string): Promise<Schemas['Block'][]> =>
-    (
-      (await (
-        await api.get(`/api/v1/w/${ws}/boards/${boardId}/blocks`)
-      ).json()) as Schemas['Block'][]
-    ).filter((block) => block.type === 'view');
-  // Three more views beside "By status", like it. Nobody has moved one: they go by title.
+    (await (await api.get(`/api/v1/w/${ws}/boards/${boardId}/views`)).json()) as Schemas['Block'][];
+  // Three more views beside "By status", like it, none of them placed: they go by title.
   const [first] = await viewsOf(board.boardId);
-  const added = await api.post(`/api/v1/w/${ws}/boards/${board.boardId}/blocks`, {
-    data: ['Timeline', 'Backlog', 'Roadmap'].map((title) => ({
-      containerId: board.boardId,
-      type: 'view',
-      title,
-      createdAt: 1,
-      updatedAt: 1,
-      fields: first?.fields,
-    })),
-  });
-  expect(added.ok(), await added.text()).toBe(true);
+  await addViews(api, ws, board.boardId, first, ['Timeline', 'Backlog', 'Roadmap']);
+  await unplace(api, ws, board.boardId, await viewsOf(board.boardId));
   const before = ['Backlog', 'By status', 'Roadmap', 'Timeline'];
 
   const pages: Page[] = [];
@@ -164,23 +186,12 @@ test('two concurrent first moves on an unplaced board keep both moves', async ({
   });
   const ws = board.workspaceId;
   const viewsOf = async (): Promise<Schemas['Block'][]> =>
-    (
-      (await (
-        await api.get(`/api/v1/w/${ws}/boards/${board.boardId}/blocks`)
-      ).json()) as Schemas['Block'][]
-    ).filter((block) => block.type === 'view');
+    (await (
+      await api.get(`/api/v1/w/${ws}/boards/${board.boardId}/views`)
+    ).json()) as Schemas['Block'][];
   const [first] = await viewsOf();
-  const added = await api.post(`/api/v1/w/${ws}/boards/${board.boardId}/blocks`, {
-    data: ['Timeline', 'Backlog', 'Roadmap'].map((title) => ({
-      containerId: board.boardId,
-      type: 'view',
-      title,
-      createdAt: 1,
-      updatedAt: 1,
-      fields: first?.fields,
-    })),
-  });
-  expect(added.ok(), await added.text()).toBe(true);
+  await addViews(api, ws, board.boardId, first, ['Timeline', 'Backlog', 'Roadmap']);
+  await unplace(api, ws, board.boardId, await viewsOf());
 
   const alicePage = await (await browser.newContext({ locale: 'en-US' })).newPage();
   const bobPage = await (await browser.newContext({ locale: 'en-US' })).newPage();
@@ -260,23 +271,11 @@ test('a tie raise and a concurrent move of the raised view keep both moves', asy
   });
   const ws = board.workspaceId;
   const viewsOf = async (): Promise<Schemas['Block'][]> =>
-    (
-      (await (
-        await api.get(`/api/v1/w/${ws}/boards/${board.boardId}/blocks`)
-      ).json()) as Schemas['Block'][]
-    ).filter((block) => block.type === 'view');
+    (await (
+      await api.get(`/api/v1/w/${ws}/boards/${board.boardId}/views`)
+    ).json()) as Schemas['Block'][];
   const [first] = await viewsOf();
-  const added = await api.post(`/api/v1/w/${ws}/boards/${board.boardId}/blocks`, {
-    data: ['Backlog', 'Roadmap', 'Timeline', 'Zeta'].map((title) => ({
-      containerId: board.boardId,
-      type: 'view',
-      title,
-      createdAt: 1,
-      updatedAt: 1,
-      fields: first?.fields,
-    })),
-  });
-  expect(added.ok(), await added.text()).toBe(true);
+  await addViews(api, ws, board.boardId, first, ['Backlog', 'Roadmap', 'Timeline', 'Zeta']);
   const views = await viewsOf();
   const byTitle = (title: string): Schemas['Block'] => {
     const found = views.find((view) => view.title === title);
@@ -292,7 +291,7 @@ test('a tie raise and a concurrent move of the raised view keep both moves', asy
     [byTitle('Timeline'), 'Y'],
     [byTitle('Zeta'), 'Z'],
   ] as const) {
-    const patched = await api.patch(`/api/v1/w/${ws}/boards/${board.boardId}/blocks/${view.id}`, {
+    const patched = await api.patch(`/api/v1/w/${ws}/boards/${board.boardId}/views/${view.id}`, {
       data: { updatedFields: { order } },
     });
     expect(patched.ok(), await patched.text()).toBe(true);

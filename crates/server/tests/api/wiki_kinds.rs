@@ -92,29 +92,26 @@ const REACHED: &[(&str, Reaches)] = &[
     ("deleteUpload", Reaches::EVERY),
     // Whoever writes a card or a page watches it, and may stop.
     ("deleteSubscription", Reaches::LINKED),
+    // Who may comment answers a card, a page, a unit or a comment with an emoji; a
+    // diary's entries are their owner's.
+    ("addReaction", Reaches::SHARED),
+    ("removeReaction", Reaches::SHARED),
     // Its place in the sidebar.
     ("setContainerCategory", Reaches::EVERY),
     ("putCategoryContainer", Reaches::EVERY),
     ("hideContainer", Reaches::EVERY),
     ("unhideContainer", Reaches::EVERY),
-    // A copy of it whole, and its archive.
+    // A copy of it whole, and its archive, and its Markdown.
     ("duplicateContainer", Reaches::COPIED),
     ("copyContainerToWorkspace", Reaches::COPIED),
     ("exportContainerArchive", Reaches::EVERY),
+    ("exportContainerMarkdown", Reaches::EVERY),
     // What a board holds.
     ("reorderCardProperties", Reaches::BOARDS),
     ("createBoardView", Reaches::BOARDS),
     ("moveBoardView", Reaches::BOARDS),
     ("duplicateBoardView", Reaches::BOARDS),
     ("moveViewCards", Reaches::BOARDS),
-    ("createBlocks", Reaches::BOARDS),
-    ("getBlocks", Reaches::BOARDS),
-    ("patchBlocks", Reaches::BOARDS),
-    ("patchBlock", Reaches::BOARDS),
-    ("deleteBlock", Reaches::BOARDS),
-    ("restoreBlock", Reaches::BOARDS),
-    ("duplicateBlock", Reaches::BOARDS),
-    ("getCommentVersions", Reaches::BOARDS),
     ("createCard", Reaches::BOARDS),
     ("duplicateCard", Reaches::BOARDS),
     ("batchDeleteCards", Reaches::BOARDS),
@@ -132,6 +129,16 @@ const REACHED: &[(&str, Reaches)] = &[
     ("restoreCardComment", Reaches::BOARDS),
     ("getCardCommentVersions", Reaches::BOARDS),
     ("createCardAttachment", Reaches::BOARDS),
+    ("getCardAttachments", Reaches::BOARDS),
+    ("deleteCardAttachment", Reaches::BOARDS),
+    ("restoreCardAttachment", Reaches::BOARDS),
+    ("batchPatchCards", Reaches::BOARDS),
+    ("getBoardViews", Reaches::BOARDS),
+    ("getBoardView", Reaches::BOARDS),
+    ("patchBoardView", Reaches::BOARDS),
+    ("deleteBoardView", Reaches::BOARDS),
+    ("restoreBoardView", Reaches::BOARDS),
+    ("getCardActivity", Reaches::BOARDS),
     ("getCardBodyVersions", Reaches::BOARDS),
     ("getCardBodyVersion", Reaches::BOARDS),
     ("restoreCardBodyVersion", Reaches::BOARDS),
@@ -266,6 +273,8 @@ struct Things {
     block: String,
     /// A view of the board (otherwise an unknown identifier).
     view: String,
+    /// An attachment of the board's card (otherwise an unknown identifier).
+    attachment: String,
     /// A comment on the card; on the page.
     comment: String,
     /// A study meeting of a course (otherwise an unknown identifier).
@@ -293,6 +302,7 @@ impl Things {
             container: UNKNOWN_ID.to_owned(),
             block: UNKNOWN_ID.to_owned(),
             view: UNKNOWN_ID.to_owned(),
+            attachment: UNKNOWN_ID.to_owned(),
             comment: UNKNOWN_ID.to_owned(),
             meeting: UNKNOWN_ID.to_owned(),
             exam: UNKNOWN_ID.to_owned(),
@@ -404,6 +414,18 @@ impl World {
             }
             _ => self.card_with_a_comment(&container).await,
         };
+        let attachment = if view == UNKNOWN_ID {
+            UNKNOWN_ID.to_owned()
+        } else {
+            let attached = client
+                .post(
+                    &format!("{ROOT_WS}/boards/{container}/cards/{block}/attachments"),
+                    &json!({"fileId": text(&uploaded.value(), "fileId")}),
+                )
+                .await;
+            attached.check_done();
+            text(&attached.value(), "id")
+        };
         let (meeting, exam, review, note) = if kind == ContainerKind::Course {
             let (m, e) = self.course_meeting_and_exam(&container).await;
             let (r, n) = self.course_review_and_note(&container, &block).await;
@@ -421,6 +443,7 @@ impl World {
             container,
             block,
             view,
+            attachment,
             comment,
             meeting,
             exam,
@@ -573,12 +596,12 @@ impl World {
         let at = format!("{ROOT_WS}/containers/{}", things.container);
         let deleted = match operation {
             "restoreContainer" => self.ts.client.delete(&at).await,
-            "restoreBlock" | "batchRestoreCards" => {
-                let block = format!(
-                    "{ROOT_WS}/boards/{}/blocks/{}",
-                    things.container, things.block
-                );
-                self.ts.client.delete(&block).await
+            "batchRestoreCards" => {
+                let batch = format!("{ROOT_WS}/boards/{}/cards/batch-delete", things.container);
+                self.ts
+                    .client
+                    .post(&batch, &json!({"cardIds": [things.block]}))
+                    .await
             }
             "restoreCardComment" => {
                 let comment = format!(
@@ -586,6 +609,20 @@ impl World {
                     things.container, things.block, things.comment
                 );
                 self.ts.client.delete(&comment).await
+            }
+            "restoreCardAttachment" => {
+                let attachment = format!(
+                    "{ROOT_WS}/boards/{}/cards/{}/attachments/{}",
+                    things.container, things.block, things.attachment
+                );
+                self.ts.client.delete(&attachment).await
+            }
+            "restoreBoardView" => {
+                let view = format!(
+                    "{ROOT_WS}/boards/{}/views/{}",
+                    things.container, things.view
+                );
+                self.ts.client.delete(&view).await
             }
             "restorePage" => {
                 let page = format!(
@@ -629,11 +666,7 @@ impl World {
         operation: &str,
         things: &Things,
     ) -> ApiResponse {
-        let block = if operation == "getCommentVersions" {
-            &things.comment
-        } else {
-            &things.block
-        };
+        let block = &things.block;
         let path = template
             .trim_start_matches("/api/v1")
             .replace("{workspaceId}", &things.workspace)
@@ -651,6 +684,7 @@ impl World {
             .replace("{wikiId}", &things.container)
             .replace("{cardId}", block)
             .replace("{viewId}", &things.view)
+            .replace("{attachmentId}", &things.attachment)
             .replace("{blockId}", block)
             .replace("{pageId}", block)
             .replace("{commentId}", &things.comment)
@@ -677,7 +711,8 @@ impl World {
             .replace("{version}", "1")
             // The board's card is its first.
             .replace("{number}", "1")
-            .replace("{leaseId}", "no-lease");
+            .replace("{leaseId}", "no-lease")
+            .replace("{emoji}", "%F0%9F%91%8D");
         // The one operation of the table that asks its query for something.
         let path = if operation == "getDiaryDays" {
             format!("{path}?from=2026-11-01&to=2026-11-30")
@@ -707,7 +742,7 @@ impl World {
     /// The body an operation is sent with: one it takes.
     fn body(&self, operation: &str, things: &Things) -> Value {
         match operation {
-            "patchContainer" | "patchBlock" | "patchCard" | "patchPage" | "patchUnit" => {
+            "patchContainer" | "patchCard" | "patchPage" | "patchUnit" | "patchBoardView" => {
                 json!({"title": "changed"})
             }
             "createUnit" => json!({"title": "another unit"}),
@@ -743,13 +778,11 @@ impl World {
             "addFileVersion" => json!({"baseVersion": 1, "fileId": things.file}),
             "restoreFileVersion" => json!({"baseVersion": 1}),
             "holdFileLease" => json!({"leaseId": ""}),
-            "patchBlocks" => {
-                json!({"blockIds": [things.block], "blockPatches": [{"title": "changed"}]})
-            }
-            "createBlocks" | "reorderCardProperties" => json!([]),
+            "reorderCardProperties" => json!([]),
             "createCard" => json!({"title": "another card"}),
             "createBoardView" => json!({"title": "Board view"}),
             "moveBoardView" => json!({"after": null}),
+            "batchPatchCards" => json!({"cardIds": [things.block], "updatedProperties": {}}),
             "moveViewCards" | "batchDeleteCards" | "batchRestoreCards" => {
                 json!({"cardIds": [things.block]})
             }
@@ -1098,65 +1131,23 @@ async fn the_lists_of_an_own_space_are_of_their_kinds() {
     world.ts.teardown().await;
 }
 
-/// What makes or changes boards by a body takes no diary: a board is not made a diary
-/// of, one at a time or with blocks, what changes or deletes boards together finds no
-/// diary, and an entry is no block to make on a board.
+/// What makes boards by a body takes no diary: a board is not made a diary of, and a
+/// diary entry is no block to subscribe to.
 #[tokio::test]
 async fn what_names_a_diary_in_a_body_is_refused() {
     let world = World::start().await;
     let client = &world.ts.client;
     let own = world.own.clone();
     let ws = format!("/w/{own}");
-    let [board, _, diary, _] = make_in_own_space(&world, &own).await;
+    let [_, _, diary, _] = make_in_own_space(&world, &own).await;
     let one = client
         .post(
             &format!("{ws}/boards"),
             &json!({"visibility": "private", "kind": "diary"}),
         )
         .await;
-    let as_diary =
-        json!({"id": "made", "visibility": "private", "kind": "diary", "title": "no board"});
-    let many = client
-        .post(
-            &format!("{ws}/containers-and-blocks"),
-            &json!({"containers": [as_diary], "blocks": [{
-                "id": "card", "containerId": "made", "type": "card", "createdAt": 1, "updatedAt": 1,
-            }]}),
-        )
-        .await;
-    for (refused, at) in [(one, "/kind"), (many, "/containers/0/kind")] {
-        refused.check_bad_request();
-        assert_eq!(refused.refused_at(), at, "{}", refused.text());
-    }
-    let together = format!("{ws}/containers-and-blocks");
-    for method in [Method::PATCH, Method::DELETE] {
-        let body = |id: &str| {
-            if method == Method::PATCH {
-                json!({"containerIds": [id], "containerPatches": [{"title": "taken"}],
-                       "blockIds": [], "blockPatches": []})
-            } else {
-                json!({"containers": [id], "blocks": []})
-            }
-        };
-        let send = async |id: &str| {
-            Client::send(client.request(method.clone(), &together).json(&body(id))).await
-        };
-        let (of_diary, nothing) = (send(&diary.container).await, send(UNKNOWN_ID).await);
-        assert_eq!(of_diary.problem(), nothing.problem(), "{method}");
-        assert!(
-            !of_diary.status.is_success(),
-            "{method}: {}",
-            of_diary.text()
-        );
-    }
-    let entry_as_block = client
-        .post(
-            &format!("{ws}/boards/{}/blocks", board.container),
-            &json!([{"containerId": board.container, "type": "entry", "title": "2026-11-21",
-                     "fields": {"date": "2026-11-21"}, "createdAt": 1, "updatedAt": 1}]),
-        )
-        .await;
-    entry_as_block.check_bad_request();
+    one.check_bad_request();
+    assert_eq!(one.refused_at(), "/kind", "{}", one.text());
     // Nor is a diary entry a block to subscribe to.
     let subscribe = |block: &str| {
         json!({
@@ -1311,10 +1302,6 @@ async fn every_list_is_of_its_kinds() {
         ]
     );
     // A card in the trash says no kind.
-    let card = format!(
-        "{ROOT_WS}/boards/{}/blocks/{}",
-        board.container, board.block
-    );
     let again = client
         .post(
             &format!("{ROOT_WS}/containers/{}/restore", board.container),
@@ -1322,7 +1309,13 @@ async fn every_list_is_of_its_kinds() {
         )
         .await;
     again.check_done();
-    client.delete(&card).await.check_done();
+    client
+        .post(
+            &format!("{ROOT_WS}/boards/{}/cards/batch-delete", board.container),
+            &json!({"cardIds": [board.block]}),
+        )
+        .await
+        .check_done();
     let cards = client
         .get(&format!("{ROOT_WS}/boards/{}/trash/cards", board.container))
         .await;
@@ -1331,11 +1324,10 @@ async fn every_list_is_of_its_kinds() {
     world.ts.teardown().await;
 }
 
-/// What names a board in a body or a query takes no wiki: the answer is the one for an
-/// identifier of nothing, and nothing is made or changed. The board a guest is
-/// invited to may be a wiki.
+/// What makes a board by a body makes no wiki or course, and nothing else is made or
+/// changed by the refusal. The board a guest is invited to may be a wiki.
 #[tokio::test]
-async fn what_names_a_wiki_in_a_body_or_a_query_is_refused_as_what_names_nothing() {
+async fn a_board_is_made_no_other_kind_and_a_guest_is_invited_to_every_kind() {
     let world = World::start().await;
     let client = &world.ts.client;
     let (board, wiki, course) = (
@@ -1344,62 +1336,7 @@ async fn what_names_a_wiki_in_a_body_or_a_query_is_refused_as_what_names_nothing
         world.make(ContainerKind::Course).await,
     );
 
-    assert_board_creation_refuses_other_kinds(client, &board.container).await;
-    // What changes or deletes boards together, and the source of copied blocks.
-    let same = async |method: Method, path: &str, body: &dyn Fn(&str) -> Value| {
-        let send = async |id: &str| {
-            Client::send(client.request(method.clone(), path).json(&body(id))).await
-        };
-        let nothing = send(UNKNOWN_ID).await;
-        for other in [&wiki.container, &course.container] {
-            let of_other = send(other).await;
-            assert_eq!(of_other.problem(), nothing.problem(), "{method} {path}");
-            assert!(
-                !of_other.status.is_success(),
-                "{method} {path}: {}",
-                of_other.text()
-            );
-        }
-    };
-    let together = format!("{ROOT_WS}/containers-and-blocks");
-    same(Method::PATCH, &together, &|id| {
-        json!({
-            "containerIds": [id],
-            "containerPatches": [{"title": "changed"}],
-            "blockIds": [board.block],
-            "blockPatches": [{"title": "changed"}],
-        })
-    })
-    .await;
-    same(
-        Method::DELETE,
-        &together,
-        &|id| json!({"containers": [id], "blocks": [board.block]}),
-    )
-    .await;
-    let copied =
-        json!([{"containerId": board.container, "type": "view", "fields": {"viewType": "board"}}]);
-    let from = async |source: &str| {
-        let path = format!(
-            "{ROOT_WS}/boards/{}/blocks?sourceBoardId={source}",
-            board.container
-        );
-        client.post(&path, &copied).await
-    };
-    let other = client
-        .post(
-            &format!("{ROOT_WS}/boards"),
-            &json!({"visibility": "private"}),
-        )
-        .await;
-    other.check_done();
-    from(&text(&other.value(), "id")).await.check_done();
-    let nothing = from(UNKNOWN_ID).await;
-    for target in [&wiki.container, &course.container] {
-        let of_target = from(target).await;
-        assert_eq!(of_target.problem(), nothing.problem(), "sourceBoardId");
-        assert!(!of_target.status.is_success(), "{}", of_target.text());
-    }
+    assert_board_creation_refuses_other_kinds(client).await;
     client
         .put(
             &format!("{ROOT_WS}/guest-invitations"),
@@ -1486,27 +1423,16 @@ async fn assert_course_subscriptions(world: &World, course_id: &str, unit_id: &s
     );
 }
 
-async fn assert_board_creation_refuses_other_kinds(client: &Client, board_id: &str) {
-    let card = json!({"id": "card", "containerId": "made", "type": "card", "createdAt": 1, "updatedAt": 1});
+async fn assert_board_creation_refuses_other_kinds(client: &Client) {
     for non_board in ["wiki", "course"] {
-        let as_other =
-            json!({"id": "made", "visibility": "private", "kind": non_board, "title": "no board"});
         let one = client
             .post(
                 &format!("{ROOT_WS}/boards"),
                 &json!({"visibility": "private", "kind": non_board}),
             )
             .await;
-        let many = client
-            .post(
-                &format!("{ROOT_WS}/containers-and-blocks"),
-                &json!({"containers": [as_other], "blocks": [card]}),
-            )
-            .await;
-        for (refused, at) in [(one, "/kind"), (many, "/containers/0/kind")] {
-            refused.check_bad_request();
-            assert_eq!(refused.refused_at(), at, "{non_board}: {}", refused.text());
-        }
+        one.check_bad_request();
+        assert_eq!(one.refused_at(), "/kind", "{non_board}: {}", one.text());
     }
     assert_eq!(
         ids(&client.get(&format!("{ROOT_WS}/wikis")).await).len(),
@@ -1518,16 +1444,6 @@ async fn assert_board_creation_refuses_other_kinds(client: &Client, board_id: &s
         1,
         "only the seeded course exists"
     );
-    for block_type in ["unit", "chapter"] {
-        let refused = client
-            .post(
-                &format!("{ROOT_WS}/boards/{board_id}/blocks"),
-                &json!([{"containerId": board_id, "type": block_type, "title": "no",
-                         "createdAt": 1, "updatedAt": 1}]),
-            )
-            .await;
-        refused.check_bad_request();
-    }
 }
 
 /// The audit of the workspace names the wiki an administrator of the workspace put
@@ -1628,19 +1544,5 @@ async fn a_patch_that_names_a_kind_is_refused() {
     );
     with_kind.check_not_found();
     assert_eq!(with_kind.problem(), without.problem());
-    // Nor is a kind changed with blocks.
-    let together = client
-        .patch(
-            &format!("{ROOT_WS}/containers-and-blocks"),
-            &json!({
-                "containerIds": [board.container],
-                "containerPatches": [{"kind": "wiki"}],
-                "blockIds": [],
-                "blockPatches": [],
-            }),
-        )
-        .await;
-    together.check_bad_request();
-    assert_eq!(together.refused_at(), "/containerPatches/0/kind");
     world.ts.teardown().await;
 }

@@ -348,9 +348,12 @@ test('a reader who may not change the view zooms for the visit, and the view sta
   await expect(dialog(page)).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(bar(page, 'Second')).toBeFocused();
-  // Nothing that changes the view for everyone is offered: "…" only saves it as a file.
+  // Nothing that changes the view for everyone is offered: "…" only saves it as files.
   await page.getByTestId('view-header').locator('[data-tool="more"]').click();
-  await expect(page.getByRole('menuitem')).toHaveText(['Export to CSV']);
+  await expect(page.getByRole('menuitem')).toHaveText([
+    'Export to CSV',
+    'Export to a calendar (.ics)',
+  ]);
   await page.keyboard.press('Escape');
   await page.getByTestId('gantt-zoom-in').click();
   await expect(gantt(page)).toHaveAttribute('data-zoom', 'day');

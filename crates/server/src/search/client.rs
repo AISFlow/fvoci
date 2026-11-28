@@ -606,8 +606,7 @@ impl Client {
                     snippet: hit
                         .pointer("/highlight/text/0")
                         .and_then(Value::as_str)
-                        .map(snippet_parts)
-                        .unwrap_or_default(),
+                        .map_or_default(snippet_parts),
                 })
             })
             .collect()

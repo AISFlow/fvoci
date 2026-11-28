@@ -544,3 +544,35 @@ fn renew_block_ids_renames_what_bodies_name_among_the_blocks() {
         assert_eq!(blocks[2].parent_id, blocks[1].id);
     }
 }
+
+/// A board view of a body shows the copy of its view when the view is copied with it,
+/// and the view it showed when not.
+#[test]
+fn renew_block_ids_renames_the_views_bodies_show_among_the_blocks() {
+    use fvoci_model::{Body, RelationProperties, UnmatchedRelation, renew_block_ids};
+
+    let (card, view, outside) = (id(), id(), id());
+    let shown = |view: &str| json!({"type": "boardView", "attrs": {"viewId": view}});
+    let mut blocks = vec![
+        Block {
+            body: Body::parse(json!({"type": "doc", "content": [shown(&view), shown(&outside)]}))
+                .expect("a body"),
+            ..block(&card, "board", "")
+        },
+        Block {
+            block_type: fvoci_model::BlockType::View,
+            ..block(&view, "board", "")
+        },
+    ];
+    renew_block_ids(
+        &mut blocks,
+        &RelationProperties::new(),
+        UnmatchedRelation::Kept,
+    );
+    assert_ne!(blocks[1].id, view);
+    let body = blocks[0].body.as_ref().expect("the body stays");
+    assert_eq!(
+        body.board_view_ids(),
+        [blocks[1].id.as_str(), outside.as_str()]
+    );
+}

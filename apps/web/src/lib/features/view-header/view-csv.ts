@@ -11,15 +11,10 @@ import { csvText, tableRows } from '$lib/logic/csv.ts';
 import type { DisplayContext } from '$lib/logic/format.ts';
 import { isGone, userDisplayName } from '$lib/logic/users.ts';
 import { viewQuery, type BoardView, type Card } from '$lib/logic/wire.ts';
-import { saveBlob } from '$lib/save.ts';
+import { fileName, saveBlob } from '$lib/save.ts';
 import type { BoardStore } from '$lib/state/index.ts';
 
 import { viewTitle } from './texts.ts';
-
-/** What a file name may not hold on any system the file may be saved on: control characters among them. */
-const NOT_IN_NAMES = /[\p{Cc}/\\:*?"<>|]+/gu;
-/** Invisible marks of format: one that turns the text (U+202E) would show the name backwards. */
-const INVISIBLE = /\p{Cf}/gu;
 
 /** The name a person is shown by on the board, as a person property shows them. */
 function personName(board: BoardStore): (userId: string) => string {
@@ -34,11 +29,7 @@ function personName(board: BoardStore): (userId: string) => string {
 
 /** The name of the file: the board's title and the view's, with nothing a system refuses. */
 export function csvFileName(boardTitle: string, shownTitle: string): string {
-  const name = `${boardTitle} - ${shownTitle}`
-    .replace(INVISIBLE, '')
-    .replace(NOT_IN_NAMES, '_')
-    .trim();
-  return `${name}.csv`;
+  return fileName(`${boardTitle} - ${shownTitle}`, '.csv', 'view');
 }
 
 /** Saves the cards of the view, as it shows them, as a CSV file. */

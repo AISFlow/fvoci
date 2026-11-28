@@ -1,10 +1,9 @@
 //! Validation and ID regeneration for combined container-and-block payloads.
 
 use fvoci_model::{
-    Block, BlockPatch, BlockType, Container, ContainerPatch, ContainerVisibility,
-    ContainersAndBlocks, ContainersAndBlocksError, DeleteContainersAndBlocks,
-    PatchContainersAndBlocks, generate_containers_and_blocks_ids, renew_containers_and_blocks_ids,
-    renew_containers_and_blocks_ids_told,
+    Block, BlockType, Container, ContainerVisibility, ContainersAndBlocks,
+    ContainersAndBlocksError, DeleteContainersAndBlocks, generate_containers_and_blocks_ids,
+    renew_containers_and_blocks_ids, renew_containers_and_blocks_ids_told,
 };
 
 fn board(id: &str, visibility: ContainerVisibility, title: &str) -> Container {
@@ -27,13 +26,6 @@ fn block(id: &str, board_id: &str, block_type: BlockType) -> Block {
 
 fn ids(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
-}
-
-fn title_patch(title: &str) -> BlockPatch {
-    BlockPatch {
-        title: Some(title.to_owned()),
-        ..BlockPatch::default()
-    }
 }
 
 /// Validating boards and blocks together: no boards.
@@ -228,81 +220,6 @@ fn generate_containers_and_blocks_ids_links_blocks_to_new_board_ids() {
     assert!(!block3.id.is_empty(), "block3 has no id");
     assert_ne!(block3.id, "block-id-3");
     assert_eq!(block3.container_id, board2.id);
-}
-
-/// Validating a patch of boards and blocks: no board ids.
-#[test]
-fn patch_containers_and_blocks_validate_no_container_ids() {
-    let pbab = PatchContainersAndBlocks {
-        container_ids: vec![],
-        container_patches: vec![],
-        block_ids: ids(&["block-id-1"]),
-        block_patches: vec![title_patch("new title"), title_patch("other title")],
-    };
-    assert_eq!(pbab.validate(), Err(ContainersAndBlocksError::NoContainers));
-}
-
-/// Validating a patch of boards and blocks: mismatched board IDs and patches.
-#[test]
-fn patch_containers_and_blocks_validate_mismatched_container_ids_and_patches() {
-    let pbab = PatchContainersAndBlocks {
-        container_ids: ids(&["board-id-1", "board-id-2"]),
-        container_patches: vec![ContainerPatch {
-            title: Some("new title".to_owned()),
-            ..ContainerPatch::default()
-        }],
-        block_ids: ids(&["block-id-1"]),
-        block_patches: vec![title_patch("new title")],
-    };
-    assert_eq!(
-        pbab.validate(),
-        Err(ContainersAndBlocksError::ContainerIdsAndPatchesMismatch)
-    );
-}
-
-/// Validating a patch of boards and blocks: mismatched block IDs and patches.
-#[test]
-fn patch_containers_and_blocks_validate_mismatched_block_ids_and_patches() {
-    let pbab = PatchContainersAndBlocks {
-        container_ids: ids(&["board-id-1", "board-id-2"]),
-        container_patches: vec![
-            ContainerPatch {
-                title: Some("new title".to_owned()),
-                ..ContainerPatch::default()
-            },
-            ContainerPatch {
-                description: Some("new description".to_owned()),
-                ..ContainerPatch::default()
-            },
-        ],
-        block_ids: ids(&["block-id-1"]),
-        block_patches: vec![title_patch("new title"), title_patch("other title")],
-    };
-    assert_eq!(
-        pbab.validate(),
-        Err(ContainersAndBlocksError::BlockIdsAndPatchesMismatch)
-    );
-}
-
-/// Validating a patch of boards and blocks: valid.
-#[test]
-fn patch_containers_and_blocks_validate_valid() {
-    let pbab = PatchContainersAndBlocks {
-        container_ids: ids(&["board-id-1", "board-id-2"]),
-        container_patches: vec![
-            ContainerPatch {
-                title: Some("new title".to_owned()),
-                ..ContainerPatch::default()
-            },
-            ContainerPatch {
-                description: Some("new description".to_owned()),
-                ..ContainerPatch::default()
-            },
-        ],
-        block_ids: ids(&["block-id-1"]),
-        block_patches: vec![title_patch("new title")],
-    };
-    assert_eq!(pbab.validate(), Ok(()));
 }
 
 /// Validates delete payloads: requires at least one container ID while allowing empty block IDs.

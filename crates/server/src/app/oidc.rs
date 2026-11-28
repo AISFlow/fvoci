@@ -22,7 +22,7 @@ use fvoci_store::{
 
 use super::App;
 use super::oidc_account::{FoundAccount, Newcomer, proved_address};
-use super::oidc_carry::carry_over_refused;
+use super::oidc_purpose::Purpose as _;
 use super::oidc_settings::secret_context;
 use crate::auth::limiter::RetryAfter;
 use crate::auth::now_millis;
@@ -236,17 +236,20 @@ impl App {
         org_id: &str,
         address: Option<IpAddr>,
     ) -> Result<StartedLogin, AppError> {
-        self.start_oidc_flow(org_id, address, Start::SignIn).await
+        self.start_oidc_flow(org_id, address, FlowPurpose::SignIn)
+            .await
     }
 
-    /// Starts a sign-in as [`Self::start_oidc_login`] does: to sign in, to link
-    /// (`App::start_oidc_link`), or to try the pending settings
-    /// (`App::start_oidc_trial`), through them.
+    /// Starts a sign-in as [`Self::start_oidc_login`] does, for `purpose`: to sign in,
+    /// to link (`App::start_oidc_link`), to try the pending settings
+    /// (`App::start_oidc_trial`), or to carry a held sign-in over
+    /// (`App::start_oidc_carry_over`). A trial's `pending_at` is the time of the
+    /// settings pending when it starts, whatever it was asked with.
     pub(super) async fn start_oidc_flow(
         &self,
         org_id: &str,
         address: Option<IpAddr>,
-        start: Start<'_>,
+        mut purpose: FlowPurpose,
     ) -> Result<StartedLogin, AppError> {
         // Counted against the address as a login is, and let go at once: the requests
         // to the provider below are no password work, and must not keep the address's
@@ -267,16 +270,16 @@ impl App {
             .await
             .map_err(|error| AppError::from(error).context("reading the organization"))?
         {
-            return Err(start.nothing_to_start());
+            return Err(purpose.nothing_to_start());
         }
         let org = self
             .enter_org_for_sign_in(org_id)
-            .ok_or_else(|| start.nothing_to_start())?;
-        let (stored, purpose) = org
-            .provider_to_start(start)
+            .ok_or_else(|| purpose.nothing_to_start())?;
+        let stored = org
+            .provider_to_start(&mut purpose)
             .await
             .map_err(|error| AppError::from(error).context("reading the provider"))?
-            .ok_or_else(|| start.nothing_to_start())?;
+            .ok_or_else(|| purpose.nothing_to_start())?;
         let discovery = provider::discover(self.oidc_fetcher(), &stored.issuer)
             .await
             .map_err(|error| {
@@ -318,14 +321,14 @@ impl App {
                 provider_id: stored.id.clone(),
                 created_at: now,
                 expires_at: now.saturating_add(LOGIN_FLOW_LIFETIME_MILLIS),
-                purpose,
+                purpose: purpose.clone(),
             })
             .await
             .map_err(|error| {
                 // What it was to go through went a moment ago: the pending settings,
                 // the held sign-in, or the provider itself.
                 if error.is_not_found() {
-                    start.nothing_to_start()
+                    purpose.nothing_to_start()
                 } else {
                     AppError::from(error).context("storing a sign-in")
                 }
@@ -333,46 +336,6 @@ impl App {
         Ok(StartedLogin {
             authorization_url: url.into(),
             browser_secret,
-        })
-    }
-
-    /// What a sign-in that starts as `start` goes through, on the handle of its
-    /// organization: the provider, if it is on; for a trial, with its pending settings,
-    /// if there are. `None` if there is nothing to go through.
-    async fn provider_to_start(
-        &self,
-        start: Start<'_>,
-    ) -> Result<Option<(StoredProvider, FlowPurpose)>, StoreError> {
-        let Some(stored) = self
-            .store()
-            .oidc_provider()
-            .await?
-            .filter(|stored| stored.enabled)
-        else {
-            return Ok(None);
-        };
-        Ok(match start {
-            Start::SignIn => Some((stored, FlowPurpose::SignIn)),
-            Start::Link { session_id } => {
-                let session_id = session_id.to_owned();
-                Some((stored, FlowPurpose::Link { session_id }))
-            }
-            Start::CarryOver { held_hash } => self.former_to_start(&stored, held_hash).await?,
-            Start::Trial {
-                user_id,
-                session_id,
-            } => self
-                .store()
-                .oidc_pending_provider()
-                .await?
-                .and_then(|pending| {
-                    let purpose = FlowPurpose::Trial {
-                        pending_at: pending.created_at,
-                        user_id: user_id.to_owned(),
-                        session_id: session_id.to_owned(),
-                    };
-                    trying(&stored, &pending).map(|trying| (trying, purpose))
-                }),
         })
     }
 
@@ -396,17 +359,12 @@ impl App {
         let result = self.finish_flow(&flow, callback, user_agent).await;
         if let Err(failure) = &result {
             tracing::info!(org_id = %flow.org_id, failure = %failure.name(), "a sign-in through a provider failed");
-            if let FlowPurpose::CarryOver { held_hash } = &flow.purpose {
+            if let Some(held_hash) = flow.purpose.held_hash() {
                 self.drop_held(&flow.org_id, held_hash).await;
             }
         }
         Returned {
-            back_to: match flow.purpose {
-                FlowPurpose::Trial { .. } => BackTo::Organization,
-                FlowPurpose::SignIn | FlowPurpose::Link { .. } | FlowPurpose::CarryOver { .. } => {
-                    BackTo::LoginPage
-                }
-            },
+            back_to: flow.purpose.back_to(),
             org_id: Some(flow.org_id),
             result,
         }
@@ -467,9 +425,9 @@ impl App {
             .enter_org_for_sign_in(&flow.org_id)
             .ok_or(unavailable)?;
         let stored = org
-            .provider_of_flow(flow)
+            .provider_for(flow)
             .await?
-            .ok_or_else(|| gone(&flow.purpose))?;
+            .ok_or_else(|| flow.purpose.gone())?;
         let secret = self.open_client_secret(&stored)?;
         let discovery = provider::discover(self.oidc_fetcher(), &stored.issuer)
             .await
@@ -486,102 +444,15 @@ impl App {
         }
         // A link that comes back without a session ends here, before the provider is
         // asked for anything: which session it is, is asked where the link is stored.
-        if matches!(flow.purpose, FlowPurpose::Link { .. }) && callback.session_token.is_none() {
+        if flow.purpose.needs_session() && callback.session_token.is_none() {
             tracing::info!(org_id = %flow.org_id, "a sign-in to link came back without a session");
             return Err(Reason::OidcStateInvalid.into());
         }
         let claims = self
             .checked_claims(&discovery, &stored, secret.as_deref(), flow, &callback.code)
             .await?;
-        let ending = match &flow.purpose {
-            FlowPurpose::Link { session_id } => {
-                org.link_through(&claims, &stored, session_id, callback)
-                    .await?;
-                return Ok(FinishedLogin::Linked);
-            }
-            FlowPurpose::CarryOver { held_hash } => {
-                return org
-                    .carry_over_through(&claims, &stored, held_hash, callback, user_agent)
-                    .await;
-            }
-            FlowPurpose::SignIn => {
-                // Somebody without an account, while the former provider is kept, is
-                // asked whether they had one before any is made.
-                if let Some(secret) = org.hold_if_moving(&claims, &stored).await? {
-                    return Ok(FinishedLogin::Held { secret });
-                }
-                Ending::SignIn
-            }
-            FlowPurpose::Trial {
-                pending_at,
-                user_id,
-                session_id,
-            } => Ending::Trial(TrialEnd {
-                pending_at: *pending_at,
-                trier_id: user_id,
-                session_id,
-                came_with: callback.session_token.as_deref(),
-            }),
-        };
-        let token = new_secret();
-        let mut session = self.new_session(user_agent, now_millis());
-        // Boxed: making the account and applying the pending settings make a large
-        // future, which every caller of a callback would otherwise carry.
-        let ended = Box::pin(org.sign_in_through(
-            &claims,
-            &stored,
-            ending,
-            &mut session,
-            &token_digest(&token),
-        ))
-        .await?;
-        if ended.joined {
-            org.welcome_newcomer(&session.user_id, callback.accept_language.as_deref())
-                .await;
-        }
-        Ok(match ended.applied {
-            Some(applied) => {
-                org.follow_applied(applied).await;
-                FinishedLogin::Applied { token }
-            }
-            None => FinishedLogin::SignedIn { token },
-        })
-    }
-
-    /// The provider a sign-in that came back goes through, on the handle of its
-    /// organization: the one it was started through, still on; for a trial, with the
-    /// pending settings it was started for, and no other; to carry over, with the
-    /// former provider's issuer, client and secret. `None` if that is gone.
-    async fn provider_of_flow(
-        &self,
-        flow: &LoginFlow,
-    ) -> Result<Option<StoredProvider>, LoginFailure> {
-        let Some(stored) = self
-            .store()
-            .oidc_provider()
+        org.end_flow(flow, &claims, &stored, callback, user_agent)
             .await
-            .map_err(|error| logged(&error, "reading the provider"))?
-            .filter(|stored| stored.enabled && stored.id == flow.provider_id)
-        else {
-            return Ok(None);
-        };
-        let pending_at = match &flow.purpose {
-            FlowPurpose::SignIn | FlowPurpose::Link { .. } => return Ok(Some(stored)),
-            FlowPurpose::CarryOver { .. } => {
-                return self
-                    .former_as_provider(&stored)
-                    .await
-                    .map_err(|error| logged(&error, "reading the former provider"));
-            }
-            FlowPurpose::Trial { pending_at, .. } => pending_at,
-        };
-        Ok(self
-            .store()
-            .oidc_pending_provider()
-            .await
-            .map_err(|error| logged(&error, "reading the provider"))?
-            .filter(|pending| pending.created_at == *pending_at)
-            .and_then(|pending| trying(&stored, &pending)))
     }
 
     /// A session to be stored for whoever a sign-in ends in, made at `now` by the
@@ -831,18 +702,6 @@ impl App {
     }
 }
 
-/// The failure of a sign-in whose provider is gone when it comes back: switched off,
-/// removed or another one. What a sign-in to carry over went through (the former
-/// provider too) is told as every refusal of carrying over is.
-fn gone(purpose: &FlowPurpose) -> LoginFailure {
-    match purpose {
-        FlowPurpose::CarryOver { .. } => Reason::OidcCarryOverRefused.into(),
-        FlowPurpose::SignIn | FlowPurpose::Link { .. } | FlowPurpose::Trial { .. } => {
-            Reason::OidcUnavailable.into()
-        }
-    }
-}
-
 /// Checks that what came back for `flow` came to its own organization's address, and
 /// with a code: no error of the provider's, and nothing exchanged otherwise.
 fn came_back_with_a_code(flow: &LoginFlow, callback: &Callback) -> Result<(), LoginFailure> {
@@ -862,45 +721,6 @@ fn came_back_with_a_code(flow: &LoginFlow, callback: &Callback) -> Result<(), Lo
         return Err(Reason::OidcTokenRefused.into());
     }
     Ok(())
-}
-
-/// What a sign-in is started for, as [`App::start_oidc_flow`] is asked.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Start<'a> {
-    /// To sign in through the provider as it is.
-    SignIn,
-    /// To link, from the session.
-    Link {
-        /// The session it is started from.
-        session_id: &'a str,
-    },
-    /// To try the pending settings, by the administrator `user_id`.
-    Trial {
-        /// The administrator whose account alone the trial may end in.
-        user_id: &'a str,
-        /// The session it is started from.
-        session_id: &'a str,
-    },
-    /// To carry over the sign-in held under this digest, through the former provider.
-    CarryOver {
-        /// The digest of the held sign-in.
-        held_hash: &'a str,
-    },
-}
-
-impl Start<'_> {
-    /// The refusal of a start that has nothing to go through: no provider that is
-    /// on, no pending settings to try, or nothing to carry over (told as every
-    /// refusal of carrying over is).
-    fn nothing_to_start(self) -> AppError {
-        match self {
-            Self::SignIn | Self::Link { .. } | Self::Trial { .. } => {
-                AppError::conflict("no sign-in through the organization's provider can start now")
-                    .with_reason(Reason::OidcUnavailable)
-            }
-            Self::CarryOver { .. } => carry_over_refused(),
-        }
-    }
 }
 
 /// How a sign-in that ends in a session is stored.
@@ -938,7 +758,7 @@ impl std::fmt::Debug for TrialEnd<'_> {
 
 /// The provider as a trial signs in through it: with the pending settings' issuer,
 /// client and secret, if they are of this very provider.
-fn trying(stored: &StoredProvider, pending: &PendingProvider) -> Option<StoredProvider> {
+pub(super) fn trying(stored: &StoredProvider, pending: &PendingProvider) -> Option<StoredProvider> {
     (pending.provider_id == stored.id).then(|| pending.applied_to(stored))
 }
 

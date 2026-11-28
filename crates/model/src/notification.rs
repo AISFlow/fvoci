@@ -135,6 +135,9 @@ pub struct Notification {
     pub updated_at: i64,
     /// When its reader read it; 0 until then, and again once more of it happens.
     pub read_at: i64,
+    /// When its reader put it away (`archiveNotification`); 0 while it is in the
+    /// inbox, and again once more of it happens. One put away is read.
+    pub archived_at: i64,
     /// What it is about; `null` where its reader does not read that now (it is gone,
     /// or theirs no more), and is told nothing of it: not what, not where, not by
     /// whom.
@@ -172,4 +175,24 @@ mod tests {
         }
         assert!("mentions".parse::<NotificationKind>().is_err());
     }
+}
+
+/// Which of a reader's notifications are listed (`getNotifications`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NotificationFilter {
+    /// Only those not read.
+    pub unread: bool,
+    /// Only those that tell of this.
+    pub kind: Option<NotificationKind>,
+    /// Those put away instead of those in the inbox.
+    pub archived: bool,
+}
+
+impl NotificationFilter {
+    /// The inbox: every notification that was not put away.
+    pub const INBOX: Self = Self {
+        unread: false,
+        kind: None,
+        archived: false,
+    };
 }

@@ -63,8 +63,8 @@ fn content(board_id: &str, card_id: &str) -> Vec<(Method, String, String)> {
     let get = |hidden: String, absent: String| (Method::GET, hidden, absent);
     vec![
         get(
-            format!("{TEST_WS}/boards/{board_id}/blocks"),
-            format!("{TEST_WS}/boards/{UNKNOWN_ID}/blocks"),
+            format!("{TEST_WS}/boards/{board_id}/views"),
+            format!("{TEST_WS}/boards/{UNKNOWN_ID}/views"),
         ),
         get(
             format!("{TEST_WS}/boards/{board_id}/cards"),

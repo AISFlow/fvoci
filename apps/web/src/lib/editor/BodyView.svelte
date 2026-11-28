@@ -15,7 +15,9 @@
   into it from `references` (reference-chip.ts), and again whenever what the
   caller knows of it changes. Without `references` each shows as what the
   reader may not see. A file block is a place too, and its file's name, size
-  and link are drawn into it from the file source (file-view.ts).
+  and link are drawn into it from the file source (file-view.ts). So is a
+  board view, into which `boardViews` draws its view; without it (a preview,
+  a version, a reader by a link) each says that its view cannot be seen.
 
   An image opens larger on a press, or on Enter or Space (image-zoom.ts,
   ImageLightbox.svelte), unless `zoomImages` is false: where a press of the
@@ -28,6 +30,8 @@
   import './editor.css';
   import { CODE_COPY_TEXTS } from './code-copy-texts.ts';
   import { drawCodeBlocksLater } from './code-later.ts';
+  import { mountBoardViews, type BoardViewHost } from './board-view-read.ts';
+  import './board-view.css';
   import { drawEmbeds } from './embeds.ts';
   import { drawFileBlocks } from './file-view.ts';
   import ImageLightbox from './ImageLightbox.svelte';
@@ -44,6 +48,8 @@
     taskLabel?: (text: string, checked: boolean) => string;
     /** What the references of the body are drawn from, and how one is opened. */
     references?: ReferenceDrawing;
+    /** What draws the views of the board views of a card's, a page's or a unit's body. */
+    boardViews?: BoardViewHost | undefined;
     /** Shown in place of a body that cannot be shown; gets what is wrong with it. */
     invalid?: Snippet<[problems: string[]]>;
     /** Shown in place of an empty body. */
@@ -58,6 +64,7 @@
     resolveUser,
     taskLabel,
     references,
+    boardViews,
     invalid,
     empty,
     zoomImages = true,
@@ -100,6 +107,7 @@
       return drawEmbeds(element);
     }}
     {@attach (element: HTMLElement) => attachReferences(element, references, nodes)}
+    {@attach (element: HTMLElement) => mountBoardViews(element, boardViews?.mount, nodes)}
     {@attach (element: HTMLElement) => drawCodeBlocksLater(element, CODE_COPY_TEXTS, nodes)}
     {@attach (element: HTMLElement) => zoomImagesIn(element, zoomImages, nodes)}
   ></div>

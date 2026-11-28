@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/svelte';
 
 import BodyEditorSample from './BodyEditorSample.svelte';
-import { DIAGRAMS, FILES, FORMULAS, INVALID, MIXED, REFERENCES } from './body-samples.ts';
+import { DIAGRAMS, FILES, FORMULAS, INVALID, MIXED, REFERENCES, TOGGLES } from './body-samples.ts';
 
 /** The editor of a document body (src/lib/editor/BodyEditor.svelte), with the view of what it would store. */
 const meta = {
@@ -46,3 +46,8 @@ export const References: Story = { args: { doc: REFERENCES } };
  * select an image and its bubble opens it larger.
  */
 export const Files: Story = { args: { doc: FILES } };
+/**
+ * Toggles and callouts: the chevron opens a toggle for this reader alone, Enter in a
+ * summary goes on in what it hides, and a callout's icon changes its tone.
+ */
+export const Toggles: Story = { args: { doc: TOGGLES } };

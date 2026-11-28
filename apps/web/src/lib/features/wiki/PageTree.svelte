@@ -389,9 +389,9 @@
               >
                 {@render itemLeading?.(page)}
                 {#if page.icon}
-                  <span class="shrink-0" aria-hidden="true" data-testid="tree-icon"
-                    >{page.icon}</span
-                  >
+                  <span class="shrink-0" aria-hidden="true" data-testid="tree-icon">
+                    {page.icon}
+                  </span>
                 {/if}
                 <span class={['min-w-0 flex-1 truncate', !page.title && 'text-muted-foreground']}>
                   {title}

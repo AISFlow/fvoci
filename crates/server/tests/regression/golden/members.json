@@ -539,12 +539,37 @@
     }
   },
   {
+    "name": "create a card",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:8>/cards as members-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "boardId": "<id:8>",
+      "body": null,
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "hasBody": false,
+      "icon": "",
+      "id": "<id:9>",
+      "isTemplate": false,
+      "lastCommentAt": 0,
+      "modifiedBy": "<id:2>",
+      "number": 1,
+      "parentId": "",
+      "properties": {},
+      "tasksDone": 0,
+      "tasksTotal": 0,
+      "title": "Card",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
     "name": "a viewer on the board cannot comment",
-    "request": "POST /api/v1/w/<id:1>/boards/<id:8>/blocks as members-bob",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:8>/cards/<id:9>/comments as members-bob",
     "status": 403,
     "content_type": "application/problem+json",
     "body": {
-      "detail": "access denied to post card comments",
+      "detail": "access denied to comment on the card",
       "instance": "urn:uuid:<request-id>",
       "requestId": "<request-id>",
       "status": 403,

@@ -329,7 +329,7 @@ services:
 
   s3:
     profiles: [s3]
-    image: chrislusf/seaweedfs:4.53
+    image: chrislusf/seaweedfs:4.55
     # The image's own user, who owns /data.
     user: seaweed
     restart: unless-stopped
@@ -367,7 +367,7 @@ services:
 
   mailpit:
     profiles: [mail]
-    image: axllent/mailpit:v1.33.1
+    image: axllent/mailpit:v1.34.0
     # It keeps the mails in memory and needs no user of its own.
     user: "65534:65534"
     restart: unless-stopped
@@ -375,7 +375,7 @@ services:
 
   cloudflared:
     profiles: [tunnel]
-    image: cloudflare/cloudflared:2026.10.7
+    image: cloudflare/cloudflared:2026.11.2
     # Its metrics stay inside its container; it updates only with this file.
     command:
       - tunnel

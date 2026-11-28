@@ -124,14 +124,16 @@
       <li class="flex flex-col gap-0.5 rounded-md border px-3 py-2" data-action={record.action}>
         <span class="text-sm">{said(record)}</span>
         {#if record.identity}
-          <span class="text-xs break-all" data-testid="audit-identity"
-            >{m.audit_identity({ identity: record.identity })}</span
-          >
+          <span class="text-xs break-all" data-testid="audit-identity">
+            {m.audit_identity({ identity: record.identity })}
+          </span>
         {/if}
         <time
           class="text-xs text-muted-foreground"
-          datetime={new Date(record.createdAt).toISOString()}>{when.format(record.createdAt)}</time
+          datetime={new Date(record.createdAt).toISOString()}
         >
+          {when.format(record.createdAt)}
+        </time>
       </li>
     {/each}
   </ol>

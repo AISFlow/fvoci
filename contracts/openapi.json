@@ -656,7 +656,7 @@
             "type": "integer"
           },
           "editedAt": {
-            "description": "For a comment whose body was changed: when that last happened, in milliseconds\nsince the Unix epoch. Absent for a comment never changed and for every other\nblock. The server sets it, and ignores a client's. What the body said before is\n`getCommentVersions`'.",
+            "description": "For a comment whose body was changed: when that last happened, in milliseconds\nsince the Unix epoch. Absent for a comment never changed and for every other\nblock. The server sets it, and ignores a client's. What the body said before is\n`getCardCommentVersions`'.",
             "format": "int64",
             "type": "integer"
           },
@@ -715,81 +715,6 @@
         ],
         "type": "object"
       },
-      "BlockPatch": {
-        "description": "A partial update of a `Block`. Absent members leave the block unchanged. A block's\n`BlockType` is fixed when the block is created and cannot be patched.",
-        "properties": {
-          "body": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Body",
-                "description": "The new body of a card or a comment; `null` takes the body away. Sent only with\n`readAt` (400 naming `readAt` without it)."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "deletedFields": {
-            "description": "Keys of fields to remove.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "parentId": {
-            "description": "The new parent identifier.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "readAt": {
-            "description": "The `updatedAt` of the block as the client read it. If the block has changed\nsince, the patch is refused.",
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "title": {
-            "description": "The new title.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "updatedFields": {
-            "additionalProperties": true,
-            "description": "Fields to set, replacing any existing value under the same key.",
-            "type": "object"
-          }
-        },
-        "type": "object"
-      },
-      "BlockPatchBatch": {
-        "description": "A batch of block identifiers and the patch to apply to each, matched by position.",
-        "properties": {
-          "blockIds": {
-            "description": "The identifiers of the blocks to patch.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "blockPatches": {
-            "description": "The patches, one per identifier.",
-            "items": {
-              "$ref": "#/components/schemas/BlockPatch"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "blockIds",
-          "blockPatches"
-        ],
-        "type": "object"
-      },
       "BlockType": {
         "description": "The type of a block.\n\nA block of a board is `card`, `view`, `comment` or `attachment`, a wiki has `page`\nand `comment`, a diary has `entry`, and a course has `chapter`, `unit` and `comment`.",
         "enum": [
@@ -839,6 +764,40 @@
         },
         "type": "object"
       },
+      "BoardViewPatch": {
+        "additionalProperties": false,
+        "description": "A board view as a request changes it (`PATCH /w/{ws}/boards/{boardId}/views/{viewId}`):\nits title and its fields, and nothing else a block has.",
+        "properties": {
+          "deletedFields": {
+            "description": "Keys of fields to remove.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "readAt": {
+            "description": "The `updatedAt` of the view as the client read it: if the view has changed since,\nthe patch is refused with 409 and changes nothing.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "title": {
+            "description": "The new title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedFields": {
+            "additionalProperties": true,
+            "description": "Fields to set (`viewType`, `filter`, `sortOptions`, `cardOrder`, ...), each\nreplacing the view's value under the same key.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "BoardViewWrite": {
         "description": "Response returned when creating, moving, or duplicating a board view.",
         "properties": {
@@ -862,7 +821,7 @@
       },
       "Body": {
         "additionalProperties": true,
-        "description": "A document of the editor: a node of type `doc` whose `content` is its blocks. Which nodes, marks and attributes it may have, and how they nest, is the allowlist of version 5, which the server and the web app share. At most 8 MiB as JSON, 60 levels deep and 100,000 nodes.",
+        "description": "A document of the editor: a node of type `doc` whose `content` is its blocks. Which nodes, marks and attributes it may have, and how they nest, is the allowlist of version 7, which the server and the web app share. At most 8 MiB as JSON, 60 levels deep and 100,000 nodes.",
         "type": "object"
       },
       "BodyVersion": {
@@ -1072,6 +1031,14 @@
             "description": "Property values keyed by property identifier: a string, a list of strings, or\n`null`; for a property of the type `date` a date value (`{\"from\":\n\"2026-03-05\"}`, `{\"from\": \"2026-03-05\", \"to\": \"2026-03-09\"}` or `{\"from\":\n1772703000000}`) or `null`; and for a property of the type `relation` a list of\nrelation links (`{\"card\": \"<cardId>\", \"kind\": \"fs\" | \"ss\" | \"ff\" | \"sf\",\n\"lagDays\": -3650..=3650}`, normalized with all three fields when stored) or\n`null`.",
             "type": "object"
           },
+          "recurredTo": {
+            "description": "Of a card that repeated when it was completed, the identifier of the card the\nserver made after it, which repeats in its place; left out otherwise. The server\nwrites it: what a request sends here is ignored.",
+            "type": "string"
+          },
+          "recurrence": {
+            "$ref": "#/components/schemas/Recurrence",
+            "description": "How the card repeats: when it is completed, the server makes the next card\n(`recurredTo`). Only on a board with a rule of done (`doneWhen`) and a due date\nproperty, else 400 `recurrence_needs_board_rules`; a template does not repeat.\nLeft out for a card that does not repeat."
+          },
           "tasksDone": {
             "description": "How many task items of the body are checked.",
             "format": "int32",
@@ -1132,6 +1099,35 @@
         ],
         "type": "object"
       },
+      "CardBatchPatch": {
+        "additionalProperties": false,
+        "description": "One change of property values for `1..=200` cards of a board, all or none\n(`POST /w/{ws}/boards/{boardId}/cards/batch-patch`). Each card is changed as\n`patchCard` with only these members would change it.",
+        "properties": {
+          "cardIds": {
+            "description": "The cards: `1..=200` distinct identifiers of cards of the board that are no\ntemplates.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "deletedProperties": {
+            "description": "Identifiers of properties whose value the cards are to lose. A property named\nhere and in `updatedProperties` loses its value.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "updatedProperties": {
+            "additionalProperties": true,
+            "description": "Property values to set, by property identifier, as `patchCard` sets them: each\nreplaces the card's value for that property, and the card's other values stay.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "cardIds"
+        ],
+        "type": "object"
+      },
       "CardCommentPatch": {
         "additionalProperties": false,
         "description": "What a comment on a card is changed to: its text, written over the comment as it was\nread.",
@@ -1151,6 +1147,80 @@
           "readAt"
         ],
         "type": "object"
+      },
+      "CardEvent": {
+        "description": "One line of a card's activity.",
+        "properties": {
+          "actorId": {
+            "description": "Who did it; `null` for nobody the server names: a copy made by the server, or\nan account erased since.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actorTokenName": {
+            "description": "The name of the personal API token an agent did it through, as the token was\ncalled then; `null` for a person's own doing, and once the token's owner is\nerased.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "after": {
+            "description": "What it became, as `before` says it."
+          },
+          "before": {
+            "description": "What it was: the title, the value of the property as the card held it (`null`\nfor none), the parent card's identifier (`null` for the top of the board), or\nwhether the card was a template. `null` for `created` and `restored`."
+          },
+          "createdAt": {
+            "description": "When it was done, in milliseconds since the Unix epoch.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The line's identifier.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CardEventKind",
+            "description": "What was done."
+          },
+          "propertyId": {
+            "description": "The property whose value changed, for `property`; `null` otherwise. It may be a\nproperty the board no longer has.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "description": "When it was last done again: the same person changing the same thing again\nwithin five minutes changes the line rather than adding one.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "actorId",
+          "actorTokenName",
+          "after",
+          "before",
+          "createdAt",
+          "id",
+          "kind",
+          "propertyId",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "CardEventKind": {
+        "description": "What was done to a card.",
+        "enum": [
+          "created",
+          "title",
+          "property",
+          "parent",
+          "template",
+          "restored"
+        ],
+        "type": "string"
       },
       "CardMovesRequest": {
         "additionalProperties": false,
@@ -1266,6 +1336,17 @@
               "null"
             ]
           },
+          "recurrence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Recurrence",
+                "description": "How the card is to repeat, as `Card.recurrence` says; `null` makes it stop. Left\nout, it stays as it is."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "description": "The new title.",
             "type": [
@@ -1330,6 +1411,27 @@
           "type"
         ],
         "type": "object"
+      },
+      "CardWithReactions": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Card",
+            "description": "What is read, its members beside `reactions`."
+          },
+          {
+            "properties": {
+              "reactions": {
+                "description": "The reactions to it, the emoji it was first answered with first; left out\nwhere there are none.",
+                "items": {
+                  "$ref": "#/components/schemas/Reaction"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "A card as `getCard` reads it, and the reactions to it."
       },
       "CardsOfPage": {
         "description": "The cards of a page of a board, whole or in short (`compact=true`).",
@@ -1667,6 +1769,27 @@
         ],
         "type": "object"
       },
+      "CommentWithReactions": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Block",
+            "description": "What is read, its members beside `reactions`."
+          },
+          {
+            "properties": {
+              "reactions": {
+                "description": "The reactions to it, the emoji it was first answered with first; left out\nwhere there are none.",
+                "items": {
+                  "$ref": "#/components/schemas/Reaction"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "A comment as the comments of a card, a page or a unit list it: the block, and the\nreactions to it."
+      },
       "CompactCard": {
         "description": "A card in short, as a list gives it with `compact=true` (`getCards`): enough to tell\nthe cards apart and choose one to read.",
         "properties": {
@@ -1804,7 +1927,9 @@
           "cell_with_blocks",
           "uneven_table",
           "unwritten_formula",
-          "heading_with_break"
+          "heading_with_break",
+          "markup_in_summary",
+          "board_view"
         ],
         "type": "string"
       },
@@ -2787,29 +2912,6 @@
         ],
         "type": "object"
       },
-      "DeleteContainersAndBlocks": {
-        "description": "The identifiers of boards and blocks to delete together.",
-        "properties": {
-          "blocks": {
-            "description": "The identifiers of the blocks.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "containers": {
-            "description": "The identifiers of the boards.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "containers"
-        ],
-        "type": "object"
-      },
       "DeletedDiaryEntry": {
         "description": "An entry in the trash, as the trash of a diary lists it: `restoreDiaryEntry` brings\nit back to its day.",
         "properties": {
@@ -2851,7 +2953,7 @@
         "type": "object"
       },
       "DeletedItem": {
-        "description": "A card or a board in the trash, with as much as it takes to decide whether to bring\nit back (`restoreBlock`, `restoreContainer`).",
+        "description": "A card or a board in the trash, with as much as it takes to decide whether to bring\nit back (`batchRestoreCards`, `restoreContainer`).",
         "properties": {
           "deletedAt": {
             "description": "When it was deleted, in milliseconds since the Unix epoch.",
@@ -3250,6 +3352,63 @@
           "workspaceId"
         ],
         "type": "object"
+      },
+      "Favorite": {
+        "description": "A star as its person is shown it now: what it is on, what that is called, and where\nit is.",
+        "properties": {
+          "containerId": {
+            "description": "The board, wiki or course it is, or is of.",
+            "type": "string"
+          },
+          "containerKind": {
+            "$ref": "#/components/schemas/ContainerKind",
+            "description": "What that container is."
+          },
+          "icon": {
+            "description": "Its icon, at most one grapheme; empty for none.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FavoriteKind",
+            "description": "What that is."
+          },
+          "number": {
+            "description": "A card's number on its board, as `Card.number` gives it; absent for anything\nelse.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "targetId": {
+            "description": "The identifier of what the star is on.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Its title as it is now; empty for one without.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "containerId",
+          "containerKind",
+          "icon",
+          "kind",
+          "targetId",
+          "title"
+        ],
+        "type": "object"
+      },
+      "FavoriteKind": {
+        "description": "What a star is on.",
+        "enum": [
+          "container",
+          "card",
+          "page",
+          "unit"
+        ],
+        "type": "string"
       },
       "FileForm": {
         "description": "A form with one file.",
@@ -4004,6 +4163,10 @@
             "$ref": "#/components/schemas/ContainerKind",
             "description": "Whether that is a board, a wiki or a course."
           },
+          "containerTitle": {
+            "description": "The title of its board: told of a view alone, whose board a board view names.",
+            "type": "string"
+          },
           "icon": {
             "description": "Its icon, at most one grapheme; empty for none.",
             "type": "string"
@@ -4028,6 +4191,10 @@
           "title": {
             "description": "Its title; empty for one without.",
             "type": "string"
+          },
+          "viewType": {
+            "$ref": "#/components/schemas/ViewType",
+            "description": "How a view shows its cards: told of a view alone."
           }
         },
         "required": [
@@ -4075,11 +4242,12 @@
         "type": "object"
       },
       "LinkedKind": {
-        "description": "What a reference may name: a card of a board, a page of a wiki or a unit of a course.",
+        "description": "What a reference may name: a card of a board, a page of a wiki or a unit of a course;\nand the view of a board a board view shows, which no reference names.",
         "enum": [
           "card",
           "page",
-          "unit"
+          "unit",
+          "view"
         ],
         "type": "string"
       },
@@ -4519,41 +4687,6 @@
         ],
         "type": "object"
       },
-      "NewBlock": {
-        "description": "A block to insert.",
-        "properties": {
-          "containerId": {
-            "description": "The board the block belongs to: the board of the path, or, where boards and\nblocks are made together, the `id` of one of the request's boards.",
-            "type": "string"
-          },
-          "fields": {
-            "additionalProperties": true,
-            "description": "Type-specific data, free-form: serialized, at most 64,000 characters for a card,\na comment or an attachment and 800,000 for a view. The `properties` of a card\namong them are values by property identifier: a string, a list of strings, a date\nvalue, a list of relation link objects (`{\"card\", \"kind\", \"lagDays\"}`), or `null`.",
-            "type": "object"
-          },
-          "id": {
-            "description": "A name for the block within the request. The server gives every block a new\nidentifier, and where one block of the request names another (as its `parentId`,\nor in the fields `contentOrder`, `cardOrder` and `defaultTemplateId`) it puts\nthe new identifier there. Blocks that come under one name get one identifier,\nwhich cannot be stored twice; a block that no other names needs no `id`.",
-            "type": "string"
-          },
-          "parentId": {
-            "description": "The block this one is below: a block of the same board, or the name of another\nblock of the request. Left out for a block directly on its board.",
-            "type": "string"
-          },
-          "title": {
-            "description": "The display title.",
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/BlockType",
-            "description": "The block type (`view`, `comment` or `attachment` on `/boards/{boardId}/blocks`;\n`card` is created via `createCard`, or in bulk via `createContainersAndBlocks`)."
-          }
-        },
-        "required": [
-          "containerId",
-          "type"
-        ],
-        "type": "object"
-      },
       "NewBoard": {
         "description": "A board to make.",
         "properties": {
@@ -4586,12 +4719,12 @@
               "null"
             ]
           },
+          "firstView": {
+            "$ref": "#/components/schemas/NewBoardView",
+            "description": "The board's first view, made with it in one transaction. It goes after no other\nview: an `after` that names one is 400. Not with `scaffold`."
+          },
           "icon": {
             "description": "The board's icon, usually one emoji.",
-            "type": "string"
-          },
-          "id": {
-            "description": "Only where boards and blocks are made together, and needed there: a name by\nwhich the blocks of the request say which board they belong to. The server gives\nthe board another identifier. Where one board is made, a board with an `id` is\nrefused.",
             "type": "string"
           },
           "isTemplate": {
@@ -4710,6 +4843,10 @@
             "description": "Property values by property identifier: a string, a list of strings, a date value,\na list of relation link objects (`{\"card\", \"kind\", \"lagDays\"}`), or `null`.",
             "type": "object"
           },
+          "recurrence": {
+            "$ref": "#/components/schemas/Recurrence",
+            "description": "How the card repeats, as `Card.recurrence` says; left out for a card that does\nnot."
+          },
           "title": {
             "description": "The display title.",
             "type": "string"
@@ -4786,30 +4923,6 @@
           "name",
           "userId",
           "workspaceId"
-        ],
-        "type": "object"
-      },
-      "NewContainersAndBlocks": {
-        "description": "Boards and their blocks, to make together.",
-        "properties": {
-          "blocks": {
-            "description": "The blocks, at least one. The `containerId` of each is the `id` of one of `containers`.",
-            "items": {
-              "$ref": "#/components/schemas/NewBlock"
-            },
-            "type": "array"
-          },
-          "containers": {
-            "description": "The boards, at least one. Each needs an `id`.",
-            "items": {
-              "$ref": "#/components/schemas/NewBoard"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "containers",
-          "blocks"
         ],
         "type": "object"
       },
@@ -5244,6 +5357,11 @@
       "Notification": {
         "description": "One thing a person was told.",
         "properties": {
+          "archivedAt": {
+            "description": "When its reader put it away (`archiveNotification`); 0 while it is in the\ninbox, and again once more of it happens. One put away is read.",
+            "format": "int64",
+            "type": "integer"
+          },
           "createdAt": {
             "description": "When it was made: when the first of it happened.",
             "format": "int64",
@@ -5276,6 +5394,7 @@
           }
         },
         "required": [
+          "archivedAt",
           "createdAt",
           "id",
           "readAt",
@@ -5936,12 +6055,23 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Body",
-                "description": "The page's body; `null` for a page without one."
+                "description": "The page's body; `null` for a page without one, and where it is read in Markdown\n(`bodyMarkdown`)."
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "bodyMarkdown": {
+            "description": "The body in Markdown, as `getPage` with `format=markdown` gives it in place of\n`body`, left out otherwise; written as a card's `bodyMarkdown` is.",
+            "type": "string"
+          },
+          "complexBlocks": {
+            "description": "With `bodyMarkdown`: the blocks it does not hold as they are, in the order of\nthe body.",
+            "items": {
+              "$ref": "#/components/schemas/ComplexBlock"
+            },
+            "type": "array"
           },
           "createdAt": {
             "description": "Creation time in milliseconds since the Unix epoch.",
@@ -5951,6 +6081,10 @@
           "createdBy": {
             "description": "The identifier of the user who made the page.",
             "type": "string"
+          },
+          "hasComplexBlocks": {
+            "description": "With `bodyMarkdown`: whether the body has blocks its Markdown does not hold as\nthey are (`complexBlocks`).",
+            "type": "boolean"
           },
           "icon": {
             "description": "The page's icon, at most one grapheme; empty for none.",
@@ -5988,8 +6122,11 @@
         },
         "required": [
           "body",
+          "bodyMarkdown",
+          "complexBlocks",
           "createdAt",
           "createdBy",
+          "hasComplexBlocks",
           "icon",
           "id",
           "modifiedBy",
@@ -6138,43 +6275,26 @@
         },
         "type": "object"
       },
-      "PatchContainersAndBlocks": {
-        "description": "Patches for several boards and blocks, applied together.\n\nIdentifiers and patches are matched by position.",
-        "properties": {
-          "blockIds": {
-            "description": "The identifiers of the blocks to patch.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
+      "PageWithReactions": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Page",
+            "description": "What is read, its members beside `reactions`."
           },
-          "blockPatches": {
-            "description": "The block patches, one per block identifier.",
-            "items": {
-              "$ref": "#/components/schemas/BlockPatch"
+          {
+            "properties": {
+              "reactions": {
+                "description": "The reactions to it, the emoji it was first answered with first; left out\nwhere there are none.",
+                "items": {
+                  "$ref": "#/components/schemas/Reaction"
+                },
+                "type": "array"
+              }
             },
-            "type": "array"
-          },
-          "containerIds": {
-            "description": "The identifiers of the boards to patch.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "containerPatches": {
-            "description": "The board patches, one per board identifier.",
-            "items": {
-              "$ref": "#/components/schemas/ContainerPatch"
-            },
-            "type": "array"
+            "type": "object"
           }
-        },
-        "required": [
-          "containerIds",
-          "containerPatches"
         ],
-        "type": "object"
+        "description": "A page as `getPage` reads it, and the reactions to it."
       },
       "PatchUnitNote": {
         "additionalProperties": false,
@@ -6880,6 +7000,11 @@
             "type": "/problems/card-too-deep"
           },
           {
+            "reason": "recurrence_needs_board_rules",
+            "title": "The board does not let cards repeat",
+            "type": "/problems/recurrence-needs-board-rules"
+          },
+          {
             "reason": "too_many_pages",
             "title": "Too many pages in the wiki",
             "type": "/problems/too-many-pages"
@@ -6913,6 +7038,16 @@
             "reason": "too_many_organizations",
             "title": "Too many organizations made",
             "type": "/problems/too-many-organizations"
+          },
+          {
+            "reason": "too_many_favorites",
+            "title": "Too many favorites in the workspace",
+            "type": "/problems/too-many-favorites"
+          },
+          {
+            "reason": "too_many_reactions",
+            "title": "Too many emoji on the block",
+            "type": "/problems/too-many-reactions"
           }
         ]
       },
@@ -7021,6 +7156,27 @@
         ],
         "type": "object"
       },
+      "Reaction": {
+        "description": "Who answered a block with one emoji.",
+        "properties": {
+          "emoji": {
+            "description": "The emoji.",
+            "type": "string"
+          },
+          "userIds": {
+            "description": "Who answered with it, the first of them first; never empty.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "emoji",
+          "userIds"
+        ],
+        "type": "object"
+      },
       "Readiness": {
         "description": "The checks of the readiness: what the server depends on to serve.",
         "properties": {
@@ -7066,6 +7222,55 @@
           "size"
         ],
         "type": "object"
+      },
+      "Recurrence": {
+        "description": "How a card repeats: every `every` days, weeks, months or years, counted from its due\ndate or from the day it was completed.",
+        "properties": {
+          "anchor": {
+            "$ref": "#/components/schemas/RecurrenceAnchor",
+            "description": "What the next due date is counted from."
+          },
+          "every": {
+            "description": "How many units apart: from 1 to 365.",
+            "format": "int32",
+            "maximum": 365,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "from": {
+            "description": "The due date of the first card of the chain this card is of, which every step\nof a recurrence counted from the due date is counted from: the server hands it\nto the next card, and takes it away when how the card repeats is changed or\nits due date is. None for the first card; a date after the card's due date\ncounts for none.",
+            "format": "date",
+            "type": "string"
+          },
+          "unit": {
+            "$ref": "#/components/schemas/RecurrenceUnit",
+            "description": "The unit."
+          }
+        },
+        "required": [
+          "anchor",
+          "every",
+          "unit"
+        ],
+        "type": "object"
+      },
+      "RecurrenceAnchor": {
+        "description": "What the next due date of a card that repeats is counted from.",
+        "enum": [
+          "due",
+          "done"
+        ],
+        "type": "string"
+      },
+      "RecurrenceUnit": {
+        "description": "The unit a card repeats by.",
+        "enum": [
+          "day",
+          "week",
+          "month",
+          "year"
+        ],
+        "type": "string"
       },
       "RedistributeScheduleRequest": {
         "additionalProperties": false,
@@ -8287,12 +8492,23 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/Body",
-                "description": "The unit's body; `null` for a unit without one, and always `null` for a chapter."
+                "description": "The unit's body; `null` for a unit without one, always `null` for a chapter, and\n`null` where it is read in Markdown (`bodyMarkdown`)."
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "bodyMarkdown": {
+            "description": "The body in Markdown, as `getUnit` with `format=markdown` gives it in place of\n`body`, left out otherwise; written as a card's `bodyMarkdown` is.",
+            "type": "string"
+          },
+          "complexBlocks": {
+            "description": "With `bodyMarkdown`: the blocks it does not hold as they are, in the order of\nthe body.",
+            "items": {
+              "$ref": "#/components/schemas/ComplexBlock"
+            },
+            "type": "array"
           },
           "courseId": {
             "description": "The identifier of the course it is of.",
@@ -8306,6 +8522,10 @@
           "createdBy": {
             "description": "The identifier of the user who made it.",
             "type": "string"
+          },
+          "hasComplexBlocks": {
+            "description": "With `bodyMarkdown`: whether the body has blocks its Markdown does not hold as\nthey are (`complexBlocks`).",
+            "type": "boolean"
           },
           "id": {
             "description": "The unit's or chapter's identifier.",
@@ -8348,9 +8568,12 @@
           "amount",
           "amountUnit",
           "body",
+          "bodyMarkdown",
+          "complexBlocks",
           "courseId",
           "createdAt",
           "createdBy",
+          "hasComplexBlocks",
           "id",
           "kind",
           "modifiedBy",
@@ -8742,6 +8965,27 @@
           "plannedDate"
         ],
         "type": "object"
+      },
+      "UnitWithReactions": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Unit",
+            "description": "What is read, its members beside `reactions`."
+          },
+          {
+            "properties": {
+              "reactions": {
+                "description": "The reactions to it, the emoji it was first answered with first; left out\nwhere there are none.",
+                "items": {
+                  "$ref": "#/components/schemas/Reaction"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "description": "A unit or a chapter as `getUnit` reads it, and the reactions to it."
       },
       "UnlinkRequest": {
         "description": "A request to remove an identity from the account of the session.",
@@ -10462,7 +10706,7 @@
     },
     "/api/v1/notifications": {
       "get": {
-        "description": "One page of what the user of the session was told, in every organization the\nsession opens, the newest first (by `updatedAt`): that somebody mentioned them in a\ncard, a page, a unit or a comment (`mention`), gave them a card (`assignment`), or\ncommented on a card, a page or a unit they watch (`comment`; one named in that comment\nis told of the mention alone). Nobody is told of their own doing, nor of anything in a\nuser's own space, nor of a kind they switched off (`notifyMentions`,\n`notifyAssignments`, `notifyComments` of `patchUserSettings`): what is off is not made\nat all.\n\nWhoever writes a card, a page or a unit, is given a card, or comments on one watches\nit (`createSubscription`), until they end that (`deleteSubscription`). What happens to\none card, page or unit, of one kind, within an hour of the first of it, is one\nnotification: `times` and `people` count it, `actorId` and `commentId` say the\nlatest, and it is unread again. One person makes a hundred new ones for another\nwithin an hour at most; past that, what they do joins only those there.\n\nA notification is made only for somebody who reads the card, page or unit at that\ntime, and each one listed is asked again: its `subject` says what it is about, as\nthat is now, only where the user reads it now with this session. Where they do not\n(it is in the trash or gone, or they left the container or the workspace) `subject` is\n`null`, and nothing says what it was about, where or by whom. Such a one is still\nlisted, and counted while unread.\n\nWhat an organization that takes only sessions made through its provider told the\nuser is left out for a session made otherwise, as `getMyMemberships` leaves its\nboards out: it is not listed, not counted, and not marked as read by such a\nsession, and it is there again for a session made through the provider.\n\nA notification that was read is kept for ninety days, and a user has ten thousand\nat most: past that the oldest go, those that were read first.",
+        "description": "One page of what the user of the session was told, in every organization the\nsession opens, the newest first (by `updatedAt`): that somebody mentioned them in a\ncard, a page, a unit or a comment (`mention`), gave them a card (`assignment`), or\ncommented on a card, a page or a unit they watch (`comment`; one named in that comment\nis told of the mention alone). Nobody is told of their own doing, nor of anything in a\nuser's own space, nor of a kind they switched off (`notifyMentions`,\n`notifyAssignments`, `notifyComments` of `patchUserSettings`): what is off is not made\nat all.\n\nWhoever writes a card, a page or a unit, is given a card, or comments on one watches\nit (`createSubscription`), until they end that (`deleteSubscription`). What happens to\none card, page or unit, of one kind, within an hour of the first of it, is one\nnotification: `times` and `people` count it, `actorId` and `commentId` say the\nlatest, and it is unread again. One person makes a hundred new ones for another\nwithin an hour at most; past that, what they do joins only those there.\n\nA notification is made only for somebody who reads the card, page or unit at that\ntime, and each one listed is asked again: its `subject` says what it is about, as\nthat is now, only where the user reads it now with this session. Where they do not\n(it is in the trash or gone, or they left the container or the workspace) `subject` is\n`null`, and nothing says what it was about, where or by whom. Such a one is still\nlisted, and counted while unread.\n\nThe inbox is listed (those put away left out) unless `archived` asks for the archive:\nwhat the user put away (`archiveNotification`), read. `unread` and `kind` narrow\neither.\n\nWhat an organization that takes only sessions made through its provider told the\nuser is left out for a session made otherwise, as `getMyMemberships` leaves its\nboards out: it is not listed, not counted, and not marked as read by such a\nsession, and it is there again for a session made through the provider.\n\nA notification that was read is kept for ninety days, and a user has ten thousand\nat most: past that the oldest go, those that were read first.",
         "operationId": "getNotifications",
         "parameters": [
           {
@@ -10486,6 +10730,43 @@
               "maximum": 1000,
               "minimum": 1,
               "type": "integer"
+            }
+          },
+          {
+            "description": "`true` lists only the notifications not read; `false`, or left out, every one. Anything else is 400.",
+            "in": "query",
+            "name": "unread",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Lists only the notifications of this kind (`mention`, `assignment`, ...), and of them only those whose `subject` the user reads now: one that says nothing says no kind either, and a page may hold fewer than `perPage` while more follow. Left out, every kind. Anything else is 400.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "description": "What a notification tells of.",
+              "enum": [
+                "mention",
+                "assignment",
+                "comment",
+                "review_due",
+                "meeting_upcoming",
+                "due_soon",
+                "added_to_container"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "`true` lists the notifications put away (`archiveNotification`) in place of those of the inbox; `false`, or left out, the inbox. Anything else is 400.",
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -10515,6 +10796,31 @@
           }
         },
         "summary": "The notifications of the user",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/archive": {
+      "post": {
+        "description": "Puts away every notification of the user of the session that was read and is in the\ninbox, in every organization the session opens (`getNotifications`); those not read\nstay. Those of an organization the session does not open stay as they are.",
+        "operationId": "archiveReadNotifications",
+        "responses": {
+          "204": {
+            "description": "They are put away."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Put away every notification that was read",
         "tags": [
           "notifications"
         ]
@@ -10589,6 +10895,76 @@
         ]
       }
     },
+    "/api/v1/notifications/{notificationId}/archive": {
+      "delete": {
+        "description": "Brings one notification of the user of the session back into the inbox; it stays\nread. One in the inbox stays there. 404 as for `unreadNotification`.",
+        "operationId": "unarchiveNotification",
+        "parameters": [
+          {
+            "description": "The identifier of the notification: one of the user of the session.",
+            "in": "path",
+            "name": "notificationId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "It is in the inbox."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Take a notification out of the archive",
+        "tags": [
+          "notifications"
+        ]
+      },
+      "post": {
+        "description": "Puts one notification of the user of the session away, out of the inbox and into\nthe archive (`getNotifications` with `archived=true`): one that was not read is read\nwith it, and one put away stays put away since when it was. One whose `subject` is\n`null` is put away as any other. More of it within the hour brings it back into the\ninbox, unread. 404 as for `unreadNotification`.",
+        "operationId": "archiveNotification",
+        "parameters": [
+          {
+            "description": "The identifier of the notification: one of the user of the session.",
+            "in": "path",
+            "name": "notificationId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "It is put away."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Put a notification away",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
     "/api/v1/notifications/{notificationId}/read": {
       "post": {
         "description": "Marks one notification of the user of the session as read; one that was read stays\nread since when it was. 404 for a notification of somebody else, as for one that\nis not there, and for one of an organization the session does not open\n(`getNotifications`).",
@@ -10620,6 +10996,42 @@
           }
         },
         "summary": "Mark a notification as read",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/{notificationId}/unread": {
+      "post": {
+        "description": "Marks one notification of the user of the session as not read, as more of it would:\nit is counted again (`getUnreadNotifications`), and one that was put away\n(`archiveNotification`) is back in the inbox. 404 for a notification of somebody\nelse, as for one that is not there, and for one of an organization the session does\nnot open (`getNotifications`).",
+        "operationId": "unreadNotification",
+        "parameters": [
+          {
+            "description": "The identifier of the notification: one of the user of the session.",
+            "in": "path",
+            "name": "notificationId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "It is unread."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Mark a notification as unread",
         "tags": [
           "notifications"
         ]
@@ -12116,7 +12528,7 @@
     },
     "/api/v1/shared/{containerId}/blocks": {
       "get": {
-        "description": "What `getBlocks` gives of the board, with the same parameters, read with its read\ntoken as `getSharedContainer` is; a wiki's or a course's token reads no blocks (404). No block names a\nuser: `createdBy` and `modifiedBy` are empty, so is the `userId` of every mention in\na body, and so is each user that\nthe board's person properties (`person`, `multiPerson`, `createdBy`, `updatedBy`)\nname in a card's `fields.properties` and in the clauses of a view's `fields.filter`;\na list keeps its length, so how many people a card has still shows. A card's values\nof properties the board does not define are left out, and a view grouped by a person\nproperty keeps of `visibleGroups`, `hiddenGroups`, `collapsedGroups` and\n`groupCalculations` only the group of the cards without a value (`\"\"`). A reference\nin a body keeps its `id` if it names a card of this board, and has an empty one for\nanything else: of what is elsewhere in the workspace nothing is told, nor whether\nthere is anything. Oldest\nfirst; the blocks that one request made come in the order that request had them in.",
+        "description": "The live blocks of the board: all of them (`all`), one (`blockId`), or those below a\nblock and of a type (`parentId`, `type`), read with its read token as\n`getSharedContainer` is; a wiki's or a course's token reads no blocks (404). No block names a\nuser: `createdBy` and `modifiedBy` are empty, so is the `userId` of every mention in\na body, and so is each user that\nthe board's person properties (`person`, `multiPerson`, `createdBy`, `updatedBy`)\nname in a card's `fields.properties` and in the clauses of a view's `fields.filter`;\na list keeps its length, so how many people a card has still shows. A card's values\nof properties the board does not define are left out, and a view grouped by a person\nproperty keeps of `visibleGroups`, `hiddenGroups`, `collapsedGroups` and\n`groupCalculations` only the group of the cards without a value (`\"\"`). A reference\nin a body keeps its `id` if it names a card of this board, and has an empty one for\nanything else: of what is elsewhere in the workspace nothing is told, nor whether\nthere is anything. Oldest\nfirst; the blocks that one request made come in the order that request had them in.",
         "operationId": "getSharedBlocks",
         "parameters": [
           {
@@ -14395,7 +14807,7 @@
         "x-fvoci-api-token": "read"
       },
       "post": {
-        "description": "The user becomes the board's admin, and the board is filed under the user's default\ncategory, unless it is a template. A board is made here and no wiki: a `kind` other\nthan `board` is 400 at `/kind` (`createWiki` makes a wiki).",
+        "description": "The user becomes the board's admin, and the board is filed under the user's default\ncategory, unless it is a template. A board is made here and no wiki: a `kind` other\nthan `board` is 400 at `/kind` (`createWiki` makes a wiki). Its first view\n(`firstView`) is made with it, all or none, as `createBoardView` makes a view; a view\nit refuses is 400 under `/firstView`, and so is one with `scaffold`, which brings its\nown. `getBoardViews` reads it.",
         "operationId": "createBoard",
         "parameters": [
           {
@@ -14516,577 +14928,6 @@
         "summary": "Search the boards of a workspace",
         "tags": [
           "boards"
-        ],
-        "x-fvoci-api-token": "read"
-      }
-    },
-    "/api/v1/w/{workspaceId}/boards/{boardId}/blocks": {
-      "get": {
-        "description": "For the board's members, and for an open or built-in template everyone who works in\nits workspace.\n\n`all` asks for every block and `blockId` for one, which is 404 if the board has no\nsuch block. Otherwise `parentId` and `type` narrow the list, and without either the\nlist is every block of the board. A parameter with an empty value counts as left\nout. Oldest first; the blocks that one request made come in the order that request\nhad them in.\n\nA personal API token is taken, of either scope (`read` or `write`).",
-        "operationId": "getBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Any value that is not empty asks for every block of the board, and the other parameters are not looked at.",
-            "in": "query",
-            "name": "all",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Asks for the one block with this identifier, in a list of one. 404 if the board has no such block.",
-            "in": "query",
-            "name": "blockId",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Narrows the list to the blocks below the block of this identifier.",
-            "in": "query",
-            "name": "parentId",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Narrows the list to the blocks of this type, written as the blocks have it.",
-            "in": "query",
-            "name": "type",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Block"
-                  },
-                  "type": "array"
-                }
-              }
-            },
-            "description": "The blocks."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "The blocks of a board",
-        "tags": [
-          "blocks"
-        ],
-        "x-fvoci-api-token": "read"
-      },
-      "patch": {
-        "description": "Applies a patch to each of several blocks of the board, all or none. A body that\nnames no block changes nothing and is answered 204 too. Each block needs what\n`patchBlock` needs: the editor's role, for a comment its author's commenter role or\nfor the comment of somebody else the board's admin role.",
-        "operationId": "patchBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
-            "in": "query",
-            "name": "disableNotify",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BlockPatchBatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "The blocks are changed."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Change several blocks",
-        "tags": [
-          "blocks"
-        ]
-      },
-      "post": {
-        "description": "Inserts blocks under identifiers the server makes; the identifiers of the request\nonly link its blocks to each other. All blocks are inserted or none, and they are\nlisted afterwards in the order the request had them in. Comments need the role of a\ncommenter, everything else that of an editor. A comment is on a card of the board,\nand no block is below a comment (400 at the block's `parentId`). A comment's body\nhas no file block (400 at its `body`), and nothing is copied for one that has.",
-        "operationId": "createBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The board the blocks were copied from. The files the blocks refer to are copied from that board to this one, and the blocks point at the copies. Such blocks are copies: the people they name are told nothing of them.",
-            "in": "query",
-            "name": "sourceBoardId",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
-            "in": "query",
-            "name": "disableNotify",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "items": {
-                  "$ref": "#/components/schemas/NewBlock"
-                },
-                "type": "array"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Block"
-                  },
-                  "type": "array"
-                }
-              }
-            },
-            "description": "The blocks as they were stored, in the order of the request."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Insert blocks",
-        "tags": [
-          "blocks"
-        ]
-      }
-    },
-    "/api/v1/w/{workspaceId}/boards/{boardId}/blocks/{blockId}": {
-      "delete": {
-        "description": "The block goes to the trash with the blocks below it, and `restoreBlock` brings it\nback until the trash is emptied of it. For editors; a comment is its author's to\ndelete from the commenter's role up, and a comment of somebody else the board's\nadmins' only (403, `access denied to delete other users' comments`), also as a\nreply below a comment the user deletes.",
-        "operationId": "deleteBlock",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the block.",
-            "in": "path",
-            "name": "blockId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
-            "in": "query",
-            "name": "disableNotify",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "The block is deleted."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Delete a block",
-        "tags": [
-          "blocks"
-        ]
-      },
-      "patch": {
-        "description": "For editors. A comment is changed by its author with the commenter's role, and the\ncomment of somebody else by the board's admins only (as `deleteBlock` has it): an\neditor may not change it. The commenter's role changes a comment's text (its body);\nmoving a comment to another card (`parentId`) or making it a block of another type\nis for editors, and making a block of somebody else a comment for the board's admins.\nA comment goes only on a card of the board, no block goes below a comment (400 at\n`parentId`), and a card with comments stays a card (400 at `type`). A comment's body\nhas no file block, nor does a block made a comment (400 at `body`). The block's\n`modifiedBy` and `updatedAt` say who changed it and when.",
-        "operationId": "patchBlock",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the block.",
-            "in": "path",
-            "name": "blockId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
-            "in": "query",
-            "name": "disableNotify",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BlockPatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "The block is changed."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Change a block",
-        "tags": [
-          "blocks"
-        ]
-      }
-    },
-    "/api/v1/w/{workspaceId}/boards/{boardId}/blocks/{blockId}/duplicate": {
-      "post": {
-        "description": "Copies a block and the blocks directly below it, except comments. A comment cannot\nbe copied. For editors.",
-        "operationId": "duplicateBlock",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the block.",
-            "in": "path",
-            "name": "blockId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "`true` makes the copy a template. Any other value does not.",
-            "in": "query",
-            "name": "asTemplate",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Block"
-                  },
-                  "type": "array"
-                }
-              }
-            },
-            "description": "The copies: the copy of the block first, then those of the blocks directly below it, oldest first."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Copy a block",
-        "tags": [
-          "blocks"
-        ]
-      }
-    },
-    "/api/v1/w/{workspaceId}/boards/{boardId}/blocks/{blockId}/restore": {
-      "post": {
-        "description": "Restores a block of the board from the trash, with the blocks that went there with\nit. A block whose parent is gone has nowhere to come back to: 404; one whose parent\nmay no longer hold it (a comment off a card, a block below a comment): 409. For who may\ndelete what comes back, as `deleteBlock` has it: editors, a comment its author from\nthe commenter's role up if they deleted it themselves, and a comment of somebody\nelse the board's admins only (403, `access denied to undelete other users' comments`),\nas one of the user's that somebody else deleted (403, `a comment somebody else\ndeleted is brought back by the board's admins`). What decides is what was\ndeleted, as `deleteBlock` decided it: a comment with every reply that went with it,\nso a block below somebody else's comment is brought back by the admins only, and a\ncard alone, so a comment that went with its card comes back for whoever may bring\nback the card.",
-        "operationId": "restoreBlock",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the block.",
-            "in": "path",
-            "name": "blockId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Block"
-                }
-              }
-            },
-            "description": "The block as it is again."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Bring a deleted block back",
-        "tags": [
-          "blocks"
-        ]
-      }
-    },
-    "/api/v1/w/{workspaceId}/boards/{boardId}/blocks/{blockId}/versions": {
-      "get": {
-        "description": "The earlier versions of a comment's body: every version but the one it has now, with\nwho wrote it and when. The first one first; it is the text the comment was posted\nwith, by its author. The server keeps the first version and the newest ones, up to\nits setting `max_comment_versions` in all, so the numbers of the versions may leave\ngaps. Empty for a comment whose body was never changed; the comment's `editedAt` says\nwhether it was. For the board's members, also in the trash: the versions go only\nwhen the comment is gone for good. Not for a reader by the board's read token. A\nblock that is no comment is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
-        "operationId": "getCommentVersions",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the board.",
-            "in": "path",
-            "name": "boardId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The identifier of the block.",
-            "in": "path",
-            "name": "blockId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/CommentVersion"
-                  },
-                  "type": "array"
-                }
-              }
-            },
-            "description": "The earlier versions, the first one first."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "What a comment said before",
-        "tags": [
-          "blocks"
         ],
         "x-fvoci-api-token": "read"
       }
@@ -15249,7 +15090,7 @@
         "x-fvoci-api-token": "read"
       },
       "post": {
-        "description": "The server chooses the identifier, the creator and the times. For editors.\n\n`parentId` places an ordinary card below another live, non-template card of the same\nboard, at most three levels deep (top-level = 1, child = 2, grandchild = 3); empty,\n`null`, or omitted makes a top-level card. Template cards (`isTemplate: true`) cannot\nhave a parent or sub-cards. Invalid parents or cycles answer 400 at `/parentId`\n(depth > 3 with reason `card_too_deep` and `limit: 3`).\n\nThe value of a card relation property (of the `type` `relation`) is `null` or a list\nof relation link objects (`{\"card\": \"<cardId>\", \"kind\": \"fs\" | \"ss\" | \"ff\" | \"sf\",\n\"lagDays\": -3650..=3650}`), naming other cards of the board, in the trash or not,\neach once (even if `kind` differs), at most 50 (a value over it from before may be\nwritten with fewer of its cards, not with another). `kind` defaults to `\"fs\"` and\n`lagDays` defaults to `0` when omitted, unknown fields and plain string arrays are\nrefused with 400, and stored links always include all three fields normalized. Any\nother refusal is 400 with the reason `relation_not_a_list`, `relation_to_itself`,\n`relation_repeated`, `relation_too_many` (with the `limit`), `relation_not_a_card`\n(a block of the board that is no card), `relation_cycle` (ordering dependencies form\na cycle on the board) or `relation_card_not_found`: no card of that\nidentifier on the board, which is also the answer for a card of another board. Every\nwrite of a card checks so (`patchCard`, the block routes, `createContainersAndBlocks`)\nthe values it changes, and does not ask again for a card that a value named before.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
+        "description": "The server chooses the identifier, the creator and the times. For editors.\n\n`parentId` places an ordinary card below another live, non-template card of the same\nboard, at most three levels deep (top-level = 1, child = 2, grandchild = 3); empty,\n`null`, or omitted makes a top-level card. Template cards (`isTemplate: true`) cannot\nhave a parent or sub-cards. Invalid parents or cycles answer 400 at `/parentId`\n(depth > 3 with reason `card_too_deep` and `limit: 3`).\n\n`recurrence` makes the card repeat, only on a board with a `doneWhen` and a\n`dueDatePropertyId`: elsewhere 400 at `/recurrence` with reason\n`recurrence_needs_board_rules`.\nA template keeps its recurrence and makes no next card.\n\nThe value of a card relation property (of the `type` `relation`) is `null` or a list\nof relation link objects (`{\"card\": \"<cardId>\", \"kind\": \"fs\" | \"ss\" | \"ff\" | \"sf\",\n\"lagDays\": -3650..=3650}`), naming other cards of the board, in the trash or not,\neach once (even if `kind` differs), at most 50 (a value over it from before may be\nwritten with fewer of its cards, not with another). `kind` defaults to `\"fs\"` and\n`lagDays` defaults to `0` when omitted, unknown fields and plain string arrays are\nrefused with 400, and stored links always include all three fields normalized. Any\nother refusal is 400 with the reason `relation_not_a_list`, `relation_to_itself`,\n`relation_repeated`, `relation_too_many` (with the `limit`), `relation_not_a_card`\n(a block of the board that is no card), `relation_cycle` (ordering dependencies form\na cycle on the board) or `relation_card_not_found`: no card of that\nidentifier on the board, which is also the answer for a card of another board. Every\nwrite of a card checks so (`createCard`, `patchCard`, `batchPatchCards`)\nthe values it changes, and does not ask again for a card that a value named before.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
         "operationId": "createCard",
         "parameters": [
           {
@@ -15383,6 +15224,81 @@
         ]
       }
     },
+    "/api/v1/w/{workspaceId}/boards/{boardId}/cards/batch-patch": {
+      "post": {
+        "description": "Sets and removes the same property values of `1..=200` distinct cards of the board,\nall or none in one transaction: each card is changed as `patchCard` with only\n`updatedProperties` and `deletedProperties` would change it, its values checked alike\nagainst the board's properties, and whom it is newly given to told alike. More cards\nare 400 with the `limit`. A card of another board, or a block that is no card, is not\nthere (404); a template of the board's cards is 400. For the board's editors.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
+        "operationId": "batchPatchCards",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
+            "in": "query",
+            "name": "disableNotify",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardBatchPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Card"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The cards as they are now, in the order of `cardIds`."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Change several cards alike",
+        "tags": [
+          "cards"
+        ],
+        "x-fvoci-api-token": "write"
+      }
+    },
     "/api/v1/w/{workspaceId}/boards/{boardId}/cards/batch-restore": {
       "post": {
         "description": "Restores `1..=200` distinct deleted cards on `boardId` in one transaction and returns\nall restored cards (including restored sub-cards).",
@@ -15484,7 +15400,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Card"
+                  "$ref": "#/components/schemas/CardWithReactions"
                 }
               }
             },
@@ -15509,6 +15425,69 @@
       }
     },
     "/api/v1/w/{workspaceId}/boards/{boardId}/cards/{cardId}/attachments": {
+      "get": {
+        "description": "For whoever may read the board: its members, and for an open or built-in template\neveryone who works in its workspace. A card of another board, and a block that is no\ncard, are not there (404). Oldest first.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "operationId": "getCardAttachments",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the card.",
+            "in": "path",
+            "name": "cardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Block"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The attachments."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "The attachments of a card",
+        "tags": [
+          "cards"
+        ],
+        "x-fvoci-api-token": "read"
+      },
       "post": {
         "description": "Verifies under the board lock that `fileId` belongs to `boardId`, sets the attachment\nblock's trusted filename and size from `files`, and stores the attachment block.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
         "operationId": "createCardAttachment",
@@ -15589,9 +15568,151 @@
         "x-fvoci-api-token": "write"
       }
     },
+    "/api/v1/w/{workspaceId}/boards/{boardId}/cards/{cardId}/attachments/{attachmentId}": {
+      "delete": {
+        "description": "The attachment goes to the trash, and `restoreCardAttachment` brings it back until\nthe trash is emptied of it; its file stays with the board. For the board's editors.\nAn attachment of another card is not there (404).",
+        "operationId": "deleteCardAttachment",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the card.",
+            "in": "path",
+            "name": "cardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the attachment: an attachment of the card of the path. 404 for an attachment of another card, and for a block that is no attachment.",
+            "in": "path",
+            "name": "attachmentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
+            "in": "query",
+            "name": "disableNotify",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The attachment is deleted."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Delete an attachment of a card",
+        "tags": [
+          "cards"
+        ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/boards/{boardId}/cards/{cardId}/attachments/{attachmentId}/restore": {
+      "post": {
+        "description": "Restores an attachment of the card from the trash, where it went on its own: one that\nwent there with its card comes back with the card (`batchRestoreCards`). For the\nboard's editors. An attachment that is not in the trash, one of another card and a\nblock of another type are not there to restore (404).",
+        "operationId": "restoreCardAttachment",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the card.",
+            "in": "path",
+            "name": "cardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the attachment: an attachment of the card of the path. 404 for an attachment of another card, and for a block that is no attachment.",
+            "in": "path",
+            "name": "attachmentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Block"
+                }
+              }
+            },
+            "description": "The attachment as it is again."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Bring a deleted attachment back",
+        "tags": [
+          "cards"
+        ]
+      }
+    },
     "/api/v1/w/{workspaceId}/boards/{boardId}/cards/{cardId}/comments": {
       "get": {
-        "description": "Every comment on the card, oldest first, as blocks of the `type` `comment` whose\nparent is the card. For who reads the board: its members, and of an open board\nwhoever works in the workspace. A card in the trash is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "Every comment on the card, oldest first, as blocks of the `type` `comment` whose\nparent is the card, each with its `reactions` where it has any. For who reads the\nboard: its members, and of an open board whoever works in the workspace. A card in\nthe trash is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getCardComments",
         "parameters": [
           {
@@ -15628,7 +15749,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/Block"
+                    "$ref": "#/components/schemas/CommentWithReactions"
                   },
                   "type": "array"
                 }
@@ -16243,7 +16364,7 @@
     },
     "/api/v1/w/{workspaceId}/boards/{boardId}/trash/cards": {
       "get": {
-        "description": "One page of the board's cards that are in the trash, each with its identifier, its\ntitle, when it was deleted and by whom; `restoreBlock` brings one back until the\ntrash is emptied of it. A card that went with the block it was on (another card, a\nview) comes back with that block, and is not listed. For the board's editors. The\nlast deleted first; the pages cut that order.",
+        "description": "One page of the board's cards that are in the trash, each with its identifier, its\ntitle, when it was deleted and by whom; `batchRestoreCards` brings one back until the\ntrash is emptied of it. A card that went with the block it was on (another card, a\nview) comes back with that block, and is not listed. For the board's editors. The\nlast deleted first; the pages cut that order.",
         "operationId": "getDeletedCards",
         "parameters": [
           {
@@ -16320,6 +16441,60 @@
       }
     },
     "/api/v1/w/{workspaceId}/boards/{boardId}/views": {
+      "get": {
+        "description": "For whoever may read the board: its members, and for an open or built-in template\neveryone who works in its workspace. Oldest first; the order the board shows them in\nis their `fields.order`.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "operationId": "getBoardViews",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Block"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The views."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "The views of a board",
+        "tags": [
+          "boards"
+        ],
+        "x-fvoci-api-token": "read"
+      },
       "post": {
         "description": "Creates a view on `boardId` using server-side fractional indexing (`after`).",
         "operationId": "createBoardView",
@@ -16376,6 +16551,207 @@
           }
         },
         "summary": "Create a board view",
+        "tags": [
+          "boards"
+        ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/boards/{boardId}/views/{viewId}": {
+      "delete": {
+        "description": "The view goes to the trash, and `restoreBoardView` brings it back until the trash is\nemptied of it. For the board's editors.",
+        "operationId": "deleteBoardView",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board view.",
+            "in": "path",
+            "name": "viewId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
+            "in": "query",
+            "name": "disableNotify",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The view is deleted."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Delete a view of a board",
+        "tags": [
+          "boards"
+        ]
+      },
+      "get": {
+        "description": "For whoever may read the board, as `getBoardViews`. A block of the board that is no\nview, and a view of another board, are not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "operationId": "getBoardView",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board view.",
+            "in": "path",
+            "name": "viewId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Block"
+                }
+              }
+            },
+            "description": "The view."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "A view of a board",
+        "tags": [
+          "boards"
+        ],
+        "x-fvoci-api-token": "read"
+      },
+      "patch": {
+        "description": "Sets and removes fields of the view and changes its title; the fields are checked as\na view's are (400 at `/updatedFields/...`). For the board's editors. With `readAt`,\na view that changed since is 409 and nothing changes. The view's `modifiedBy` and\n`updatedAt` say who changed it and when.",
+        "operationId": "patchBoardView",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board view.",
+            "in": "path",
+            "name": "viewId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.",
+            "in": "query",
+            "name": "disableNotify",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BoardViewPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Block"
+                }
+              }
+            },
+            "description": "The view as it is now."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Change a view of a board",
         "tags": [
           "boards"
         ]
@@ -16612,9 +16988,70 @@
         ]
       }
     },
+    "/api/v1/w/{workspaceId}/boards/{boardId}/views/{viewId}/restore": {
+      "post": {
+        "description": "Restores a view of the board from the trash. For the board's editors. A view that is\nnot in the trash, one of another board and a block of another type are not there to\nrestore (404).",
+        "operationId": "restoreBoardView",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board.",
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board view.",
+            "in": "path",
+            "name": "viewId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Block"
+                }
+              }
+            },
+            "description": "The view as it is again."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Bring a deleted view back",
+        "tags": [
+          "boards"
+        ]
+      }
+    },
     "/api/v1/w/{workspaceId}/cards/{cardId}": {
       "get": {
-        "description": "For the members of the card's board. To a user who is no member of it there is no\nsuch card.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "For the members of the card's board, with its `reactions` where it has any. To a\nuser who is no member of it there is no such card.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getCard",
         "parameters": [
           {
@@ -16636,7 +17073,7 @@
             }
           },
           {
-            "description": "`markdown` gives the card's body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).",
+            "description": "`markdown` gives the body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).",
             "in": "query",
             "name": "format",
             "required": false,
@@ -16650,7 +17087,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Card"
+                  "$ref": "#/components/schemas/CardWithReactions"
                 }
               }
             },
@@ -16674,7 +17111,7 @@
         "x-fvoci-api-token": "read"
       },
       "patch": {
-        "description": "For editors of the card's board. To a user who is no member of that board there is\nno such card. The relation values it changes are checked as `createCard` says.\n`parentId` reparents the card within the same board (empty or `null` moves it to the\ntop level; left out keeps its current parent), checked for cycles and maximum depth 3\nincluding any sub-cards below it (400 at `/parentId`, `card_too_deep` when depth > 3).\n\n`bodyMarkdown` writes the body whole from Markdown, as `getCard` with\n`format=markdown` reads it: refused with 409 `complex_blocks_use_append` while the body\nhas blocks its Markdown does not hold as they are. With a personal API token a body\nwritten whole (`body` or `bodyMarkdown`) is refused with 409 `room_has_active_editors`\nwhile people may write in the card's body, as it would lose what they typed and have\nnot sent: `appendCardMarkdown` adds to it instead.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
+        "description": "For editors of the card's board. To a user who is no member of that board there is\nno such card. The relation values it changes are checked as `createCard` says.\n`parentId` reparents the card within the same board (empty or `null` moves it to the\ntop level; left out keeps its current parent), checked for cycles and maximum depth 3\nincluding any sub-cards below it (400 at `/parentId`, `card_too_deep` when depth > 3).\n\n`recurrence` is checked as `createCard` says (`null` makes the card stop repeating). The\nchange that makes a card that repeats done makes its next card in the same write, once:\nthe card names it in `recurredTo` and hands it the recurrence.\n\n`bodyMarkdown` writes the body whole from Markdown, as `getCard` with\n`format=markdown` reads it: refused with 409 `complex_blocks_use_append` while the body\nhas blocks its Markdown does not hold as they are. With a personal API token a body\nwritten whole (`body` or `bodyMarkdown`) is refused with 409 `room_has_active_editors`\nwhile people may write in the card's body, as it would lose what they typed and have\nnot sent: `appendCardMarkdown` adds to it instead.\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
         "operationId": "patchCard",
         "parameters": [
           {
@@ -16744,9 +17181,88 @@
         "x-fvoci-api-token": "write"
       }
     },
+    "/api/v1/w/{workspaceId}/cards/{cardId}/activity": {
+      "get": {
+        "description": "What was done to the card, the newest first: its making (new, a copy, from a\ntemplate, by an import, or as the next of a card that repeats), each change of its\ntitle, of the value of a property, of its parent card and of whether it is a\ntemplate, and its coming back from the trash. Its body is not: its versions say what\nit was (`getCardBodyVersions`); nor are its comments, its attachments, or what a copy\nor an import wrote over a card that was there.\n\nA line says what changed as the card held it: a title as it was written, the value\nof a property as the card stores it (the identifier of an option or of a person, a\ndate value), the parent card by its identifier (`null` for the top of the board),\nwhether it was a template; the names are the client's to read now, so that what was\nrenamed since reads as it is called now and what is gone reads as gone. Who did it\nis `actorId`, and `actorTokenName` the name of the personal API token an agent did it\nthrough; both are `null` for what the server did itself and once the account is\nerased. The same person changing the same thing again within five minutes, with\nnobody else's change of it between, changes their line (`updatedAt`) rather than\nadding one, and changing it back to what it was takes the line away. A card keeps\nits 500 newest lines; they stay while it is in the trash and go with it for good.\n\nFor the members of the card's board, whatever their role; to a user who is no\nmember of it there is no such card, and a card in the trash is not there (404). Not\nfor a reader by the board's read token (`/shared`).\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "operationId": "getCardActivity",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the card.",
+            "in": "path",
+            "name": "cardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The page, counted from 0. Left out, the first one. Below 0 or above 2147483647 is 400.",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "How many a page has, from 1 to 1000. Left out, 50. Anything else is 400: a longer list is read page after page.",
+            "in": "query",
+            "name": "perPage",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CardEvent"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The lines, the newest first."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "The activity of a card",
+        "tags": [
+          "cards"
+        ],
+        "x-fvoci-api-token": "read"
+      }
+    },
     "/api/v1/w/{workspaceId}/cards/{cardId}/body-versions": {
       "get": {
-        "description": "The server keeps the body of a card as a version each time it changed: when the\nlast of those who wrote it since the newest version leaves it, at an interval\nwhile it is edited on (its setting `collab_version_minutes`, ten minutes unless\nset otherwise), and before and after a write of the whole body (`patchCard` and the\nblock routes). The newest first, each with when it was kept and who wrote the body\nup to it, without the bodies (`getCardBodyVersion`). The server keeps the newest\nof them (its setting `collab_body_versions`, fifty unless set otherwise), so the\nnumbers may leave the lowest out. Empty for a card whose body never changed since\nversions were kept. For the members of the card's board, whatever\ntheir role; to a user who is no member of it there is no such card, and a reader by\nthe board's read token has no session to ask with. A card in the trash is not\nthere (404); its versions come back with it, and go when it is gone for good.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "The server keeps the body of a card as a version each time it changed: when the\nlast of those who wrote it since the newest version leaves it, at an interval\nwhile it is edited on (its setting `collab_version_minutes`, ten minutes unless\nset otherwise), and before and after a write of the whole body (`patchCard`). The\nnewest first, each with when it was kept and who wrote the body\nup to it, without the bodies (`getCardBodyVersion`). The server keeps the newest\nof them (its setting `collab_body_versions`, fifty unless set otherwise), so the\nnumbers may leave the lowest out. Empty for a card whose body never changed since\nversions were kept. For the members of the card's board, whatever\ntheir role; to a user who is no member of it there is no such card, and a reader by\nthe board's read token has no session to ask with. A card in the trash is not\nthere (404); its versions come back with it, and go when it is gone for good.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getCardBodyVersions",
         "parameters": [
           {
@@ -17734,154 +18250,6 @@
         "x-fvoci-api-token": "read"
       }
     },
-    "/api/v1/w/{workspaceId}/containers-and-blocks": {
-      "delete": {
-        "description": "Deletes several boards of one workspace, all or none. The request names at least one\nboard, and every block it names must be on one of its boards and be the user's to\ndelete as `deleteBlock` has it; the blocks are checked and nothing more, since a\nboard takes all of its blocks along. The boards go to the trash as `deleteContainer`\nputs them there, and `restoreContainer` brings each back with its blocks. For the\nadmins of every board named.",
-        "operationId": "deleteContainersAndBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeleteContainersAndBlocks"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "The boards and blocks are deleted."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Delete boards and blocks together",
-        "tags": [
-          "boards"
-        ]
-      },
-      "patch": {
-        "description": "Applies a patch to each of several boards of one workspace and to blocks of those\nboards, all or none. The request names at least one board, and every block it names\nis on one of its boards: blocks alone are not changed this way. Each board needs\nwhat `patchContainer` needs, each block what `patchBlock` needs; a board's patch that\nnames a `kind` is 400 at `/containerPatches/{index}/kind`.",
-        "operationId": "patchContainersAndBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PatchContainersAndBlocks"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ContainersAndBlocks"
-                }
-              }
-            },
-            "description": "The boards and the blocks as they are now, each in the order of the request."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Change boards and blocks together",
-        "tags": [
-          "boards"
-        ]
-      },
-      "post": {
-        "description": "Makes boards and their blocks together, all or none, under identifiers the server\nmakes; the identifiers of the request only say which block belongs to which board\nand to which other block. The request needs at least one board and one block; every\nboard needs an `id`, and all boards are of one workspace. The user becomes the admin of\neach board, and each board that is no template is filed under the user's default\ncategory. They are boards: one whose `kind` is not `board` is 400 at its `kind`.",
-        "operationId": "createContainersAndBlocks",
-        "parameters": [
-          {
-            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
-            "in": "path",
-            "name": "workspaceId",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NewContainersAndBlocks"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ContainersAndBlocks"
-                }
-              }
-            },
-            "description": "The boards in the order of the request, and the blocks board by board in that order, each board's in the order of the request."
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            },
-            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
-          }
-        },
-        "summary": "Make boards with their blocks",
-        "tags": [
-          "boards"
-        ]
-      }
-    },
     "/api/v1/w/{workspaceId}/containers/{containerId}": {
       "delete": {
         "description": "The board goes to the trash with its blocks and its members, and `restoreContainer`\nbrings it back until the trash is emptied of it. Team IDs and their roles are kept,\nbut grant no access while the board is in the trash. Its sharing ends, with its read\ntoken, and so do its places in the users' sidebars and the subscriptions to its\nblocks; those do not come back with the board. For the board's admins.",
@@ -18106,6 +18474,132 @@
         "tags": [
           "archives"
         ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/containers/{containerId}/blocks/{blockId}/reactions/{emoji}": {
+      "delete": {
+        "description": "Takes the user's reaction with the emoji off the block, for whom `addReaction`\ntakes it from. One that is not there is no error, and nothing changes. As adding\none, nothing of the block changes, and the members who read the container are told\nits reactions as they are now (`reactionsChanged`).\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
+        "operationId": "removeReaction",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board, the wiki or the course. A diary is 404, as an identifier of nothing is: its entries are its owner's alone.",
+            "in": "path",
+            "name": "containerId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of a comment, a card, a page or a unit of the container of the path. 404 for a block of another container, and for a block of any other type.",
+            "in": "path",
+            "name": "blockId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The emoji, percent-encoded as any text of a path is (`%F0%9F%91%8D` for 👍): one grapheme of at most 8 code points that has the shape of an emoji, as a pictograph with its variation selector and skin tone, joined to others by zero-width joiners, a flag or a keycap. 400 for any other text.",
+            "in": "path",
+            "name": "emoji",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The reaction is not there."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Take a reaction off",
+        "tags": [
+          "boards"
+        ],
+        "x-fvoci-api-token": "write"
+      },
+      "put": {
+        "description": "Adds the user's reaction with the emoji to the block: a comment, a card, a page or a\nunit of a board, a wiki or a course. For its members from the commenter's role up\n(whoever reads an open board without joining it is refused with 403, as a viewer\nis); a diary's entries are their owner's alone, and a diary is not there (404). One\nthat is there already is no error, and nothing changes. A block has at most 20\ndifferent emoji: one more is 400 with the reason `too_many_reactions` and the\n`limit`, and nothing changes; anybody's emoji that is there is taken. Neither the\nblock's `updatedAt` nor who changed it last changes, and nobody is notified; the\nmembers who read the container are told the block's reactions as they are now\n(`reactionsChanged`).\n\nA personal API token is taken that writes (`write`); one that reads only is answered 403 with the reason `token_scope_insufficient`.",
+        "operationId": "addReaction",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board, the wiki or the course. A diary is 404, as an identifier of nothing is: its entries are its owner's alone.",
+            "in": "path",
+            "name": "containerId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of a comment, a card, a page or a unit of the container of the path. 404 for a block of another container, and for a block of any other type.",
+            "in": "path",
+            "name": "blockId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The emoji, percent-encoded as any text of a path is (`%F0%9F%91%8D` for 👍): one grapheme of at most 8 code points that has the shape of an emoji, as a pictograph with its variation selector and skin tone, joined to others by zero-width joiners, a flag or a keycap. 400 for any other text.",
+            "in": "path",
+            "name": "emoji",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The reaction is there."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "React to a comment, a card, a page or a unit",
+        "tags": [
+          "boards"
+        ],
+        "x-fvoci-api-token": "write"
       }
     },
     "/api/v1/w/{workspaceId}/containers/{containerId}/copy-to-workspace": {
@@ -19177,6 +19671,76 @@
         "summary": "Leave a board",
         "tags": [
           "members"
+        ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/containers/{containerId}/markdown/export": {
+      "get": {
+        "description": "A ZIP of Markdown files of the container, for another tool to read, offered as a\ndownload with its length, for those `exportContainerArchive` gives the archive to\n(a diary to its owner alone, as every route of one), and under its limits (one\nexport at a time, `max_concurrent_exports`, `export_stall_seconds`). A session\nalone: a personal API token is refused.\n\nThe ZIP holds a folder of the container's name, and in it a `.md` file for each\npage of a wiki (in folders as its tree has them: a page with pages below it has a\nfolder of its name beside its file), each card of a board but its templates\n(`cards/<number>-<title>.md`, and all of them in `board.csv`), each unit of a course\n(a chapter is a folder of its units), and each entry of a diary\n(`entries/<YYYY-MM-DD>.md`); and the files their bodies show and the attachments of\nthe cards in `files/`, named as they were uploaded. A name is one any system takes,\nand one of its own in its folder (` (2)` after a second). A file starts with its\nfront matter in YAML (`title`, `created`, `updated` in UTC, and a card's `number`\nand `attachments`, a page's `icon`, a unit's `amount`, `amountUnit` and\n`scheduledDate`, an entry's `date`, `mood`, `weather` and `place`), then its title\nas a heading and its body in Markdown as `getCard` writes one with `format=markdown`,\nbut that a file, a page, a card or a unit the ZIP holds is linked where it is (a\nrelative link), a person is named in plain text (`@name`), and what else a reference\nnames is its title where the user reads it, `[[id]]` where not. Comments, the trash\nand the versions of bodies are not in it.",
+        "operationId": "exportContainerMarkdown",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of the board, the wiki, the diary or the course.",
+            "in": "path",
+            "name": "containerId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "description": "The bytes of a file, as the body of an answer.",
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The ZIP of Markdown files.",
+            "headers": {
+              "Content-Disposition": {
+                "description": "`attachment; filename=markdown-YYYY-MM-DD.zip`, for the day (UTC).",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "description": "The size of the ZIP in bytes.",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Export a board, a wiki, a course or a diary as Markdown",
+        "tags": [
+          "archives"
         ]
       }
     },
@@ -21726,7 +22290,7 @@
         ]
       },
       "get": {
-        "description": "The unit with its body, or the chapter (`body` is `null`), for whoever reads its\ncourse.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "The unit with its body, or the chapter (`body` is `null`), for whoever reads its\ncourse; a unit with its `reactions` where it has any.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getUnit",
         "parameters": [
           {
@@ -21755,6 +22319,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`markdown` gives the body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21762,7 +22335,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Unit"
+                  "$ref": "#/components/schemas/UnitWithReactions"
                 }
               }
             },
@@ -22125,7 +22698,7 @@
     },
     "/api/v1/w/{workspaceId}/courses/{courseId}/units/{unitId}/comments": {
       "get": {
-        "description": "Every comment on the unit, oldest first, as blocks of the `type` `comment` whose\nparent is the unit. For who reads the course: its members, and of an open course\nwhoever works in the workspace. A chapter or a unit in the trash is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "Every comment on the unit, oldest first, as blocks of the `type` `comment` whose\nparent is the unit, each with its `reactions` where it has any. For who reads the\ncourse: its members, and of an open course whoever works in the workspace. A\nchapter or a unit in the trash is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getUnitComments",
         "parameters": [
           {
@@ -22162,7 +22735,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/Block"
+                    "$ref": "#/components/schemas/CommentWithReactions"
                   },
                   "type": "array"
                 }
@@ -23990,6 +24563,189 @@
         ]
       }
     },
+    "/api/v1/w/{workspaceId}/favorite-order": {
+      "put": {
+        "description": "Puts the stars of the user of the session in the workspace in the order of the body,\na list of what they are on by identifier: those it names first, as it names them,\nand the others after them in the order they had. An identifier of no star of theirs\nis passed over. 400 for more than 100 identifiers, and for an entry of no form of\none. The user's connections to the workspace are told (`favoritesChanged`). A\nsession alone: a personal API token is refused.",
+        "operationId": "reorderFavorites",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "They are in that order."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Put the favorites in order",
+        "tags": [
+          "sidebar"
+        ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/favorites": {
+      "get": {
+        "description": "The stars of the user of the session in the workspace, in their order (as\n`reorderFavorites` put them, a new one after the others): on boards, wikis and\ncourses, and on cards, pages and units of them. Each is asked again whether the user\nreads what it is on, as every route to it asks, and is listed with that as it is\nnow: its title, its icon and where it is. What they do not read now is left out, and\nnothing says that it was there: what is in the trash, what is of a board they left\nor that went private, what is gone; once it is there to them again, so is its star.\nNobody else's stars are listed anywhere, to anybody. A user has at most 100 in a\nworkspace. A session alone: a personal API token is refused.",
+        "operationId": "getFavorites",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Favorite"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The favorites, in the user's order."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "The user's favorites",
+        "tags": [
+          "sidebar"
+        ]
+      }
+    },
+    "/api/v1/w/{workspaceId}/favorites/{targetId}": {
+      "delete": {
+        "description": "Takes the star of the user of the session off what it is on. 404 where they have no\nstar on it in this workspace, whatever the identifier names (taken off already, in\nanother workspace, or nothing): one answer for all. The user's connections to the\nworkspace are told where one went (`favoritesChanged`). A session alone: a personal\nAPI token is refused.",
+        "operationId": "deleteFavorite",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of what the star is on: a board, a wiki or a course, or a card, a page or a unit of one. A diary and an entry of one are 404, as an identifier of nothing is.",
+            "in": "path",
+            "name": "targetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "There is no star on it."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Take a star off",
+        "tags": [
+          "sidebar"
+        ]
+      },
+      "put": {
+        "description": "Puts a star of the user of the session on a board, a wiki or a course of the\nworkspace they read, or on a card, a page or a unit of one, after their other stars;\nthe server finds which it is. One that is there stays where it is. 404 for what the\nuser does not read, for a diary and an entry of one, for a template, and for an\nidentifier of nothing, all alike. Past 100 in the workspace it is 400 with the reason\n`too_many_favorites`. The user's connections to the workspace are told\n(`favoritesChanged`). A session alone: a personal API token is refused.",
+        "operationId": "putFavorite",
+        "parameters": [
+          {
+            "description": "The identifier of the workspace. 404 unless the user of the session is a member of it, a guest too.",
+            "in": "path",
+            "name": "workspaceId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The identifier of what the star is on: a board, a wiki or a course, or a card, a page or a unit of one. A diary and an entry of one are 404, as an identifier of nothing is.",
+            "in": "path",
+            "name": "targetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The star is on it."
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was refused, or failed. The status says the kind: 400 for a request that is malformed or asks for what cannot be, 401 without a session, 403 for what the user may not do, 404 for what is not there for them, 405 for a method the path does not have, 409 for what is in the way, 412 for a condition of the request that does not hold, 413 for a body that is too large, 416 for a range that is not there, 429 for too many requests, 500 for a failure of the server, 503 for a server that cannot serve for now."
+          }
+        },
+        "summary": "Put a star on something",
+        "tags": [
+          "sidebar"
+        ]
+      }
+    },
     "/api/v1/w/{workspaceId}/guest-invitations": {
       "put": {
         "description": "Turns on or off whether guests are invited to the boards of the workspace, and\nanswers the workspace. Turning it off revokes the links that invite guests, which\ndo not come back when it is turned on again, and while it is off none is made.\nWho is a guest already stays one. Only the workspace's administrators: anybody else who\nworks there is refused (403).\n\nA guest of the workspace is told that it is not there (404).",
@@ -24570,7 +25326,7 @@
     },
     "/api/v1/w/{workspaceId}/references/resolve": {
       "post": {
-        "description": "A body names a card, a page or a unit by its identifier alone (the node `reference`),\nand no body, however it is read, says what that is called: this does, for the user who\nasks and as things are now. Of the identifiers of the body, the cards, pages and units\nof this workspace on a board, a wiki or a course the user reads (as `getCard`,\n`getPage` and `getUnit` ask), each once, in the order they were first named.\n\nWhatever else an identifier names is left out, and the answer does not tell why:\nnothing at all, something in the trash, something of another workspace or\norganization, a card, a page or a unit the user does not read, or a block that is none\nof those (such as a chapter of a course).\nThe body names at most 100 identifiers (more is 400, as an entry that has not the\nform of an identifier is); an empty list answers an empty list.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "A body names a card, a page or a unit by its identifier alone (the node `reference`),\nand no body, however it is read, says what that is called: this does, for the user who\nasks and as things are now. Of the identifiers of the body, the cards, pages and units\nof this workspace on a board, a wiki or a course the user reads (as `getCard`,\n`getPage` and `getUnit` ask), each once, in the order they were first named.\n\nA board view of a body (the node `boardView`) names a view of a board by its\nidentifier alone too: a view of a board the user reads is told of with `kind` `view`,\nits title, its board (`containerId`, `containerTitle`) and how it shows its cards\n(`viewType`), as a private board's view is told to its members alone.\n\nWhatever else an identifier names is left out, and the answer does not tell why:\nnothing at all, something in the trash, something of another workspace or\norganization, a card, a page, a unit or a view the user does not read, or a block that\nis none of those (such as a chapter of a course).\nThe body names at most 100 identifiers (more is 400, as an entry that has not the\nform of an identifier is); an empty list answers an empty list.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "resolveReferences",
         "parameters": [
           {
@@ -26183,7 +26939,7 @@
         ]
       },
       "get": {
-        "description": "The page with its body, for the members of its wiki.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "The page with its body, and its `reactions` where it has any, for the members of its\nwiki.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getPage",
         "parameters": [
           {
@@ -26212,6 +26968,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`markdown` gives the body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -26219,7 +26984,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page"
+                  "$ref": "#/components/schemas/PageWithReactions"
                 }
               }
             },
@@ -26582,7 +27347,7 @@
     },
     "/api/v1/w/{workspaceId}/wikis/{wikiId}/pages/{pageId}/comments": {
       "get": {
-        "description": "Every comment on the page, oldest first, as blocks of the `type` `comment` whose\nparent is the page; each says who wrote it (`createdBy`), and one whose text was\nchanged when that last happened (`editedAt`). For who reads the wiki: its members,\nand of an open wiki whoever works in the workspace. A page in the trash is not\nthere (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "Every comment on the page, oldest first, as blocks of the `type` `comment` whose\nparent is the page; each says who wrote it (`createdBy`), one whose text was\nchanged when that last happened (`editedAt`), and one that has `reactions` who\nanswered it with which emoji. For who reads the wiki: its members, and of an open\nwiki whoever works in the workspace. A page in the trash is not there (404).\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getPageComments",
         "parameters": [
           {
@@ -26619,7 +27384,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/Block"
+                    "$ref": "#/components/schemas/CommentWithReactions"
                   },
                   "type": "array"
                 }
@@ -26860,7 +27625,7 @@
     },
     "/api/v1/w/{workspaceId}/wikis/{wikiId}/pages/{pageId}/comments/{commentId}/restore": {
       "post": {
-        "description": "A comment deleted on its own comes back onto its page, as `restoreBlock` brings a\ncard's comment back: for its author from the commenter's role up if they deleted it\nthemselves, and for the wiki's admins whoever wrote or deleted it.",
+        "description": "A comment deleted on its own comes back onto its page, as `restoreCardComment` brings a\ncard's comment back: for its author from the commenter's role up if they deleted it\nthemselves, and for the wiki's admins whoever wrote or deleted it.",
         "operationId": "restorePageComment",
         "parameters": [
           {
@@ -26930,7 +27695,7 @@
     },
     "/api/v1/w/{workspaceId}/wikis/{wikiId}/pages/{pageId}/comments/{commentId}/versions": {
       "get": {
-        "description": "The earlier texts of the comment, as `getCommentVersions` gives a card's comment's:\nevery version but the one it has now, the first one first, with who wrote it and\nwhen.\n\nA personal API token is taken, of either scope (`read` or `write`).",
+        "description": "The earlier texts of the comment, as `getCardCommentVersions` gives a card's comment's:\nevery version but the one it has now, the first one first, with who wrote it and\nwhen.\n\nA personal API token is taken, of either scope (`read` or `write`).",
         "operationId": "getPageCommentVersions",
         "parameters": [
           {
@@ -27338,10 +28103,6 @@
     {
       "description": "Sharing a board with whoever has its public link.",
       "name": "public-links"
-    },
-    {
-      "description": "The blocks of a board: cards, views, comments, and what a card is made of.",
-      "name": "blocks"
     },
     {
       "description": "The blocks of type `card`, as cards.",

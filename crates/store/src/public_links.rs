@@ -102,12 +102,7 @@ impl Store {
                 sql.push_bind(" AND w.id = ", Id(workspace_id));
             }
             sql.push(" ORDER BY s.container_id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.id(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }

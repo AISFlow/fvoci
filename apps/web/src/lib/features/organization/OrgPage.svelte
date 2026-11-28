@@ -103,9 +103,9 @@
   {:else if admin.status === 'failed' || admin.status === 'sso'}
     <div>
       <p class="text-muted-foreground" role="alert">{m.app_problem_load()}</p>
-      <Button class="mt-4 roomy:min-h-touch" onclick={() => void admin.load()}
-        >{m.app_retry()}</Button
-      >
+      <Button class="mt-4 roomy:min-h-touch" onclick={() => void admin.load()}>
+        {m.app_retry()}
+      </Button>
     </div>
   {:else}
     {#if admin.refusal}

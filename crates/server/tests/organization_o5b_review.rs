@@ -32,10 +32,9 @@ async fn shared_views_hide_people_after_their_property_is_deleted() {
         .created_json();
     ts.client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!([{
-                "type": "view", "title": "By owner", "containerId": board.id,
-                "createdAt": 1, "updatedAt": 1,
+            &format!("{TEST_WS}/boards/{}/views", board.id),
+            &json!({
+                "title": "By owner", "viewType": "board",
                 "fields": {
                     "viewType": "board", "groupBy": "owner",
                     "filter": {"operation": "and", "filters": [
@@ -46,7 +45,7 @@ async fn shared_views_hide_people_after_their_property_is_deleted() {
                     "collapsedGroups": [person],
                     "groupCalculations": {(person.clone()): {"calculation": "count", "propertyId": "owner"}},
                 },
-            }]),
+            }),
         )
         .await
         .check_created();
@@ -168,8 +167,8 @@ async fn hidden_resource_identifiers_do_not_add_database_reads() {
     let mut differences = Vec::new();
     for (hidden, absent) in [
         (
-            format!("{ROOT_WS}/boards/{}/blocks", board.id),
-            format!("{ROOT_WS}/boards/{UNKNOWN_ID}/blocks"),
+            format!("{ROOT_WS}/boards/{}/views", board.id),
+            format!("{ROOT_WS}/boards/{UNKNOWN_ID}/views"),
         ),
         (
             format!("{ROOT_WS}/cards/{card_id}"),

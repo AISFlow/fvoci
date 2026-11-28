@@ -87,8 +87,7 @@ impl Hub {
             .listeners()
             .by_id
             .get(&id)
-            .map(|listener| listener.user_id.clone())
-            .unwrap_or_default();
+            .map_or_default(|listener| listener.user_id.clone());
         if user_id.is_empty() {
             tracing::debug!(
                 command_type = truncated_command_kind(&command.kind),

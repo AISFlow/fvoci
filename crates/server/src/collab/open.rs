@@ -100,6 +100,7 @@ impl Collab {
             must_remake: false,
             wants_fold: false,
             last_writer: block.modified_by.clone(),
+            block_type: block.block_type,
             first_unwritten: None,
             last_update: Instant::now(),
             writing_scheduled: false,
@@ -166,6 +167,7 @@ impl Collab {
             } else {
                 stored.last_writer
             },
+            block_type: block.block_type,
             first_unwritten: unwritten.then(Instant::now),
             last_update: Instant::now(),
             writing_scheduled: false,

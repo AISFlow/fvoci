@@ -23,6 +23,7 @@ pub(super) async fn update_existing_block_row(
     block.created_at = existing.created_at;
     block.updated_at = now.max(existing.updated_at.saturating_add(1));
     crate::diaries::stamp_entry_body_time(block, Some(existing));
+    let next = crate::card_recurrence::settle_change(scope, existing, block, how.telling).await?;
     // A block stays on its board: the update is keyed by the board too, and a block
     // of that identifier on another board is not this block.
     let mut sql = scope.sql("UPDATE blocks SET ");
@@ -50,6 +51,13 @@ pub(super) async fn update_existing_block_row(
     // by its version.
     body_versions::record_change(scope, existing, block, user_id, how.body_write).await?;
     block_derived::refresh(scope, block, Before::Stored(existing), how.new_files).await?;
+    crate::card_events::note_changes(scope, existing, block, user_id, how.telling).await?;
+    if let Some(next) = next {
+        Box::pin(crate::card_recurrence::make_next(
+            scope, block, next, user_id,
+        ))
+        .await?;
+    }
     notification_noting::note_named(scope, block, Some(existing), user_id, how.telling).await
 }
 
@@ -101,7 +109,7 @@ pub(super) fn push_body(
     body: Option<&Body>,
     how: BodyColumns,
 ) -> Result<(), StoreError> {
-    let tasks = body.map(Body::tasks).unwrap_or_default();
+    let tasks = body.map_or_default(Body::tasks);
     let first_image = body.and_then(Body::first_image_file_id).map(str::to_owned);
     let values = [
         (", body = ", Param::opt_jsonb(body.map(Body::document))?),

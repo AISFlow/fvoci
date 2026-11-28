@@ -37,8 +37,8 @@
  *  6. The placeholder's mark on the empty paragraph or heading the cursor is
  *     in: the attribute `data-placeholder` and the classes `is-empty` and
  *     `is-editor-empty`.
- *  7. `draggable` on an image and on a file block (each can be dragged to
- *     another place) and on a rule while the selection is on it.
+ *  7. `draggable` on an image, a file block and a board view (each can be
+ *     dragged to another place) and on a rule while the selection is on it.
  *  8. The `<span>` inside the `<label>` of a task: hidden text that repeats
  *     the checkbox's `aria-label`.
  * 11. A diagram around its source: the editor draws a code block in the
@@ -68,6 +68,18 @@
  *     in it is compared. The view puts its blocks in the same frame, with the
  *     language's name and the copy button, once the body is in the page
  *     (code-view.ts, tested in body-code.test.ts).
+ * 19. What a board view shows: the editor draws, inside the frame
+ *     (`div.doc-board-view`), the place that the view is drawn into
+ *     (`doc-board-view-place`), and says there that the view cannot be seen
+ *     where nothing draws it; the view makes the frame alone, and draws into
+ *     it once the body is in the page (`mountBoardViews`, tested in
+ *     editor-board-views.test.ts). The frame is compared: the element and the
+ *     identifier of the view.
+ * 17. The frame of a toggle: the editor draws `div.doc-details` around its
+ *     chevron's button (`aria-expanded`) and its two parts, which are divs,
+ *     and marks it `data-open` while it is open; the view draws the page's
+ *     own `<details>`, closed, of a `<summary>` and the div of what it
+ *     hides. The parts are compared, the summary as a `<summary>`.
  *
  * On both sides:
  *
@@ -78,6 +90,10 @@
  * On the view's side, what makes it read-only:
  *
  * 10. `aria-readonly` on a task's checkbox.
+ * 18. The icon of a callout: in the editor a button that shows the four
+ *     tones to choose from (`doc-callout-controls`), in the view a picture
+ *     that says its tone's name (`doc-callout-icon`). The callout and its
+ *     blocks are compared.
  *
  * On the view's side, for what is drawn later:
  *
@@ -148,6 +164,9 @@ const LEFT_OUT = {
   'what a file block shows': 0, // 14
   'bar of a code block': 0, // 15
   'attribute data-line-digits': 0, // 16
+  'frame of a toggle': 0, // 17
+  'icon of a callout': 0, // 18
+  'what a board view shows': 0, // 19
 };
 type LeftOut = keyof typeof LEFT_OUT;
 const leaveOut = (entry: LeftOut): void => {
@@ -192,7 +211,10 @@ function leftOutNode(node: Element): LeftOut | undefined {
 function leftOutAttribute(node: Element, name: string, ofEditor: boolean): LeftOut | undefined {
   if (ofEditor && name === 'data-placeholder') return 'attribute data-placeholder';
   const draggable =
-    node.tagName === 'IMG' || node.tagName === 'HR' || node.hasAttribute('data-file-block');
+    node.tagName === 'IMG' ||
+    node.tagName === 'HR' ||
+    node.hasAttribute('data-file-block') ||
+    node.hasAttribute('data-board-view');
   if (ofEditor && name === 'draggable' && draggable) return 'attribute draggable';
   if (!ofEditor && name === 'aria-readonly' && isTaskCheckbox(node))
     return 'attribute aria-readonly';
@@ -215,6 +237,27 @@ function shapeOf(node: Node, side: 'editor' | 'view'): Shape | undefined {
     source.querySelector('code')?.removeAttribute('aria-label');
     return shapeOf(source, side);
   }
+  if (ofEditor && node.tagName === 'DIV' && node.hasAttribute('data-details')) {
+    leaveOut('frame of a toggle');
+    const parts = node.querySelector(':scope > .doc-details-parts');
+    const summary = parts?.querySelector(':scope > [data-details-summary]');
+    const content = parts?.querySelector(':scope > [data-details-content]');
+    const drawn = summary ? shapeOf(summary, side) : undefined;
+    const inside = content ? shapeOf(content, side) : undefined;
+    if (drawn === undefined || typeof drawn === 'string' || inside === undefined)
+      throw new Error('a toggle without its parts');
+    return {
+      tag: 'details',
+      attributes: { 'data-details': '' },
+      classes: ['doc-details'],
+      children: [{ ...drawn, tag: 'summary' }, inside],
+    };
+  }
+  const iconOfCallout = ofEditor ? 'doc-callout-controls' : 'doc-callout-icon';
+  if (node.parentElement?.hasAttribute('data-callout') && node.classList.contains(iconOfCallout)) {
+    leaveOut('icon of a callout');
+    return undefined;
+  }
   if (ofEditor && node.tagName === 'DIV' && node.classList.contains('doc-code')) {
     leaveOut('bar of a code block');
     const block = node.querySelector(':scope > pre');
@@ -236,6 +279,10 @@ function shapeOf(node: Node, side: 'editor' | 'view'): Shape | undefined {
       place.removeAttribute(name);
     }
     return shapeOf(place, side);
+  }
+  if (ofEditor && node.hasAttribute('data-board-view') && node.childElementCount > 0) {
+    leaveOut('what a board view shows');
+    return shapeOf(node.cloneNode(false), side);
   }
   if (ofEditor && node.hasAttribute('data-reference') && node.hasAttribute('data-drawn')) {
     leaveOut('what a reference shows');
@@ -394,7 +441,7 @@ describe('the view draws what the editor draws', () => {
       types.map((type) => [type, (counts.get(type) ?? 0) > 0]);
     const nodeTypes = Object.keys(NODE_SPECS);
     const markTypes = Object.keys(MARK_SPECS);
-    expect(nodeTypes).toHaveLength(23);
+    expect(nodeTypes).toHaveLength(28);
     expect(markTypes).toHaveLength(5);
     expect(times(compared.nodes, nodeTypes)).toEqual(nodeTypes.map((type) => [type, true]));
     expect(times(compared.marks, markTypes)).toEqual(markTypes.map((type) => [type, true]));

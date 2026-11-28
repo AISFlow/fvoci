@@ -16,12 +16,12 @@ use fvoci_model::{
 use crate::Store;
 use crate::accounts::{self, Which};
 use crate::audit::{self, AuditActor, AuditEntry};
-use crate::db::{Dialect, Id, LockRank, OrganizationHeld, Row, Scope};
+use crate::db::{FromRow, Id, LockRank, OrganizationHeld, Row, RowLock, Scope};
 use crate::error::StoreError;
 use crate::oidc_former::{self, Keeping};
 use crate::sessions::{self, ProviderPut, SessionsEnded};
 
-/// The columns of a provider, in the order [`provider_from_row`] reads them.
+/// The columns of a provider, in the order [`StoredProvider::from_row`] reads them.
 const PROVIDER_COLUMNS: &str = "id, org_id, issuer, client_id, client_secret, auto_join, enabled, \
                                 created_at, updated_at, sso_required, revision";
 
@@ -270,7 +270,7 @@ impl Store {
                 .push_bind(" WHERE org_id = ", scope.org()?)
                 .push([" RETURNING ", PROVIDER_COLUMNS]);
             let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-            let stored = provider_from_row(&row)?;
+            let stored = StoredProvider::from_row(&row)?;
             let entry = AuditEntry::by(
                 &AuditActor::ServerOperator,
                 "",
@@ -300,10 +300,9 @@ impl Store {
             sql.bind(identity.issuer)
                 .push_bind(" AND i.subject = ", identity.subject)
                 .push(" AND (u.deleted_at IS NULL OR (u.delete_after > 0 AND u.erase_started_at = 0))");
-            let Some(row) = scope.fetch_optional(sql).await? else {
+            let Some(user_id) = scope.first::<String>(sql).await? else {
                 return Ok(None);
             };
-            let user_id = row.id(0)?;
             crate::users::account_by_id(scope, &user_id).await.map(Some)
         })
         .await
@@ -319,7 +318,7 @@ impl Store {
             let mut sql = scope.sql("SELECT 1 FROM user_identities WHERE issuer = ");
             sql.bind(identity.issuer)
                 .push_bind(" AND subject = ", identity.subject);
-            Ok(scope.fetch_optional(sql).await?.is_some())
+            scope.exists(sql).await
         })
         .await
     }
@@ -365,7 +364,6 @@ impl Store {
         self.transaction(async |scope| {
             // Before the account it lets in, as a token made through it and a trial of
             // its pending settings hold it ([`LockRank::Provider`]).
-            scope.record_lock(LockRank::Provider, provider_id);
             let mut sql = scope.sql(
                 "SELECT auto_join, issuer, org_id, revision FROM oidc_providers WHERE org_id = ",
             );
@@ -373,9 +371,7 @@ impl Store {
                 .push_bind(" AND id = ", Id(provider_id))
                 .push_bind(" AND enabled = ", true)
                 .push_bind(" AND revision = ", revision);
-            if scope.dialect() == Dialect::Postgres {
-                sql.push(" FOR SHARE");
-            }
+            sql.push_lock(scope.row_lock(LockRank::Provider, provider_id, RowLock::Share));
             let Some(row) = scope.fetch_optional(sql).await? else {
                 return Ok(Err(OidcRefusal::ProviderGone));
             };
@@ -423,12 +419,11 @@ pub(crate) async fn hold_provider_of_organization<'c>(
     scope: &mut Scope<'c>,
 ) -> Result<OrganizationHeld<'c>, StoreError> {
     let org_key = scope.org_id().unwrap_or_default();
-    scope.record_lock(LockRank::Organization, &org_key);
-    if scope.dialect() == Dialect::Postgres {
-        let mut sql = scope.sql("SELECT 1 FROM organizations WHERE id = ");
-        sql.bind(scope.org()?).push(" FOR NO KEY UPDATE");
-        scope.fetch_optional(sql).await?;
-    }
+    let mut sql = scope.sql("SELECT 1 FROM organizations WHERE id = ");
+    sql.bind(scope.org()?);
+    scope
+        .hold(LockRank::Organization, &org_key, sql, RowLock::NoKeyUpdate)
+        .await?;
     Ok(OrganizationHeld::new())
 }
 
@@ -442,12 +437,11 @@ pub(crate) async fn hold_provider_row(
     scope: &mut Scope<'_>,
     provider_id: &str,
 ) -> Result<(), StoreError> {
-    scope.record_lock(LockRank::Provider, provider_id);
-    if scope.dialect() == Dialect::Postgres {
-        let mut sql = scope.sql("SELECT 1 FROM oidc_providers WHERE id = ");
-        sql.bind(Id(provider_id)).push(" FOR UPDATE");
-        scope.fetch_optional(sql).await?;
-    }
+    let mut sql = scope.sql("SELECT 1 FROM oidc_providers WHERE id = ");
+    sql.bind(Id(provider_id));
+    scope
+        .hold(LockRank::Provider, provider_id, sql, RowLock::Update)
+        .await?;
     Ok(())
 }
 
@@ -461,12 +455,7 @@ pub(crate) async fn read_provider(
         " FROM oidc_providers WHERE org_id = ",
     ]);
     sql.bind(scope.org()?);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(provider_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// A provider as [`write_provider`] stored it.
@@ -545,7 +534,7 @@ pub(crate) async fn write_provider<'c>(
         )
         .push([" RETURNING ", PROVIDER_COLUMNS]);
     let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-    let stored = provider_from_row(&row)?;
+    let stored = StoredProvider::from_row(&row)?;
     if !before.is_some_and(|b| b.sso_required) && stored.sso_required {
         let mut lock_copy = scope.sql("UPDATE organizations SET allow_copy_out = ");
         lock_copy
@@ -804,7 +793,7 @@ async fn is_identity_of(
     sql.bind(identity.issuer)
         .push_bind(" AND subject = ", identity.subject)
         .push_bind(" AND user_id = ", Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Makes `user_id` a member of the scope's organization and default workspace unless
@@ -829,30 +818,32 @@ pub(crate) async fn has_place(scope: &mut Scope<'_>, user_id: &str) -> Result<bo
     );
     sql.bind(scope.org()?)
         .push_bind(" AND wm.user_id = ", Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 async fn is_member(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT 1 FROM organization_members WHERE org_id = ");
     sql.bind(scope.org()?)
         .push_bind(" AND user_id = ", Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 pub(crate) use crate::oidc_identities::insert_identity;
 
-fn provider_from_row(row: &Row) -> Result<StoredProvider, StoreError> {
-    Ok(StoredProvider {
-        id: row.id(0)?,
-        org_id: row.id(1)?,
-        issuer: row.text(2)?,
-        client_id: row.text(3)?,
-        sealed_client_secret: row.text(4)?,
-        auto_join: row.bool(5)?,
-        enabled: row.bool(6)?,
-        created_at: row.int(7)?,
-        updated_at: row.int(8)?,
-        sso_required: row.bool(9)?,
-        revision: row.int(10)?,
-    })
+impl FromRow for StoredProvider {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(StoredProvider {
+            id: row.id(0)?,
+            org_id: row.id(1)?,
+            issuer: row.text(2)?,
+            client_id: row.text(3)?,
+            sealed_client_secret: row.text(4)?,
+            auto_join: row.bool(5)?,
+            enabled: row.bool(6)?,
+            created_at: row.int(7)?,
+            updated_at: row.int(8)?,
+            sso_required: row.bool(9)?,
+            revision: row.int(10)?,
+        })
+    }
 }

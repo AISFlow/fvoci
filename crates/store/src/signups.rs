@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use fvoci_model::{PersonName, User};
 
 use crate::accounts::{self, Founding, FoundingPolicy};
-use crate::db::{Dialect, Id, OptId, Param, Row, Scope, Sql};
+use crate::db::{Dialect, FromRow, Id, OptId, Param, Row, RowLock, Scope, Sql, Unranked};
 use crate::directory::{self, OpenedWall};
 use crate::error::{StoreError, Taken};
 use crate::link_locks::{self, Turn};
@@ -142,7 +142,7 @@ pub enum Started {
     Invited,
 }
 
-/// The columns of a registration, in the order [`signup_from_row`] reads them.
+/// The columns of a registration, in the order [`Signup::from_row`] reads them.
 const COLUMNS: &str = "id, username, email, display_name, password_hash, language, \
     organization_name, created_at, expires_at, invitation_id, invitation_org_id, browser_hash";
 
@@ -213,12 +213,7 @@ impl Store {
                 SignupLookup::Email(email) => sql.push_bind("lower(email) = lower(", email),
             };
             sql.push_bind(") AND expires_at > ", now);
-            scope
-                .fetch_optional(sql)
-                .await?
-                .as_ref()
-                .map(signup_from_row)
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -472,7 +467,7 @@ impl Store {
             sql.bind(Id(signup_id)).push(" AND ");
             push_proof(&mut sql, Proof::Link(digest), now);
             sql.push_bind(" AND expires_at > ", now);
-            Ok(scope.fetch_optional(sql).await?.is_some())
+            scope.exists(sql).await
         })
         .await
     }
@@ -512,12 +507,7 @@ impl Store {
                     "SELECT DISTINCT invitation_org_id FROM signups WHERE token_expires_at <= ",
                 );
                 sql.bind(now).push(" AND invitation_org_id IS NOT NULL");
-                let mailed: BTreeSet<String> = scope
-                    .fetch_all(sql)
-                    .await?
-                    .iter()
-                    .map(|row| row.id(0))
-                    .collect::<Result<_, _>>()?;
+                let mailed: BTreeSet<String> = scope.all(sql).await?;
                 let removed = remove_ended(scope, now, None, mailed.clone()).await?;
                 let mut links =
                     scope.sql("UPDATE signups SET token_hash = NULL, token_expires_at = NULL");
@@ -661,12 +651,7 @@ async fn find(
     let mut sql = scope.sql(["SELECT ", COLUMNS, " FROM signups WHERE "]);
     push_proof(&mut sql, proof, now);
     sql.push_bind(" AND expires_at > ", now);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(signup_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Removes the registration `signup_id` if `proof` still names it at `now`; says
@@ -712,7 +697,7 @@ pub(crate) async fn discard_of_browser(
     let Some(row) = scope.fetch_optional(sql).await? else {
         return Ok(false);
     };
-    discard(scope, &signup_from_row(&row)?, Some(turn)).await
+    discard(scope, &Signup::from_row(&row)?, Some(turn)).await
 }
 
 /// Removes the registration that waits at the address `email`, in any letter case, if
@@ -733,10 +718,9 @@ pub(crate) async fn discard_at_address(
     ]);
     sql.bind(email)
         .push_bind(") AND invitation_org_id = ", scope.org()?);
-    let Some(row) = scope.fetch_optional(sql).await? else {
+    let Some(signup) = scope.first::<Signup>(sql).await? else {
         return Ok(None);
     };
-    let signup = signup_from_row(&row)?;
     // The one link of the sign-in, after the account it signs in, which a deletion
     // does not hold.
     Ok(discard(scope, &signup, None).await?.then_some(signup.id))
@@ -806,12 +790,7 @@ async fn remove_ended(
     let mut sql = scope.sql(["SELECT ", COLUMNS, " FROM signups WHERE expires_at <= "]);
     sql.bind(now)
         .push(" AND invitation_id IS NOT NULL ORDER BY invitation_org_id, invitation_id, id");
-    let held = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(signup_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
+    let held: Vec<Signup> = scope.all(sql).await?;
     let mut organizations = more;
     organizations.extend(held.iter().filter_map(|signup| match &signup.start {
         SignupStart::Invitation { org_id, .. } => Some(org_id.clone()),
@@ -873,7 +852,9 @@ async fn hold_link_of(
         let mut sql = scope.sql("SELECT id FROM invitations WHERE id = ");
         sql.bind(Id(id))
             .push_bind(" AND org_id = ", Id(org_id))
-            .push(" FOR UPDATE");
+            // After the account a sign-in signs in, or under the turn after its
+            // organization taken again: at no rank (`Scope::unranked_row_lock`).
+            .push_lock(scope.unranked_row_lock(Unranked::LinkOfRegistration, RowLock::Update));
         scope.fetch_optional(sql).await?;
         close_wall(scope, wall).await?;
     }
@@ -895,26 +876,28 @@ async fn give_back_use(scope: &mut Scope<'_>, signup: &Signup) -> Result<(), Sto
     Ok(())
 }
 
-fn signup_from_row(row: &Row) -> Result<Signup, StoreError> {
-    Ok(Signup {
-        id: row.id(0)?,
-        username: row.text(1)?,
-        email: row.text(2)?,
-        custom_name: row.text(3)?,
-        password_hash: row.text(4)?,
-        language: row.text(5)?,
-        start: match row.id(9)? {
-            invitation_id if invitation_id.is_empty() => match row.text(6)? {
-                name if name.is_empty() => SignupStart::Alone,
-                name => SignupStart::Organization(name),
+impl FromRow for Signup {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(Signup {
+            id: row.id(0)?,
+            username: row.text(1)?,
+            email: row.text(2)?,
+            custom_name: row.text(3)?,
+            password_hash: row.text(4)?,
+            language: row.text(5)?,
+            start: match row.id(9)? {
+                invitation_id if invitation_id.is_empty() => match row.text(6)? {
+                    name if name.is_empty() => SignupStart::Alone,
+                    name => SignupStart::Organization(name),
+                },
+                invitation_id => SignupStart::Invitation {
+                    id: invitation_id,
+                    org_id: row.id(10)?,
+                },
             },
-            invitation_id => SignupStart::Invitation {
-                id: invitation_id,
-                org_id: row.id(10)?,
-            },
-        },
-        browser_hash: row.opt_text(11)?.unwrap_or_default(),
-        created_at: row.int(7)?,
-        expires_at: row.int(8)?,
-    })
+            browser_hash: row.opt_text(11)?.unwrap_or_default(),
+            created_at: row.int(7)?,
+            expires_at: row.int(8)?,
+        })
+    }
 }

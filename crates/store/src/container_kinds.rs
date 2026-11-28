@@ -5,12 +5,12 @@
 
 use fvoci_model::{ContainerKind, ContainerKinds};
 
-use crate::db::Sql;
+use crate::db::{IntoSql, Sql};
 use crate::error::StoreError;
 
 /// Pushes ` AND <column> IN (<the kinds>)`, and nothing for every kind. `column` names
 /// the kind column of the boards read, with its alias.
-pub(crate) fn push_kinds(sql: &mut Sql, column: &'static str, kinds: ContainerKinds) {
+pub(crate) fn push_kinds(sql: &mut Sql, column: impl IntoSql, kinds: ContainerKinds) {
     if kinds == ContainerKinds::EVERY {
         return;
     }

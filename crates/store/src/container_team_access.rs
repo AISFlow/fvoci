@@ -114,6 +114,7 @@ impl Store {
     ///
     /// # Errors
     /// Returns the database error, including an unreadable stored role.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn container_team_role(
         &self,
         container_id: &str,

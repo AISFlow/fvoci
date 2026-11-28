@@ -1,8 +1,7 @@
 /**
  * A board of more cards than one page of the server holds (1000): the page
- * reads them page after page, and every card is on the board. The board is made
- * with its cards in one request, as an import makes one: a card is made on its
- * own by `createCard`, and not by the blocks of a board.
+ * reads them page after page, and every card is on the board. Each card is
+ * made on its own by `createCard`.
  */
 import { expect, test } from '@playwright/test';
 
@@ -24,52 +23,43 @@ test('every card of a board of more than a thousand is shown', async ({ page, ba
   ).json()) as Schemas['UserWorkspace'][];
   const workspaceId = workspaces[0]?.id ?? '';
   const doing = 'opt-doing';
-  const cards = Array.from({ length: MANY }, (_, at) => ({
-    containerId: 'many',
-    type: 'card',
-    title: `Card ${String(at + 1)}`,
-    createdAt: 1,
-    updatedAt: 1,
-    fields: { properties: { status: doing } },
-  }));
-  const made = await api.post(`/api/v1/w/${workspaceId}/containers-and-blocks`, {
+  const made = await api.post(`/api/v1/w/${workspaceId}/boards`, {
     data: {
-      containers: [
+      title: 'Many',
+      visibility: 'private',
+      cardProperties: [
         {
-          id: 'many',
-          workspaceId,
-          title: 'Many',
-          visibility: 'private',
-          cardProperties: [
-            {
-              id: 'status',
-              name: 'Status',
-              type: 'select',
-              options: [{ id: doing, label: 'Doing', color: 'blue' }],
-            },
-          ],
+          id: 'status',
+          name: 'Status',
+          type: 'select',
+          options: [{ id: doing, label: 'Doing', color: 'blue' }],
         },
       ],
-      blocks: [
-        {
-          containerId: 'many',
-          type: 'view',
-          title: 'By status',
-          createdAt: 1,
-          updatedAt: 1,
-          fields: { viewType: 'board', groupBy: 'status', visibleGroups: [doing, ''] },
-        },
-        ...cards,
-      ],
+      firstView: {
+        title: 'By status',
+        viewType: 'board',
+        fields: { viewType: 'board', groupBy: 'status', visibleGroups: [doing, ''] },
+      },
     },
   });
-  expect(made.ok(), `the board and its cards: ${await made.text()}`).toBe(true);
-  const stored = (await made.json()) as Schemas['ContainersAndBlocks'];
-  const board = {
-    workspaceId,
-    boardId: stored.containers[0]?.id ?? '',
-  };
-  const viewId = stored.blocks.find((block) => block.type === 'view')?.id;
+  expect(made.ok(), `the board: ${await made.text()}`).toBe(true);
+  const board = { workspaceId, boardId: ((await made.json()) as Schemas['Container']).id };
+  const views = (await (
+    await api.get(`/api/v1/w/${workspaceId}/boards/${board.boardId}/views`)
+  ).json()) as Schemas['Block'][];
+  const viewId = views[0]?.id;
+  // A few cards at a time, each as `createCard` makes one.
+  const titles = Array.from({ length: MANY }, (_, at) => `Card ${String(at + 1)}`);
+  for (let at = 0; at < titles.length; at += 20) {
+    await Promise.all(
+      titles.slice(at, at + 20).map(async (title) => {
+        const card = await api.post(`/api/v1/w/${workspaceId}/boards/${board.boardId}/cards`, {
+          data: { title, properties: { status: doing } },
+        });
+        expect(card.ok(), `${title}: ${await card.text()}`).toBe(true);
+      }),
+    );
+  }
 
   // The page is signed in as the client of the API is. Signing in on the page is no part of this,
   // and the shell is drawn in one breath with the cards: a wait for it is a wait for a thousand

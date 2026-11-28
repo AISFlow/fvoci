@@ -42,8 +42,10 @@
       <Button
         class="roomy:min-h-touch"
         data-testid="confirm-email-submit"
-        onclick={() => (confirming = confirm(token))}>{m.confirm_email_submit()}</Button
+        onclick={() => (confirming = confirm(token))}
       >
+        {m.confirm_email_submit()}
+      </Button>
     {/snippet}
     {#if !token}
       <p role="alert">{m.confirm_email_invalid()}</p>
@@ -65,8 +67,8 @@
         {/if}
       {/await}
     {/if}
-    <a href={homeHref} class="text-center text-sm underline underline-offset-4"
-      >{m.confirm_email_go()}</a
-    >
+    <a href={homeHref} class="text-center text-sm underline underline-offset-4">
+      {m.confirm_email_go()}
+    </a>
   </div>
 </main>

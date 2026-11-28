@@ -193,7 +193,13 @@ export function cardOf(card: Schemas['Card']): CardSummary {
       modifiedBy: card.modifiedBy,
       type: 'card',
       title: card.title,
-      fields: { icon: card.icon, isTemplate: card.isTemplate, properties: card.properties },
+      fields: {
+        icon: card.icon,
+        isTemplate: card.isTemplate,
+        properties: card.properties,
+        ...(card.recurrence ? { recurrence: card.recurrence } : {}),
+        ...(card.recurredTo ? { recurredTo: card.recurredTo } : {}),
+      },
       createdAt: card.createdAt,
       updatedAt: card.updatedAt,
       ...(card.deletedAt === undefined ? {} : { deletedAt: card.deletedAt }),
@@ -244,6 +250,7 @@ export function newCardRequest(draft: CardDraft): {
     isTemplate: draft.isTemplate ?? false,
     properties: draft.properties ?? {},
     ...(draft.body ? { body: wireBody(draft.body) } : {}),
+    ...(draft.recurrence ? { recurrence: draft.recurrence } : {}),
   };
   return { method: 'POST', json, query: { disableNotify: draft.quiet ? 'true' : undefined } };
 }
@@ -264,6 +271,7 @@ export function patchCardRequest(
   if (patch.parentId !== undefined) json.parentId = patch.parentId;
   if (patch.title !== undefined) json.title = patch.title;
   if (patch.icon !== undefined) json.icon = patch.icon;
+  if (patch.recurrence !== undefined) json.recurrence = patch.recurrence;
   const updated = patch.updatedProperties ?? {};
   if (Object.keys(updated).length > 0) json.updatedProperties = updated;
   const deleted = patch.deletedProperties ?? [];
@@ -363,34 +371,26 @@ export function publicLinkOf(link: Schemas['PublicLink']): PublicLink {
 }
 
 /**
- * A board and its first view, to be made in one request (`createContainersAndBlocks`);
- * the workspace is the one of the request's path.
+ * A new board as `createBoard` takes it: with the default properties and
+ * view of a scaffold, or with its properties and its first view, made with
+ * it at once.
  */
-export function newBoardAndViewOf(
-  draft: BoardDraft,
-  firstView: ViewDraft,
-): Schemas['NewContainersAndBlocks'] {
-  const boardRef = 'new-board';
+export function newBoardOf(draft: BoardDraft, firstView: ViewDraft): Schemas['NewBoard'] {
+  const board = {
+    visibility: draft.visibility ?? 'private',
+    title: draft.title,
+    description: draft.description ?? '',
+    icon: draft.icon ?? '',
+  } as const;
+  if (draft.scaffold) return { ...board, scaffold: true };
   return {
-    containers: [
-      {
-        id: boardRef,
-        visibility: draft.visibility ?? 'private',
-        title: draft.title,
-        description: draft.description ?? '',
-        icon: draft.icon ?? '',
-        cardProperties: draft.cardProperties ?? [],
-      },
-    ],
-    blocks: [
-      {
-        id: 'new-view',
-        containerId: boardRef,
-        type: 'view',
-        title: firstView.title,
-        fields: firstView.fields,
-      },
-    ],
+    ...board,
+    cardProperties: draft.cardProperties ?? [],
+    firstView: {
+      title: firstView.title,
+      viewType: firstView.fields.viewType,
+      fields: firstView.fields,
+    },
   };
 }
 

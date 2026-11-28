@@ -89,16 +89,18 @@
             : m.app_board_managed_hint()}
       </p>
       <div class="flex flex-wrap justify-center gap-2">
-        <Button aria-disabled={joining} aria-busy={joining} onclick={() => void join()}
-          >{m.app_board_managed_join()}</Button
-        >
+        <Button aria-disabled={joining} aria-busy={joining} onclick={() => void join()}>
+          {m.app_board_managed_join()}
+        </Button>
         <Button
           variant="outline"
           aria-haspopup="dialog"
           onclick={() => {
             membersOpen = true;
-          }}>{m.app_board_managed_members()}</Button
+          }}
         >
+          {m.app_board_managed_members()}
+        </Button>
       </div>
     </div>
   </div>

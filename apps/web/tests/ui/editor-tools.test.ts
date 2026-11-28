@@ -15,7 +15,18 @@ import BodyView from '$lib/editor/BodyView.svelte';
 import { setFileSource, type FileSource } from '$lib/editor/files.ts';
 import { toStoredDoc, type DocNode } from '$lib/editor/schema.ts';
 
-import { doc, image, link, math, paragraph, tasks, task, text } from '../support/body-docs.ts';
+import {
+  callout,
+  doc,
+  image,
+  link,
+  math,
+  paragraph,
+  tasks,
+  task,
+  text,
+  toggle,
+} from '../support/body-docs.ts';
 
 vi.mock('$lib/editor/diagram.ts', () => ({
   drawDiagram: () => Promise.resolve({ ok: false, reason: 'failed' }),
@@ -302,6 +313,8 @@ describe('the bar over a phone’s keyboard', () => {
       'bullet-list',
       'numbered-list',
       'quote',
+      'toggle',
+      'callout',
       'table',
       'file',
       'bold',
@@ -319,6 +332,17 @@ describe('the bar over a phone’s keyboard', () => {
     expect(stored(editor)).toEqual(doc(tasks(task(false, paragraph(text('buy milk'))))));
     expect(tool('task-list').getAttribute('aria-pressed')).toBe('true');
     await fireEvent.click(tool('undo'));
+    expect(stored(editor)).toEqual(doc(paragraph(text('buy milk'))));
+    // A toggle and a callout, each made of the line and taken back the same way.
+    await fireEvent.click(tool('toggle'));
+    expect(stored(editor)).toEqual(doc(toggle([text('buy milk')], paragraph())));
+    expect(tool('toggle').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(tool('toggle'));
+    expect(stored(editor)).toEqual(doc(paragraph(text('buy milk'))));
+    await fireEvent.click(tool('callout'));
+    expect(stored(editor)).toEqual(doc(callout('info', paragraph(text('buy milk')))));
+    expect(tool('callout').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(tool('callout'));
     expect(stored(editor)).toEqual(doc(paragraph(text('buy milk'))));
 
     // Chosen text gets no bubble of marks: they are on the bar.

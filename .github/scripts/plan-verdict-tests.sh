@@ -47,7 +47,7 @@ esac
 EOF
 chmod +x "$WORK/bin/gh"
 
-RUST='"rust-postgres","rust-sqlite"'
+RUST='"rust-postgres","rust-postgres-versions","rust-sqlite"'
 WEB='"web-checks","web-e2e","web-e2e-apple"'
 BUILD='"web-build","web-e2e","web-e2e-apple","web-e2e-live"'
 # Artifacts as GitHub lists them: of a run (11) of this repository's branch, of a fork's
@@ -389,8 +389,8 @@ expect_verdict "the plan's list is not JSON" 1 "$(needs success 'web-e2e' succes
 expect_verdict "the plan names a job not waited for" 1 "$(needs success '["web-e2e","nothing"]' success skipped)"
 expect_verdict "the plan skips itself" 1 "$(needs success '["plan"]' success success)"
 
-# Every job of ci.yml is waited for by ci-done, and the sharded Rust jobs keep the ids
-# plan.sh and verdict.sh know them by.
+# Every job of ci.yml is waited for by ci-done, and the Rust jobs keep the ids plan.sh
+# and verdict.sh know them by.
 WORKFLOW="$HERE/../workflows/ci.yml"
 written=$(sed -n '/^jobs:/,$p' "$WORKFLOW" |
   sed -n 's/^  \([^ #].*\)$/\1/p' | sed 's/:[[:space:]]*\(#.*\)\{0,1\}$//' |
@@ -404,12 +404,16 @@ else
   failed=1
 fi
 
+# `needs` of every job of ci.yml, with the given plan's list and results of the Rust
+# jobs, and every other job passed.
 full_needs() {
   jq --null-input --compact-output --arg skip "$1" --arg sqlite "$2" --arg postgres "$3" \
+    --arg versions "$4" \
     '{plan: {result: "success", outputs: {skip: $skip}},
       "rust-check": {result: "success", outputs: {}},
       "rust-sqlite": {result: $sqlite, outputs: {}},
       "rust-postgres": {result: $postgres, outputs: {}},
+      "rust-postgres-versions": {result: $versions, outputs: {}},
       "web-checks": {result: "success", outputs: {}},
       "web-build": {result: "success", outputs: {}},
       "web-e2e": {result: "success", outputs: {}},
@@ -417,9 +421,13 @@ full_needs() {
       "web-e2e-live": {result: "success", outputs: {}}}'
 }
 
-expect_verdict "both sharded Rust jobs skipped by a web-only plan" 0 \
-  "$(full_needs "[$RUST]" skipped skipped)"
+expect_verdict "every Rust job skipped by a web-only plan" 0 \
+  "$(full_needs "[$RUST]" skipped skipped skipped)"
 expect_verdict "a sharded Rust job whose matrix failed fails ci-done" 1 \
-  "$(full_needs '[]' success failure)"
+  "$(full_needs '[]' success failure success)"
+expect_verdict "the store's tests on PostgreSQL 17 or 19 failing fails ci-done" 1 \
+  "$(full_needs '[]' success success failure)"
+expect_verdict "the store's tests on PostgreSQL 17 and 19 skipped without the plan fail ci-done" 1 \
+  "$(full_needs '["rust-sqlite","rust-postgres"]' skipped skipped skipped)"
 
 exit "$failed"

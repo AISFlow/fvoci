@@ -11,12 +11,18 @@
   import CardBacklinks from '$lib/features/card/CardBacklinks.svelte';
   import CardBody from '$lib/features/card/CardBody.svelte';
   import CardComments from '$lib/features/card/CardComments.svelte';
+  import CommentReactions from '$lib/features/card/CommentReactions.svelte';
   import CommentComposer from '$lib/features/card/CommentComposer.svelte';
   import UnitNotesPanel from '$lib/features/course/UnitNotesPanel.svelte';
   import UnitReviewsPanel from '$lib/features/course/UnitReviewsPanel.svelte';
   import type { UnitOpenings } from '$lib/features/course/unit-openings.svelte.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
-  import type { CourseStore, UnitStore, Workspace } from '$lib/state/index.ts';
+  import {
+    embeddedBoards,
+    type CourseStore,
+    type UnitStore,
+    type Workspace,
+  } from '$lib/state/index.ts';
   import { Button } from '$lib/ui/button/index.js';
 
   interface Props {
@@ -38,10 +44,12 @@
     of="unit"
     testId="unit-body"
     references={bodyReferences(store, unit.unitId)}
+    boardViews={embeddedBoards(workspace).host}
     keep={() => keepVersion(unitVersions(unit))}
   />
 </div>
 {#if unit.status === 'ready'}
+  <CommentReactions reactions={unit.comments} blockId={unit.unitId} />
   <UnitReviewsPanel course={store} unitId={unit.unitId} {openings} />
   <UnitNotesPanel course={store} unitId={unit.unitId} />
 {/if}
@@ -50,6 +58,7 @@
   <CardComments
     board={unit.comments}
     card={unit.comments}
+    reactions={unit.comments}
     readVersions={(commentId: string) => unit.comments.commentVersions(commentId)}
     heading="h2"
   />

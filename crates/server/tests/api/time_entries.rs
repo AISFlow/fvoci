@@ -315,29 +315,17 @@ async fn seed_invalid_board_blocks(
         .created_json();
     let comment: Value = client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!([{
-                "containerId": board.id,
-                "parentId": card_id,
-                "type": "comment",
-                "title": "a comment",
-                "createdAt": 1,
-                "updatedAt": 1,
-            }]),
+            &format!("{TEST_WS}/boards/{}/cards/{card_id}/comments", board.id),
+            &json!({"body": {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "a comment"}]},
+            ]}}),
         )
         .await
         .created_json();
     let view: Value = client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!([{
-                "containerId": board.id,
-                "type": "view",
-                "title": "Board view",
-                "fields": {"viewType": "board"},
-                "createdAt": 1,
-                "updatedAt": 1,
-            }]),
+            &format!("{TEST_WS}/boards/{}/views", board.id),
+            &json!({"title": "Board view", "viewType": "board"}),
         )
         .await
         .created_json();
@@ -355,8 +343,8 @@ async fn seed_invalid_board_blocks(
     (
         card_id,
         template_card["id"].as_str().expect("tmpl card").to_owned(),
-        comment[0]["id"].as_str().expect("comment").to_owned(),
-        view[0]["id"].as_str().expect("view").to_owned(),
+        comment["id"].as_str().expect("comment").to_owned(),
+        view["view"]["id"].as_str().expect("view").to_owned(),
         tmpl_board.id,
         tmpl_board_card_id,
     )
@@ -503,8 +491,7 @@ async fn time_entries_survive_target_trash_and_permanent_purge() {
         .await
         .created_json();
 
-    client
-        .delete(&format!("{TEST_WS}/boards/{}/blocks/{card_id}", board.id))
+    crate::blocks::trash_card(client, &board.id, &card_id)
         .await
         .check_no_content();
     client

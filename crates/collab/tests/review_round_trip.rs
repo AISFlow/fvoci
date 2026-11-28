@@ -144,8 +144,13 @@ fn binding_vectors_exercise_every_allowlisted_node_and_mark() {
         [
             "blockMath",
             "blockquote",
+            "boardView",
             "bulletList",
+            "callout",
             "codeBlock",
+            "details",
+            "detailsContent",
+            "detailsSummary",
             "doc",
             "file",
             "hardBreak",

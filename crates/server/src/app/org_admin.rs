@@ -19,7 +19,7 @@ use fvoci_store::{
 use super::App;
 use super::list_page::ListPage;
 use crate::collab::AccessScope;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 
 /// The name of a workspace as it is stored: trimmed, non-empty, within the name length
 /// ceiling, and free of control, invisible, and bidirectional override characters.
@@ -53,11 +53,7 @@ impl App {
     ///
     /// Returns a 404 if it is not there, and the store's error if it cannot be read.
     pub async fn organization(&self) -> Result<Organization, AppError> {
-        match self.store().organization().await {
-            Ok(organization) => Ok(organization),
-            Err(error) if error.is_not_found() => Err(AppError::not_found("organization")),
-            Err(error) => Err(error.into()),
-        }
+        self.store().organization().await.or_missing("organization")
     }
 
     /// Changes the organization's name or whether its boards may be read by a public
@@ -93,13 +89,11 @@ impl App {
             self.collab()
                 .narrowing_access(self, &AccessScope::organization());
         }
-        let organization = match self.store().update_organization(&patch, actor_id).await {
-            Ok(organization) => organization,
-            Err(error) if error.is_not_found() => {
-                return Err(AppError::not_found("organization"));
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let organization = self
+            .store()
+            .update_organization(&patch, actor_id)
+            .await
+            .or_missing("organization")?;
         if !organization.public_links {
             self.end_shared_readers(None).await?;
         }
@@ -148,8 +142,13 @@ impl App {
             self.collab()
                 .narrowing_access(self, &AccessScope::organization().of_user(user_id));
         }
-        match self.store().set_org_role(user_id, role, actor_id).await {
-            Ok(OrgRoleChange::Done) => {
+        match self
+            .store()
+            .set_org_role(user_id, role, actor_id)
+            .await
+            .or_missing("organization")?
+        {
+            OrgRoleChange::Done => {
                 if role == OrgRole::Member {
                     // What they joined is theirs no more, and what happens there neither.
                     self.ws().follow_only_own_workspaces(user_id).await;
@@ -159,13 +158,11 @@ impl App {
                     .await;
                 Ok(())
             }
-            Ok(OrgRoleChange::NotAMember) => Err(AppError::not_found("member")),
-            Ok(OrgRoleChange::LastAdmin) => Err(AppError::conflict(
+            OrgRoleChange::NotAMember => Err(AppError::not_found("member")),
+            OrgRoleChange::LastAdmin => Err(AppError::conflict(
                 "the organization must keep an administrator",
             )
             .with_reason(Reason::LastOrgAdmin)),
-            Err(error) if error.is_not_found() => Err(AppError::not_found("organization")),
-            Err(error) => Err(error.into()),
         }
     }
 
@@ -306,8 +303,13 @@ impl App {
         known_workspace(workspace_id)?;
         self.collab()
             .narrowing_access(self, &AccessScope::workspace(workspace_id));
-        match self.store().trash_workspace(workspace_id, actor_id).await {
-            Ok(WorkspaceTrashing::Done) => {
+        match self
+            .store()
+            .trash_workspace(workspace_id, actor_id)
+            .await
+            .or_missing("organization")?
+        {
+            WorkspaceTrashing::Done => {
                 self.ws().stop_following_workspace(workspace_id);
                 // The rooms ask again even if its links cannot be read now.
                 let readers = self.end_shared_readers(Some(workspace_id)).await;
@@ -317,13 +319,11 @@ impl App {
                 readers?;
                 Ok(())
             }
-            Ok(WorkspaceTrashing::NotFound) => Err(workspace_not_found()),
-            Ok(WorkspaceTrashing::Default) => Err(AppError::conflict(
+            WorkspaceTrashing::NotFound => Err(workspace_not_found()),
+            WorkspaceTrashing::Default => Err(AppError::conflict(
                 "the organization's default workspace cannot be deleted",
             )
             .with_reason(Reason::DefaultWorkspace)),
-            Err(error) if error.is_not_found() => Err(AppError::not_found("organization")),
-            Err(error) => Err(error.into()),
         }
     }
 

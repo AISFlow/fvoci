@@ -217,7 +217,7 @@ describe('the backend in memory keeps a wiki from the operations of cards', () =
     expect(
       await status(made.backend.createView(made.wikiId, { title: 'v', fields: {} as never })),
     ).toBe(404);
-    expect(await status(made.backend.deleteBlock(made.wikiId, page.id))).toBe(404);
+    expect(await status(made.backend.batchDeleteCards(made.wikiId, [page.id]))).toBe(404);
     // Copied whole as a board is, but as no template.
     expect(await status(made.backend.duplicateContainer(made.wikiId, true, made.workspaceId))).toBe(
       400,

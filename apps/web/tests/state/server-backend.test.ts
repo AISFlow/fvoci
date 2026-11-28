@@ -174,7 +174,7 @@ describe('the server backend', () => {
     await backend.patchCard('b9', 'c9', { title: 'x' }).catch(() => undefined);
     expect(sent.map((one) => one.url)).toEqual([
       '/api/v1/w/w1/containers/b9',
-      '/api/v1/w/w2/boards/b9/blocks?type=view',
+      '/api/v1/w/w2/boards/b9/views',
       '/api/v1/w/w2/cards/c9',
     ]);
   });
@@ -639,15 +639,27 @@ describe('the problems of the server', () => {
 });
 
 describe('changing a view on the server', () => {
-  it('patches its block in one PATCH request without extra GET round-trips', async () => {
-    const sent = serve(undefined, 204);
+  it('patches the view in one PATCH request without extra GET round-trips', async () => {
+    const sent = serve({ ...BLOCK, id: 'v', type: 'view', fields: { cardOrder: ['c2', 'c1'] } });
     const view = await serverBackend('').patchView('b', 'v', {
       updatedFields: { cardOrder: ['c2', 'c1'] },
     });
     expect(sent.map((one) => [one.method, one.url, one.body])).toEqual([
-      ['PATCH', '/api/v1/w/w1/boards/b/blocks/v', { updatedFields: { cardOrder: ['c2', 'c1'] } }],
+      ['PATCH', '/api/v1/w/w1/boards/b/views/v', { updatedFields: { cardOrder: ['c2', 'c1'] } }],
     ]);
     expect(view.fields.cardOrder).toEqual(['c2', 'c1']);
+  });
+
+  it('sends a view only what a view patch has', async () => {
+    const sent = serve({ ...BLOCK, id: 'v', type: 'view', title: 'Renamed' });
+    await serverBackend('').patchView('b', 'v', {
+      parentId: 'p',
+      type: 'view',
+      title: 'Renamed',
+      deletedFields: ['sort'],
+      readAt: 3,
+    });
+    expect(sent[0]?.body).toEqual({ title: 'Renamed', deletedFields: ['sort'], readAt: 3 });
   });
 
   const VIEW = {
@@ -671,11 +683,11 @@ describe('changing a view on the server', () => {
     expect(sent.map((one) => one.method)).toEqual(['PATCH']);
   });
 
-  it('preserves previously read view metadata when patching fields in 1 round-trip', async () => {
+  it('takes the view as the server answers its patch, in 1 round-trip', async () => {
     const backend = serverBackend('');
     serve([VIEW]);
     await backend.views('b');
-    const sent = serve(undefined, 204);
+    const sent = serve({ ...VIEW, fields: { cardOrder: ['c2', 'c1'] } });
     const view = await backend.patchView('b', 'v', {
       updatedFields: { cardOrder: ['c2', 'c1'] },
     });
@@ -710,7 +722,7 @@ describe('changing a view on the server', () => {
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
       order.push(`${init.method ?? 'GET'} ${typeof init.body === 'string' ? init.body : url}`);
       await new Promise((resolve) => setTimeout(resolve, order.length === 1 ? 20 : 1));
-      return new Response(null, { status: 204 });
+      return new Response(JSON.stringify(VIEW), { status: 200 });
     });
     const backend = serverBackend('');
     await Promise.all([
@@ -725,6 +737,8 @@ describe('changing a view on the server', () => {
 
   it('sends readAt on patchView when given, forwards it along queued writes, and stops on failure', async () => {
     let updatedAt = 10;
+    let order: string | undefined;
+    const current = () => ({ ...VIEW, updatedAt, fields: { ...VIEW.fields, order } });
     const patches: Record<string, unknown>[] = [];
     vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
       if (init.method === 'PATCH') {
@@ -747,25 +761,11 @@ describe('changing a view on the server', () => {
           );
         }
         updatedAt += 1;
-        return Promise.resolve(new Response(null, { status: 204 }));
+        const fields = body.updatedFields as { order?: string } | undefined;
+        if (fields) order = fields.order;
+        return Promise.resolve(new Response(JSON.stringify(current()), { status: 200 }));
       }
-      return Promise.resolve(
-        new Response(
-          JSON.stringify([
-            {
-              ...VIEW,
-              updatedAt,
-              fields: {
-                ...VIEW.fields,
-                order: patches.at(-1)?.updatedFields
-                  ? (patches.at(-1)?.updatedFields as { order?: string }).order
-                  : undefined,
-              },
-            },
-          ]),
-          { status: 200 },
-        ),
-      );
+      return Promise.resolve(new Response(JSON.stringify(current()), { status: 200 }));
     });
     const backend = serverBackend('');
     // Two queued conditional writes with the same initial readAt: the second advances to 11.
@@ -809,9 +809,8 @@ describe('changing a view on the server', () => {
     expect(mixed.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
     expect(patches).toEqual([{ title: 'Renamed' }, { updatedFields: { order: 'Z' }, readAt: 20 }]);
 
-    // An external order change between GET and read-back GET of an unconditional write
+    // An external order change between the GET and the answer of an unconditional write
     // must not be masked for a queued conditional place write behind it.
-    let getCount = 0;
     const maskedPatches: Record<string, unknown>[] = [];
     vi.stubGlobal('fetch', (_url: string, init: RequestInit) => {
       if (init.method === 'PATCH') {
@@ -833,15 +832,13 @@ describe('changing a view on the server', () => {
             ),
           );
         }
-        return Promise.resolve(new Response(null, { status: 204 }));
+        // Another editor moved it to 'Z' at 12 before the rename was written.
+        const view = { ...VIEW, title: 'Renamed', updatedAt: 13, fields: { order: 'Z' } };
+        return Promise.resolve(new Response(JSON.stringify(view), { status: 200 }));
       }
-      getCount += 1;
-      // First GET sees order 'V' at 10; before read-back GET another editor moved it to 'Z' at 12.
-      const view =
-        getCount === 1
-          ? { ...VIEW, updatedAt: 10, fields: { ...VIEW.fields, order: 'V' } }
-          : { ...VIEW, updatedAt: 12, fields: { ...VIEW.fields, order: 'Z' } };
-      return Promise.resolve(new Response(JSON.stringify([view]), { status: 200 }));
+      // The GET sees order 'V' at 10.
+      const view = { ...VIEW, updatedAt: 10, fields: { ...VIEW.fields, order: 'V' } };
+      return Promise.resolve(new Response(JSON.stringify(view), { status: 200 }));
     });
     const concurrent = await Promise.allSettled([
       backend.patchView('b', 'v', { title: 'Renamed' }),
@@ -856,17 +853,21 @@ describe('changing a view on the server', () => {
 });
 
 describe('the trash on the server', () => {
-  it('deletes a block and takes it back out by its own routes', async () => {
+  it('deletes a view and an attachment and takes them back out by their own routes', async () => {
     const sent = serve(undefined, 204);
     const backend = serverBackend('');
-    await backend.deleteBlock('b', 'c1');
-    const restoring = serve({ ...BLOCK, id: 'c1', type: 'card', title: 'Back' });
-    await backend.restoreBlock('b', 'c1');
+    await backend.deleteView('b', 'v1');
+    await backend.deleteAttachment('b', 'c1', 'a1');
+    const restoring = serve({ ...BLOCK, id: 'v1', type: 'view', title: 'Back' });
+    await backend.restoreView('b', 'v1');
+    await backend.restoreAttachment('b', 'c1', 'a1');
     expect(sent.map((one) => `${one.method} ${one.url}`)).toEqual([
-      'DELETE /api/v1/w/w1/boards/b/blocks/c1',
+      'DELETE /api/v1/w/w1/boards/b/views/v1',
+      'DELETE /api/v1/w/w1/boards/b/cards/c1/attachments/a1',
     ]);
     expect(restoring.map((one) => `${one.method} ${one.url}`)).toEqual([
-      'POST /api/v1/w/w1/boards/b/blocks/c1/restore',
+      'POST /api/v1/w/w1/boards/b/views/v1/restore',
+      'POST /api/v1/w/w1/boards/b/cards/c1/attachments/a1/restore',
     ]);
     expect(sent[0]?.headers['X-Requested-With']).toBe('XMLHttpRequest');
   });
@@ -1066,33 +1067,46 @@ describe('boards on the server', () => {
     title: 'Board view',
   };
 
-  it('makes a board and its first view in one request, the view tied to the board', async () => {
+  it('makes a board with its first view in one request, and reads the view it made', async () => {
     const sent = serveRoutes([
-      ['POST /api/v1/w/t/containers-and-blocks', { containers: [BOARD], blocks: [VIEW] }, 201],
+      ['POST /api/v1/w/t/boards', BOARD, 201],
+      ['GET /api/v1/w/t/boards/b1/views', [VIEW]],
     ]);
     const made = await serverBackend('').createBoard(
       't',
       { title: 'Plan', cardProperties: [{ id: 's', name: 'Status', type: 'select', options: [] }] },
       { title: 'Board view', fields: { viewType: 'board' } as never },
     );
-    expect(sentLines(sent)).toEqual(['POST /api/v1/w/t/containers-and-blocks']);
-    const body = sent[0]?.body as {
-      containers: { id: string }[];
-      blocks: { containerId: string }[];
-    };
-    expect(body.containers).toEqual([
-      {
-        id: body.blocks[0]?.containerId,
-        visibility: 'private',
-        title: 'Plan',
-        description: '',
-        icon: '',
-        cardProperties: [{ id: 's', name: 'Status', type: 'select', options: [] }],
-      },
-    ]);
-    expect(body.blocks[0]).toMatchObject({ type: 'view', title: 'Board view' });
-    expect(body.blocks[0]).not.toHaveProperty('parentId');
+    expect(sentLines(sent)).toEqual(['POST /api/v1/w/t/boards', 'GET /api/v1/w/t/boards/b1/views']);
+    expect(sent[0]?.body).toEqual({
+      visibility: 'private',
+      title: 'Plan',
+      description: '',
+      icon: '',
+      cardProperties: [{ id: 's', name: 'Status', type: 'select', options: [] }],
+      firstView: { title: 'Board view', viewType: 'board', fields: { viewType: 'board' } },
+    });
     expect(made.board.id).toBe('b1');
+    expect(made.view).toMatchObject({ id: 'v1', title: 'Board view' });
+  });
+
+  it('makes a scaffolded board with the view the server gives it', async () => {
+    const sent = serveRoutes([
+      ['POST /api/v1/w/t/boards', BOARD, 201],
+      ['GET /api/v1/w/t/boards/b1/views', [VIEW]],
+    ]);
+    const made = await serverBackend('').createBoard(
+      't',
+      { title: 'Plan', scaffold: true },
+      { title: 'Unused', fields: { viewType: 'board' } as never },
+    );
+    expect(sent[0]?.body).toEqual({
+      visibility: 'private',
+      title: 'Plan',
+      description: '',
+      icon: '',
+      scaffold: true,
+    });
     expect(made.view).toMatchObject({ id: 'v1', title: 'Board view' });
   });
 

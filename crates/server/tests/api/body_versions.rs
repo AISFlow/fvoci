@@ -386,24 +386,21 @@ async fn a_body_written_whole_is_a_version_and_so_is_the_one_before() {
         ],
         "the second has the card's body too, and is not the current one"
     );
-    let copies: Vec<Value> = th
+    let copy: Value = th
         .client
         .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
+            "{TEST_WS}/boards/{}/cards/{}/duplicate",
             t.board_id, t.card_id
         ))
         .await
         .created_json();
-    let copy = copies
-        .iter()
-        .find(|block| block["type"] == json!("card"))
-        .and_then(|block| block["id"].as_str())
-        .expect("the copy of the card");
+    let copy = copy["id"].as_str().expect("the copy of the card");
     let of_copy = versions(&th.client, copy).await;
+    let copier = th.client.me().await.id;
     assert_eq!(
         said(&of_copy),
-        [(1, Vec::<&str>::new(), true)],
-        "a copy begins with one version, its own"
+        [(1, vec![copier.as_str()], true)],
+        "one version, the copy's body, written by who copied it"
     );
     assert_eq!(lines(&th.client, copy, &of_copy[0]).await, ["second"]);
     th.teardown().await;
@@ -466,24 +463,17 @@ async fn a_body_written_whole_over_what_editors_typed_keeps_both() {
     crate::rooms::no_rooms(&th).await;
     assert_eq!(versions(&th.client, &t.card_id).await, kept);
 
-    // A batch over two cards: one body changes, the other is written as it is.
-    let (first, second) = (
-        card(&th.client, &t.card_id).await,
-        card(&th.client, other_id).await,
-    );
-    th.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks", t.board_id),
-            &json!({
-                "blockIds": [t.card_id, other_id],
-                "blockPatches": [
-                    {"body": paragraphs(&["batched"]), "readAt": first.updated_at},
-                    {"body": paragraphs(&["other"]), "readAt": second.updated_at},
-                ],
-            }),
-        )
-        .await
-        .check_no_content();
+    // Two cards: one body changes, the other is written as it is.
+    for (id, text) in [(t.card_id.as_str(), "batched"), (other_id, "other")] {
+        let read = card(&th.client, id).await;
+        th.client
+            .patch(
+                &format!("{TEST_WS}/cards/{id}"),
+                &json!({"body": paragraphs(&[text]), "readAt": read.updated_at}),
+            )
+            .await
+            .check_ok();
+    }
     assert_eq!(said(&versions(&th.client, &t.card_id).await)[0].0, 4);
     assert_eq!(
         versions(&th.client, other_id).await,
@@ -571,25 +561,27 @@ async fn the_versions_of_a_card_go_to_the_trash_and_come_back_with_it() {
     write_whole(&th.client, &t.card_id, &paragraphs(&["second"])).await;
     let kept = versions(&th.client, &t.card_id).await;
     assert_eq!(kept.len(), 2, "{kept:?}");
-    let block = crate::blocks::block_path(&t.board_id, &t.card_id);
     let list = format!("{TEST_WS}/cards/{}/body-versions", t.card_id);
 
-    th.client.delete(&block).await.check_no_content();
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
+        .await
+        .check_no_content();
     for path in [list.clone(), format!("{list}/1")] {
         th.client
             .get(&path)
             .await
             .check_error(StatusCode::NOT_FOUND, "card not found");
     }
-    th.client
-        .post_empty(&crate::blocks::undelete_path(&t.board_id, &t.card_id))
+    crate::blocks::restore_card(&th.client, &t.board_id, &t.card_id)
         .await
         .check_ok();
     assert_eq!(versions(&th.client, &t.card_id).await, kept);
     assert_eq!(lines(&th.client, &t.card_id, &kept[1]).await, ["first"]);
 
     // Gone for good: nothing of its versions is left.
-    th.client.delete(&block).await.check_no_content();
+    crate::blocks::trash_card(&th.client, &t.board_id, &t.card_id)
+        .await
+        .check_no_content();
     let store = th.app.store();
     store.purge_trash(i64::MAX).await.expect("purged");
     for table in ["body_versions", "body_version_editors"] {

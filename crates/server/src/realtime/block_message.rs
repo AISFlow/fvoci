@@ -54,9 +54,7 @@ impl<'a> UpdateBlockMessage<'a> {
             let summary = Summary::of(block.body.as_ref());
             (Cow::Owned(without_body(block)), Some(summary))
         } else if !block.takes_number() && block.number.is_some() {
-            let mut hidden = block.clone();
-            hidden.hide_inactive_number();
-            (Cow::Owned(hidden), None)
+            (Cow::Owned(block.clone().outward()), None)
         } else {
             (Cow::Borrowed(block), None)
         };

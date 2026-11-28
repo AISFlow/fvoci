@@ -1,5 +1,6 @@
 //! Which block's body names which block (`body_links`): the references of the body a
-//! block holds now, put down again with every write of that body
+//! block holds now, and the views its board views show, put down again with every
+//! write of that body
 //! ([`crate::block_derived::refresh`]).
 //!
 //! A row says what the body says and no more: the block named may not be there, may be
@@ -34,8 +35,7 @@ pub(crate) async fn refresh(
     let named: BTreeSet<&str> = block
         .body
         .as_ref()
-        .map(|body| body.reference_ids().into_iter().collect())
-        .unwrap_or_default();
+        .map_or_default(|body| body.linked_ids().into_iter().collect());
     let mut sql = scope.sql("SELECT target_id FROM body_links WHERE source_id = ");
     sql.bind(Id(&block.id));
     let held = scope

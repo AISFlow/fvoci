@@ -8,7 +8,8 @@ use fvoci_model::{
 };
 use fvoci_store::{ByHand, KeptVersion, body_digest};
 
-use super::{App, ChangeNotification};
+use super::blocks::{ChangeAction, log_notification};
+use super::{App, ChangeNotification, Changes};
 use crate::error::AppError;
 
 impl App {
@@ -143,7 +144,8 @@ impl App {
             .await?;
         let block = self.store().get_block(&card.id).await?;
         if changed {
-            self.tell_of_update(&container.workspace_id, &block, ChangeNotification::Send);
+            log_notification(ChangeNotification::Send, ChangeAction::Update, &block.id);
+            self.tell(Changes::in_workspace(&container.workspace_id).changed([block.clone()]));
         }
         Ok(block)
     }

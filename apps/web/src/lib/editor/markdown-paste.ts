@@ -6,8 +6,9 @@
  *
  * Text is taken for Markdown by its lines alone, and only text of two lines
  * or more: a line that starts a heading (`#` to `######` and a space), a
- * fence of code, a task (`- [ ]`, `- [x]`), a quote (`> `), two entries of
- * a list, or a table (a row of `|` and the row under its head). A single
+ * fence of code, a task (`- [ ]`, `- [x]`), a quote (`> `, a GitHub alert
+ * among them: a callout), a toggle (`<details>`), two entries of a list, or
+ * a table (a row of `|` and the row under its head). A single
  * line stays what it is, `# 3` among them. A number followed by another
  * (`2026. 11. 26. 회의`, a date as Korean writes it) starts no entry: such
  * lines are read as text, in a text that is Markdown for its other lines too.
@@ -32,6 +33,8 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/m;
 const TASK = /^ {0,3}[-*+][ \t]+\[[ xX]\]([ \t]|$)/m;
 /** A line that is quoted. */
 const QUOTE = /^ {0,3}>[ \t]/m;
+/** A line that opens a toggle. */
+const DETAILS = /^ {0,3}<details(?:\s[^>]*)?>/im;
 /**
  * A line that is an entry of a list: `-`, `*`, `+`, or a number and `.` or `)`, then a space; not
  * a number followed by another, which is a date (`2026. 11. 26.`).
@@ -56,13 +59,13 @@ function holdsTable(text: string): boolean {
 
 /**
  * Whether a text of more than one line is Markdown by what its lines start
- * with: a heading, a fence, a task, a quote, two entries of a list. (A table
+ * with: a heading, a fence, a task, a quote, a toggle, two entries of a list. (A table
  * is told by what it is read as: `pastedMarkdown`.)
  */
 export function looksLikeMarkdown(text: string): boolean {
   const lines = text.split(/\r\n?|\n/).filter((line) => line.trim() !== '');
   if (lines.length < 2) return false;
-  if (HEADING.test(text) || FENCE.test(text) || TASK.test(text) || QUOTE.test(text)) return true;
+  if ([HEADING, FENCE, TASK, QUOTE, DETAILS].some((line) => line.test(text))) return true;
   return (text.match(ENTRY)?.length ?? 0) >= 2;
 }
 

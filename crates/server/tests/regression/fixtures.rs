@@ -39,27 +39,6 @@ pub(crate) fn merged(base: &Value, changes: Value) -> Value {
     result
 }
 
-/// A block as a client sends it. An empty `parent` puts it directly on the board; `fields`
-/// is the block's `fields` object.
-pub(crate) fn block(
-    id: &str,
-    board: &str,
-    block_type: &str,
-    title: &str,
-    parent: &str,
-    fields: Value,
-) -> Value {
-    let mut block = json!({
-        "id": id,
-        "containerId": board,
-        "parentId": parent,
-        "type": block_type,
-        "title": title,
-    });
-    block["fields"] = fields;
-    block
-}
-
 /// Creates a card as `user` via `POST /boards/{board}/cards`, recorded as `name`, and
 /// returns its identifier.
 pub(crate) async fn new_card(
@@ -114,22 +93,6 @@ pub(crate) async fn new_board(
     .user(user)
     .await
     .string("id")
-}
-
-/// Inserts blocks as `user`, recorded as `name`, and returns the created blocks.
-pub(crate) async fn new_blocks(
-    s: &mut Session,
-    user: &str,
-    board: &str,
-    blocks: Value,
-    name: &str,
-) -> Value {
-    s.post(name, &format!("{ROOT_API}/boards/{board}/blocks"))
-        .json(blocks)
-        .user(user)
-        .await
-        .json()
-        .clone()
 }
 
 /// Adds `user` to the board with a role, as `admin`. Recorded as `add <role>`.

@@ -11,6 +11,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::body::{Body, BodyChange};
+use crate::body_markdown::ComplexBlock;
 use crate::card::{ICON_OF_SEVERAL, is_icon};
 use crate::refusal::{RefusalReason, Refusals};
 use crate::{BLOCK_TITLE_MAX_CHARS, Block, BlockPatch, JsonMap};
@@ -217,7 +218,8 @@ pub struct Page {
     /// The page's place among the pages of the same parent, as in the tree
     /// (`getPageTree`).
     pub order: String,
-    /// The page's body; `null` for a page without one.
+    /// The page's body; `null` for a page without one, and where it is read in Markdown
+    /// (`bodyMarkdown`).
     pub body: Option<Body>,
     /// The identifier of the user who made the page.
     pub created_by: String,
@@ -228,6 +230,21 @@ pub struct Page {
     /// Last modification time in milliseconds since the Unix epoch: what `readAt` of a
     /// change of the page names.
     pub updated_at: i64,
+    /// The body in Markdown, as `getPage` with `format=markdown` gives it in place of
+    /// `body`, left out otherwise; written as a card's `bodyMarkdown` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub body_markdown: Option<String>,
+    /// With `bodyMarkdown`: whether the body has blocks its Markdown does not hold as
+    /// they are (`complexBlocks`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub has_complex_blocks: Option<bool>,
+    /// With `bodyMarkdown`: the blocks it does not hold as they are, in the order of
+    /// the body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub complex_blocks: Option<Vec<ComplexBlock>>,
 }
 
 impl From<Block> for Page {
@@ -245,6 +262,9 @@ impl From<Block> for Page {
             modified_by: block.modified_by,
             created_at: block.created_at,
             updated_at: block.updated_at,
+            body_markdown: None,
+            has_complex_blocks: None,
+            complex_blocks: None,
         }
     }
 }

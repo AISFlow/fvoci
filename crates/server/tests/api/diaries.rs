@@ -8,6 +8,7 @@ use fvoci_model::{
     BODY_MAX_BYTES, BODY_MAX_NODES, Block, BlockType, Container, ContainerKind,
     ContainerVisibility, ContainersAndBlocks, DIARIES_PER_SPACE, DiaryDate, new_id,
 };
+use fvoci_store::NewContainers;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -1339,8 +1340,9 @@ async fn assert_commit_time_diary_rollback(
         containers: vec![d1, d2],
         blocks,
     };
+    let files = [f1];
     let err = own_store
-        .create_imported_containers_blocks_files_and_members(&mut combined, &[f1], &[], me_id)
+        .create_containers(NewContainers::whole(&mut combined).recording(&files), me_id)
         .await
         .expect_err("commit transaction must fail and roll back");
     if case == CommitRollbackCase::DiaryLimit {

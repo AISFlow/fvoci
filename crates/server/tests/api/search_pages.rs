@@ -90,7 +90,7 @@ pub(crate) async fn stored_wiki(
         )
         .await
         .expect("the page is stored")
-        .page;
+        .first;
     (wiki.id, page.id)
 }
 

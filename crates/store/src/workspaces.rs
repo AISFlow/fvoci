@@ -9,7 +9,7 @@ use fvoci_model::{
     Workspace, WorkspaceRole,
 };
 
-use crate::db::{Bound, Id, OptId, Param, Row, Scope, Sql};
+use crate::db::{Bound, FromRow, Id, OptId, Param, Row, Scope, Sql};
 use crate::error::StoreError;
 use crate::{Store, blocks, container_kinds, container_search, containers, link_locks};
 
@@ -25,6 +25,7 @@ impl Store {
     /// [`StoreError::InvalidId`] if the workspace's identifier is not one, and
     /// [`StoreError::Database`] if the statement fails, as it does when a workspace with the
     /// identifier exists.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn create_workspace(&self, workspace: &Workspace) -> Result<(), StoreError> {
         self.with_write_conn(async |scope| {
             let org = scope.org()?;
@@ -78,7 +79,7 @@ impl Store {
                     .push_bind(" AND revoked_at = ", 0_i64);
                 scope.execute(sql).await?;
             }
-            workspace_from_row(&row)
+            Workspace::from_row(&row)
         })
         .await
     }
@@ -96,7 +97,7 @@ impl Store {
                 .fetch_optional(sql)
                 .await?
                 .ok_or_else(workspace_not_found)?;
-            workspace_from_row(&row)
+            Workspace::from_row(&row)
         })
         .await
     }
@@ -111,12 +112,7 @@ impl Store {
         self.with_conn(async |scope| {
             let mut sql = select_workspaces(scope)?;
             sql.push(" ORDER BY created_at, id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(workspace_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -247,15 +243,17 @@ fn select_workspaces(scope: &Scope<'_>) -> Result<Sql, StoreError> {
     Ok(sql)
 }
 
-fn workspace_from_row(row: &Row) -> Result<Workspace, StoreError> {
-    Ok(Workspace {
-        id: row.id(0)?,
-        title: row.text(1)?,
-        settings: row.json_map(2, "settings")?,
-        modified_by: row.id(3)?,
-        updated_at: row.int(4)?,
-        guest_invitations: row.bool(5)?,
-    })
+impl FromRow for Workspace {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(Workspace {
+            id: row.id(0)?,
+            title: row.text(1)?,
+            settings: row.json_map(2, "settings")?,
+            modified_by: row.id(3)?,
+            updated_at: row.int(4)?,
+            guest_invitations: row.bool(5)?,
+        })
+    }
 }
 
 impl Store {

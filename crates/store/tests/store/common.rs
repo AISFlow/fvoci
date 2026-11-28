@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use fvoci_model::{Block, Container, ContainerVisibility, User, Workspace, new_id};
+use fvoci_model::{Block, Container, ContainerVisibility, DuplicateAs, User, Workspace, new_id};
 use fvoci_store::testing::TestDatabase;
-use fvoci_store::{DbType, Purged, Store};
+use fvoci_store::{DbType, Purged, Store, StoreError};
 use sqlx::postgres::PgConnection;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions as _, Connection as _};
@@ -351,6 +351,25 @@ pub(crate) async fn insert_blocks(store: &Store, blocks: &mut [Block], user_id: 
             .await
             .expect("the block is inserted");
     }
+}
+
+/// Copies the card `card_id` of `board_id` with what is below it, as `duplicateCard`
+/// stores a copy: read in one snapshot, then written in one transaction. The copy has
+/// no files of its own, so it is for a card whose body shows none. Returns the copies,
+/// the copy of the card first.
+pub(crate) async fn duplicate_card(
+    store: &Store,
+    board_id: &str,
+    card_id: &str,
+    user_id: &str,
+    duplicate_as: DuplicateAs,
+) -> Result<Vec<Block>, StoreError> {
+    let prepared = store
+        .prepare_card_duplicate(board_id, card_id, duplicate_as)
+        .await?;
+    store
+        .commit_card_duplicate(board_id, prepared.blocks, &[], user_id)
+        .await
 }
 
 /// `storetests.DeleteBlocks`: deletes each block on its own.

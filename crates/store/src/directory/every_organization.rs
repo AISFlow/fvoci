@@ -124,10 +124,7 @@ pub(crate) async fn organizations_made_by(
         sql.bind(Id(user_id))
             .push(" AND deleted_at IS NULL AND is_system = false")
             .push_bind(" AND kind = ", OrgKind::Shared.as_str());
-        match scope.fetch_optional(sql).await? {
-            Some(row) => row.int(0),
-            None => Ok(0),
-        }
+        Ok(scope.first(sql).await?.unwrap_or(0))
     })
     .await
 }
@@ -217,11 +214,7 @@ pub(crate) async fn oldest_organization(
     sql.bind(false).push(" AND deleted_at IS NULL");
     of_people(&mut sql, "kind");
     sql.push(" ORDER BY created_at, id LIMIT 1");
-    scope
-        .fetch_optional(sql)
-        .await?
-        .map(|row| row.id(0))
-        .transpose()
+    scope.first(sql).await
 }
 
 /// The organization that is the space of the account `user_id`, in use or not, by
@@ -232,9 +225,5 @@ pub(crate) async fn space_of(
 ) -> Result<Option<String>, StoreError> {
     let mut sql = scope.sql("SELECT id FROM organizations WHERE owner_id = ");
     sql.bind(Id(user_id));
-    scope
-        .fetch_optional(sql)
-        .await?
-        .map(|row| row.id(0))
-        .transpose()
+    scope.first(sql).await
 }

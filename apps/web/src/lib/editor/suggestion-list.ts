@@ -1,6 +1,7 @@
 /**
  * The list an autocomplete shows under the cursor: people after `@`, emoji
- * after `:`. Plain DOM, styled by editor.css with the design tokens. This
+ * after `:`; and the same list opened by hand (`choiceList`), as for the two
+ * ways a pasted address of a view goes in (board-view-paste.ts). Plain DOM, styled by editor.css with the design tokens. This
  * layer sits below the app's popover components and cannot use them.
  *
  * The cursor stays in the editor; the list is driven from there. The arrow
@@ -115,8 +116,18 @@ class SuggestionList {
   }
 
   onStart = (props: SuggestionProps<SuggestionEntry, SuggestionEntry>): void => {
-    this.#view = props.editor.view;
-    this.#owner = props.editor.view.dom;
+    this.open(props.editor.view, props.items, props.command, props.clientRect?.());
+  };
+
+  /** Opens the list of `entries` at `rect`, under the editor of `view`; `choose` takes one. */
+  open(
+    view: EditorView,
+    entries: SuggestionEntry[],
+    choose: (entry: SuggestionEntry) => void,
+    rect: DOMRect | null | undefined,
+  ): void {
+    this.#view = view;
+    this.#owner = view.dom;
     const page = this.#owner.ownerDocument;
     this.#list = page.createElement('div');
     this.#list.setAttribute('role', 'listbox');
@@ -126,11 +137,11 @@ class SuggestionList {
     this.#list.dataset.suggestions = this.#options.kind;
     page.body.append(this.#list);
     this.#owner.setAttribute('aria-controls', this.#id);
-    this.#entries = props.items;
+    this.#entries = entries;
     this.#active = 0;
-    this.#choose = props.command;
-    this.#draw(props.clientRect?.());
-  };
+    this.#choose = choose;
+    this.#draw(rect);
+  }
 
   onUpdate = (props: SuggestionProps<SuggestionEntry, SuggestionEntry>): void => {
     this.#entries = props.items;
@@ -139,7 +150,10 @@ class SuggestionList {
     this.#draw(props.clientRect?.());
   };
 
-  onKeyDown = ({ event }: SuggestionKeyDownProps): boolean => {
+  onKeyDown = ({ event }: SuggestionKeyDownProps): boolean => this.keyDown(event);
+
+  /** Moves through the list, takes an entry, or closes it; whether the key was the list's. */
+  keyDown(event: KeyboardEvent): boolean {
     if (!this.#list || this.#entries.length === 0 || isComposing(event)) return false;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       const step = event.key === 'ArrowDown' ? 1 : -1;
@@ -161,11 +175,26 @@ class SuggestionList {
       return true;
     }
     return false;
-  };
+  }
 
   onExit = (): void => {
     this.#close();
   };
+
+  close(): void {
+    this.#close();
+  }
+}
+
+/** A list of choices opened by hand, not by what is typed (board-view-paste.ts). */
+export interface ChoiceList {
+  open: SuggestionList['open'];
+  keyDown: SuggestionList['keyDown'];
+  close: () => void;
+}
+
+export function choiceList(options: SuggestionListOptions): () => ChoiceList {
+  return () => new SuggestionList(options);
 }
 
 export function suggestionList(options: SuggestionListOptions): NonNullable<SuggestionRenderer> {

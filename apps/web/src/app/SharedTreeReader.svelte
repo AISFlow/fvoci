@@ -286,8 +286,8 @@
         <OutlineColumns {outline} id="{uid}-outline">
           <div class="mx-auto max-w-3xl py-6">
             <h2 class="mb-4 text-2xl font-semibold break-words" data-testid={titleTestId}>
-              {#if kind === 'wiki' && shown.icon}<span aria-hidden="true"
-                  >{shown.icon}
+              {#if kind === 'wiki' && shown.icon}<span aria-hidden="true">
+                  {shown.icon}
                 </span>{/if}{shown.title || untitledItem}
             </h2>
             <div data-testid={bodyTestId} {@attach outline.source}>

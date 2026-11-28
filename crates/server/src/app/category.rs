@@ -7,7 +7,7 @@ use fvoci_model::{Category, CategoryPatch, CategoryType};
 use super::App;
 use super::category_containers::category_of_workspace_takes;
 use crate::auth::now_millis;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 
 /// What a request misses that names a category the user does not have.
 pub(super) const CATEGORY: &str = "category";
@@ -147,11 +147,11 @@ impl App {
         user_id: &str,
         category_id: &str,
     ) -> Result<Category, AppError> {
-        let category = match self.store().get_category(category_id).await {
-            Ok(category) => category,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found(CATEGORY)),
-            Err(error) => return Err(error.into()),
-        };
+        let category = self
+            .store()
+            .get_category(category_id)
+            .await
+            .or_missing(CATEGORY)?;
         if category.user_id != user_id || category.workspace_id != workspace_id {
             return Err(AppError::not_found(CATEGORY));
         }
@@ -190,10 +190,13 @@ impl App {
         for metadata in &source.container_metadata {
             // Of any workspace: a board of another is filed in its own (below), which a
             // handle of this workspace would not find (`App::container`).
-            let container = match self.store().get_container(&metadata.container_id).await {
-                Ok(container) => container,
-                Err(error) if error.is_not_found() => continue,
-                Err(error) => return Err(error.into()),
+            let Some(container) = self
+                .store()
+                .get_container(&metadata.container_id)
+                .await
+                .found()?
+            else {
+                continue;
             };
             if category_of_workspace_takes(&container, workspace_id) {
                 container_ids.push(container.id);

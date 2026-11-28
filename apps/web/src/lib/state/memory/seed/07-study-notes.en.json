@@ -560,6 +560,47 @@
                 ]
               }
             ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "What does it return for an empty list?"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "None: "
+                      },
+                      {
+                        "type": "text",
+                        "text": "high",
+                        "marks": [
+                          {
+                            "type": "code"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "text",
+                        "text": " starts at -1, so the loop never runs."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
           }
         ]
       }
@@ -622,6 +663,50 @@
               {
                 "type": "text",
                 "text": ". Show it by expanding the square."
+              }
+            ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Answer: expand the square"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "blockMath",
+                    "attrs": {
+                      "latex": "E[(X-\\mu)^2] = E[X^2] - 2\\mu E[X] + \\mu^2 = E[X^2] - \\mu^2"
+                    }
+                  },
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "since "
+                      },
+                      {
+                        "type": "inlineMath",
+                        "attrs": {
+                          "latex": "E[X] = \\mu"
+                        }
+                      },
+                      {
+                        "type": "text",
+                        "text": "."
+                      }
+                    ]
+                  }
+                ]
               }
             ]
           }

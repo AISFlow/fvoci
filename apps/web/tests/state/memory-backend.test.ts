@@ -160,16 +160,18 @@ describe('deleting', () => {
     const alpha = byTitle('Alpha');
     const before = await backend.comments(boardId, alpha.id);
     expect(before.length).toBeGreaterThan(0);
-    await backend.deleteBlock(boardId, alpha.id);
+    await backend.batchDeleteCards(boardId, [alpha.id]);
     expect((await rejection(backend.card(boardId, alpha.id))).status).toBe(404);
-    await backend.restoreBlock(boardId, alpha.id);
+    await backend.batchRestoreCards(boardId, [alpha.id]);
     expect((await backend.card(boardId, alpha.id)).title).toBe('Alpha');
     expect(await backend.comments(boardId, alpha.id)).toHaveLength(before.length);
   });
 
   it('answers 404 when asked to restore what is not in the trash', async () => {
     const { backend, boardId, byTitle } = await firstBoard();
-    expect((await rejection(backend.restoreBlock(boardId, byTitle('Alpha').id))).status).toBe(404);
+    expect(
+      (await rejection(backend.batchRestoreCards(boardId, [byTitle('Alpha').id]))).status,
+    ).toBe(404);
   });
 
   it('takes a board out of every sidebar and puts it back with its blocks', async () => {
@@ -336,10 +338,12 @@ describe('file blocks', () => {
     expect(refused).toMatchObject({ status: 400, errors: [{ pointer: '/body' }] });
     const comment = await backend.createComment(boardId, cardId, text('fine'));
     const changed = await rejection(
-      backend.patchComment(boardId, comment.id, {
-        body: withFile(uploaded.fileId),
-        readAt: comment.updatedAt,
-      }),
+      backend.patchComment(
+        boardId,
+        comment.id,
+        { body: withFile(uploaded.fileId), readAt: comment.updatedAt },
+        cardId,
+      ),
     );
     expect(changed).toMatchObject({ status: 400, errors: [{ pointer: '/body' }] });
   });

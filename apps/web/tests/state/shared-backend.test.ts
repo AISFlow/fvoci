@@ -84,7 +84,7 @@ describe('the backend of a public link', () => {
     const refusals = await Promise.all([
       backend.patchCard('b1', 'c1', { title: 'x' }).catch((error: unknown) => error),
       backend.createComment('b1', 'c1', { type: 'doc', content: [] }).catch((e: unknown) => e),
-      backend.deleteBlock('b1', 'c1').catch((error: unknown) => error),
+      backend.deleteAttachment('b1', 'c1', 'a1').catch((error: unknown) => error),
       backend.patchView('b1', 'v1', {}).catch((error: unknown) => error),
       backend.joinContainer('b1').catch((error: unknown) => error),
     ]);

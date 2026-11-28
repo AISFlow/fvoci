@@ -18,7 +18,7 @@ use super::{App, Asker, as_managed, sso};
 use crate::auth::api_token::{self, Delegation};
 use crate::auth::now_millis;
 use crate::collab::AccessScope;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 
 /// What an agent reaches of a workspace by a token: the kinds of container named here,
 /// never a diary, which is its owner's alone. A kind that comes later is reached once
@@ -595,11 +595,10 @@ impl App {
     ///
     /// Returns a 404 if there is no such workspace, and the store's error if the query fails.
     pub async fn workspace(&self, workspace_id: &str) -> Result<Workspace, AppError> {
-        match self.store().get_workspace(workspace_id).await {
-            Ok(workspace) => Ok(workspace),
-            Err(error) if error.is_not_found() => Err(AppError::not_found("workspace")),
-            Err(error) => Err(error.into()),
-        }
+        self.store()
+            .get_workspace(workspace_id)
+            .await
+            .or_missing("workspace")
     }
 
     /// Returns every workspace, oldest first.

@@ -2,7 +2,7 @@
 //! which sessions open what is the organization's, what keeps the organization from
 //! locking itself out, and that nothing of it is reached around the wall.
 
-use fvoci_model::{Block, Container, ContainerVisibility, OidcProvider, UserWorkspace, new_id};
+use fvoci_model::{Container, ContainerVisibility, OidcProvider, UserWorkspace, new_id};
 use fvoci_server::auth::secret::token_digest;
 use fvoci_store::Identity;
 use reqwest::{Method, StatusCode};
@@ -545,6 +545,12 @@ const OPEN_TO_ANY_SESSION: &[&str] = &[
     // nothing of an organization the session does not open is marked.
     "readNotification",
     "readNotifications",
+    // Sorting the inbox, as marking it read: nothing of an organization the session
+    // does not open is marked unread, put away or taken back (the same test).
+    "archiveNotification",
+    "archiveReadNotifications",
+    "unarchiveNotification",
+    "unreadNotification",
     "ready",
     "register",
     "requestAccountDeletion",
@@ -595,6 +601,7 @@ impl Named {
             .replace("{boardId}", &self.board.id)
             .replace("{cardId}", &self.card_id)
             .replace("{blockId}", &self.card_id)
+            .replace("{targetId}", &self.card_id)
             .replace("{courseId}", &self.course_id)
             .replace("{unitId}", &self.unit_id)
             .replace("{meetingId}", &self.meeting_id)
@@ -614,7 +621,8 @@ impl Named {
     fn body(&self, operation: &str) -> Value {
         match operation {
             "getWorkspaceUsersById" => json!([self.user_id]),
-            "createBlocks" | "reorderCardProperties" => json!([]),
+            "reorderCardProperties" => json!([]),
+            "reorderFavorites" => json!([self.card_id]),
             "importArchive" => json!({ "uploadId": self.upload_id }),
             "acceptInvitation" | "previewInvitation" => json!({ "token": self.invitation }),
             "startTimeEntry" => json!({
@@ -898,9 +906,9 @@ async fn nothing_of_the_organization_is_reached_around_the_wall() {
         .await
         .ok_json();
     assert_eq!(board.title, named.board.title);
-    let cards: Vec<Block> = admin
+    let cards: Vec<Value> = admin
         .get(&format!(
-            "/w/{ROOT_WORKSPACE_ID}/boards/{}/blocks",
+            "/w/{ROOT_WORKSPACE_ID}/boards/{}/cards",
             named.board.id
         ))
         .await
@@ -1004,14 +1012,20 @@ async fn a_public_link_stays_open_and_reads_the_same_for_a_session_that_opens_no
     let read_token = ts.share(&named.board.id).await;
     let anonymous = ts.anonymous();
     let board = &named.board.id;
-    for (under, rest) in [
-        ("containers", String::new()),
-        ("boards", "/blocks".to_owned()),
-        ("boards", "/cards".to_owned()),
-        ("containers", format!("/files/{}/info", named.file_id)),
+    // Under the workspace and under the link: the link's blocks are the board's views
+    // and cards together.
+    for (under, rest, shared_rest) in [
+        ("containers", String::new(), String::new()),
+        ("boards", "/views".to_owned(), "/blocks".to_owned()),
+        ("boards", "/cards".to_owned(), "/cards".to_owned()),
+        (
+            "containers",
+            format!("/files/{}/info", named.file_id),
+            format!("/files/{}/info", named.file_id),
+        ),
     ] {
         let path = format!("/{under}/{board}{rest}");
-        let shared = format!("/shared/{board}{rest}?readToken={read_token}");
+        let shared = format!("/shared/{board}{shared_rest}?readToken={read_token}");
         let as_anybody = anonymous.get(&shared).await;
         as_anybody.check_ok();
         for signed_in in [&ts.client, &admin] {
@@ -1019,7 +1033,7 @@ async fn a_public_link_stays_open_and_reads_the_same_for_a_session_that_opens_no
             response.check_ok();
             assert_eq!(response.value(), as_anybody.value(), "{path}");
         }
-        let wrong = format!("/shared/{board}{rest}?readToken=not-the-token");
+        let wrong = format!("/shared/{board}{shared_rest}?readToken=not-the-token");
         assert_eq!(
             ts.client.get(&wrong).await.status,
             anonymous.get(&wrong).await.status,

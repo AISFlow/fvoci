@@ -4,6 +4,9 @@ use serde_json::json;
 
 use super::{Case, files};
 
+/// 👍 as a path gives it.
+const THUMBS_UP: &str = "%F0%9F%91%8D";
+
 pub(super) async fn exercise(case: &mut Case) {
     let workspace = case.workspace.clone();
     case.present("getWorkspace", &[], &workspace).await;
@@ -29,10 +32,10 @@ pub(super) async fn exercise(case: &mut Case) {
     )
     .await;
     categories(case, &board).await;
+    stars(case, &board).await;
     let audited = people(case, &board).await;
     subscriptions(case, &card).await;
     files::exercise(case, &board, &card).await;
-    bulk(case).await;
     templates(case).await;
     case.run("deleteContainer", &[("boardId", &board)], json!({}))
         .await;
@@ -552,6 +555,12 @@ async fn cards(case: &mut Case, board: &str) -> String {
     case.present("getCardBodyVersions", &[("cardId", &card)], "\"version\":1")
         .await;
     case.present(
+        "getCardActivity",
+        &[("cardId", &card)],
+        "\"kind\":\"created\"",
+    )
+    .await;
+    case.present(
         "getCardBodyVersion",
         &[("cardId", &card), ("version", "1")],
         "a kept body",
@@ -576,39 +585,21 @@ async fn cards(case: &mut Case, board: &str) -> String {
     .await;
     case.run("keepCardBodyVersion", &[("cardId", &card)], json!({}))
         .await;
-    let created = case
-        .run(
-            "createBlocks",
-            at,
-            json!([{
-                "id": "comment-reference", "containerId": board, "parentId": card,
-                "type": "comment", "body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "first comment"}]}]}, "createdAt": 1, "updatedAt": 1
-            }]),
-        )
-        .await
-        .value();
-    let comment = case.remember(&created[0], "id");
-    let comment_at = &[("boardId", board), ("blockId", comment.as_str())];
-    case.present("getBlocks", at, &comment).await;
-    case.run("patchBlock", comment_at, json!({"readAt": created[0]["updatedAt"], "body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "edited comment"}]}]}}))
-        .await;
-    case.present("getCommentVersions", comment_at, "first comment")
-        .await;
     case.run(
-        "patchBlocks",
+        "batchPatchCards",
         at,
-        json!({"blockIds": [card], "blockPatches": [{"title": "batch change"}]}),
+        json!({"cardIds": [card], "updatedProperties": {}}),
     )
     .await;
-    let card_at = &[("boardId", board), ("blockId", card.as_str())];
-    case.run("duplicateBlock", card_at, json!({})).await;
-    case.run("deleteBlock", card_at, json!({})).await;
+    case.run("batchDeleteCards", at, json!({"cardIds": [card]}))
+        .await;
     let trash = case.run("getDeletedCards", at, json!({})).await;
     assert!(
         trash.text().contains(&card),
         "deleted card is visible in its trash"
     );
-    case.run("restoreBlock", card_at, json!({})).await;
+    case.run("batchRestoreCards", at, json!({"cardIds": [card]}))
+        .await;
     board_views_and_card_ops(case, board, &card).await;
     card_comments(case, board, &card).await;
     card
@@ -626,6 +617,14 @@ async fn board_views_and_card_ops(case: &mut Case, board: &str, card: &str) {
         .value();
     let view = case.remember(&created_view["view"], "id");
     let of_view = &[("boardId", board), ("viewId", view.as_str())];
+    case.present("getBoardViews", at, &view).await;
+    case.present("getBoardView", of_view, &view).await;
+    case.run(
+        "patchBoardView",
+        of_view,
+        json!({"title": format!("secret {} view renamed", case.label)}),
+    )
+    .await;
     let dup_view = case
         .run(
             "duplicateBoardView",
@@ -635,12 +634,11 @@ async fn board_views_and_card_ops(case: &mut Case, board: &str, card: &str) {
         .await
         .value();
     let dup_view_id = case.remember(&dup_view["view"], "id");
-    case.run(
-        "moveBoardView",
-        &[("boardId", board), ("viewId", dup_view_id.as_str())],
-        json!({"after": ""}),
-    )
-    .await;
+    let of_copy = &[("boardId", board), ("viewId", dup_view_id.as_str())];
+    case.run("moveBoardView", of_copy, json!({"after": ""}))
+        .await;
+    case.run("deleteBoardView", of_copy, json!({})).await;
+    case.run("restoreBoardView", of_copy, json!({})).await;
     case.run("moveViewCards", of_view, json!({"cardIds": [card]}))
         .await;
     let dup_card = case
@@ -672,7 +670,23 @@ async fn card_comments(case: &mut Case, board: &str, card: &str) {
         .await
         .value();
     let comment = case.remember(&made, "id");
+    // Answered with an emoji, the card and the comment are read with who answered: the
+    // founder alone.
+    let reacted_to = |block| {
+        [
+            ("containerId", board),
+            ("blockId", block),
+            ("emoji", THUMBS_UP),
+        ]
+    };
+    for block in [card, comment.as_str()] {
+        case.run("addReaction", &reacted_to(block), json!({})).await;
+    }
     case.present("getCardComments", of_card, &comment).await;
+    for block in [card, comment.as_str()] {
+        case.run("removeReaction", &reacted_to(block), json!({}))
+            .await;
+    }
     let of_comment = &[
         ("boardId", board),
         ("cardId", card),
@@ -733,6 +747,15 @@ async fn categories(case: &mut Case, board: &str) {
         .value();
     assert_eq!(reordered, json!(order), "categories are reordered");
     case.run("deleteCategory", at, json!({})).await;
+}
+
+/// The founder's stars: one put on the board, listed, put in order and taken off.
+async fn stars(case: &mut Case, board: &str) {
+    let at = &[("targetId", board)];
+    case.run("putFavorite", at, json!({})).await;
+    case.present("getFavorites", &[], board).await;
+    case.run("reorderFavorites", &[], json!([board])).await;
+    case.run("deleteFavorite", at, json!({})).await;
 }
 
 async fn people(case: &mut Case, board: &str) -> String {
@@ -914,22 +937,6 @@ async fn subscriptions(case: &mut Case, card: &str) {
         "deleteSubscription",
         &[("userId", &user), ("blockId", card)],
         json!({}),
-    )
-    .await;
-}
-
-async fn bulk(case: &mut Case) {
-    let made = case.run("createContainersAndBlocks", &[], json!({
-        "containers": [{"id": "board-reference", "title": "Bulk board", "visibility": "private", "workspaceId": case.workspace}],
-        "blocks": [{"id": "card-reference", "containerId": "board-reference", "title": "Bulk card", "type": "card", "createdAt": 1, "updatedAt": 1}]
-    })).await.value();
-    let board = case.remember(&made["containers"][0], "id");
-    let card = case.remember(&made["blocks"][0], "id");
-    case.run("patchContainersAndBlocks", &[], json!({"containerIds": [board], "containerPatches": [{"title": "Bulk changed"}], "blockIds": [card], "blockPatches": [{"title": "Bulk card changed"}]})).await;
-    case.run(
-        "deleteContainersAndBlocks",
-        &[],
-        json!({"containers": [board], "blocks": [card]}),
     )
     .await;
 }

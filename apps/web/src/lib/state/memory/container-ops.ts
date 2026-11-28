@@ -30,13 +30,13 @@ import { settingsOf } from './account.ts';
 import { archiveOf, exportableContainers, readImportFile, summarizeImport } from './archive.ts';
 import { checkArchiveCards } from './card-hierarchy.ts';
 import { fileAsNew } from './categories.ts';
-import { memberRole } from './container-access.ts';
+import { memberRole, reads } from './container-access.ts';
 import { copiedBlocks, copyTitle, insertCopy } from './copies.ts';
 import { purgeMemberExamScores } from './course-exams.ts';
 import { checkDiariesComing } from './diary-places.ts';
 import { fail } from './refuse.ts';
 import { welcomeTemplate } from './seed-templates.ts';
-import { copy, inPropertyOrder, memberOf, viewOf, wireOf } from './shapes.ts';
+import { copy, inPropertyOrder, memberOf, scramble, viewOf, wireOf } from './shapes.ts';
 import * as spaces from './spaces.ts';
 import { deletion, placesOf, takeContainerBack } from './trash.ts';
 import type { StoredBlock, World } from './world.ts';
@@ -89,6 +89,21 @@ export function newStoredBlock(
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** The boards of the workspace the reader reads, templates and other kinds left out. */
+export function boardsOfMemoryWorkspace(
+  ctx: MemoryContainerContext,
+  workspaceId: string,
+): Container[] {
+  const mine = [...ctx.world.containers.values()].filter(
+    (b) =>
+      b.workspaceId === workspaceId &&
+      !b.isTemplate &&
+      (b.kind ?? 'board') === 'board' &&
+      reads(ctx.world, ctx.userId, b.id),
+  );
+  return scramble(mine).map(copy);
 }
 
 export function createMemoryBoard(
@@ -389,6 +404,18 @@ export function setMemoryMemberRole(
   keepAnAdmin(next);
   setMembers(ctx.world, id, next);
   return copy(member);
+}
+
+/** The members of a shared container, in no order. */
+export function memoryMembers(ctx: MemoryContainerContext, id: string): ContainerMember[] {
+  containerInWorld(ctx.world, id, 'shared');
+  return scramble(ctx.world.members.get(id) ?? []).map(copy);
+}
+
+/** The public link of a shared container: off, without a token, until it is set. */
+export function memoryPublicLink(ctx: MemoryContainerContext, id: string): PublicLink {
+  containerInWorld(ctx.world, id, 'shared');
+  return copy(ctx.world.publicLinks.get(id) ?? { enabled: false, token: '' });
 }
 
 export function removeMemoryMember(ctx: MemoryContainerContext, id: string, userId: string): void {

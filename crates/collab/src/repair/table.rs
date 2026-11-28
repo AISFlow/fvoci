@@ -171,6 +171,8 @@ pub(super) fn summarize_mended_table(
         json_bytes: table_json_bytes,
         is_empty_paragraph: false,
         file_ids: dedup_strings(file_ids),
+        // A cell holds no board view: one in a cell fails it, and the cell goes.
+        board_views: 0,
     }))
 }
 

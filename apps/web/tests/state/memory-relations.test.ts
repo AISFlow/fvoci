@@ -108,7 +108,7 @@ describe('a relation value written', () => {
   it('may name a card in the trash, and keeps naming it with kind and lagDays', async () => {
     const { backend, boardId, card } = await relatedBoard();
     const [first, deleted, third] = [await card('First'), await card('Gone'), await card('Third')];
-    await backend.deleteBlock(boardId, deleted);
+    await backend.batchDeleteCards(boardId, [deleted]);
     await backend.patchCard(boardId, first, {
       updatedProperties: { [RELATION]: [relationLink(deleted, 'ss', -2)] },
     });
@@ -137,7 +137,7 @@ describe('a copy of a board', () => {
         [RELATION]: [relationLink(first, 'sf', -4), relationLink(deleted, 'ss', 2)],
       },
     });
-    await backend.deleteBlock(boardId, deleted);
+    await backend.batchDeleteCards(boardId, [deleted]);
 
     const copy = await backend.duplicateContainer(boardId, false, workspaceId);
     const cards = await backend.cards(copy.id);

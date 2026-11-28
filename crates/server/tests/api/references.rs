@@ -11,7 +11,7 @@ use fvoci_model::{
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
-use crate::blocks::{block_path, undelete_path};
+use crate::blocks::{insert, restore_card, trash_card};
 use crate::common::{
     ApiResponse, Client, ROOT_WS, Setup, TEST_WORKSPACE_ID, TEST_WS, TestServer, UNKNOWN_ID,
 };
@@ -154,24 +154,17 @@ async fn a_reference_names_a_card_or_a_page_to_who_reads_it() {
     );
     assert_eq!(resolved(&th.client, TEST_WS, &[]).await.text(), "[]");
 
-    // A comment, a view and the board itself are no card and no page.
-    let others = [BlockType::Comment, BlockType::View].map(|block_type| Block {
+    // A comment and the board itself are no card, no page and no view (what a view is
+    // told as is board_view_bodies.rs's).
+    let others = [Block {
         container_id: mine.board.clone(),
-        parent_id: if block_type == BlockType::Comment {
-            mine.card.clone()
-        } else {
-            String::new()
-        },
-        block_type,
+        parent_id: mine.card.clone(),
+        block_type: BlockType::Comment,
         title: "neither".to_owned(),
         ..Block::default()
-    });
-    let stored: Vec<Block> = th
-        .client
-        .insert_blocks(&mine.board, &others)
-        .await
-        .created_json();
-    let neither = [&stored[0].id, &stored[1].id, &mine.board, &mine.wiki];
+    }];
+    let stored = insert(&th.client, &mine.board, &others).await;
+    let neither = [&stored[0].id, &mine.board, &mine.wiki];
     let neither: Vec<&str> = neither.iter().map(|id| id.as_str()).collect();
     check_as_nothing(&th.client, TEST_WS, &neither, &mine.card, "neither").await;
 
@@ -207,8 +200,7 @@ async fn a_reference_names_a_card_or_a_page_to_who_reads_it() {
 async fn what_is_in_the_trash_is_resolved_as_nothing() {
     let th = Setup::native().start().await.init_basic().await;
     let mine = made(&th.client, TEST_WS, "private", "The plan").await;
-    th.client
-        .delete(&block_path(&mine.board, &mine.card))
+    trash_card(&th.client, &mine.board, &mine.card)
         .await
         .check_no_content();
     check_as_nothing(
@@ -219,8 +211,7 @@ async fn what_is_in_the_trash_is_resolved_as_nothing() {
         "in the trash",
     )
     .await;
-    th.client
-        .post_empty(&undelete_path(&mine.board, &mine.card))
+    restore_card(&th.client, &mine.board, &mine.card)
         .await
         .check_ok();
     assert_eq!(
@@ -459,7 +450,7 @@ async fn what_is_of_another_organization_is_resolved_as_nothing() {
         .create_page(&wiki.id, &new_page, PageLimits::default(), &owner)
         .await
         .expect("their page is stored")
-        .page;
+        .first;
 
     let their_ids = [card.id.as_str(), page.id.as_str(), their_board.as_str()];
     check_as_nothing(&th.client, TEST_WS, &their_ids, &here.card, "another's").await;

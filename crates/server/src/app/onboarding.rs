@@ -11,7 +11,6 @@ use fvoci_model::{
     renew_containers_and_blocks_ids,
 };
 
-use super::App;
 use super::accept_language::Reader;
 use super::board_ops::remap_copied_block_files;
 use super::container_copies::{Stored, titles_in};
@@ -19,6 +18,7 @@ use super::language::Language;
 use super::templates::{
     changes_of_copy, is_onboarding_template, is_personal_onboarding_template, written_in,
 };
+use super::{App, Changes};
 use crate::error::AppError;
 use crate::metrics::{ContainerWork, Module};
 
@@ -298,21 +298,10 @@ impl App {
         self.metrics()
             .container_copied(ContainerWork::Welcome, Module::Board);
 
-        let app = self.clone();
-        let ws_id = workspace_id.to_owned();
-        self.spawn_background(async move {
-            for container in &copies.containers {
-                app.ws().broadcast_container_change(&ws_id, container).await;
-            }
-            for block in &copies.blocks {
-                app.ws().broadcast_block_change(&ws_id, block).await;
-            }
-            for member in &members {
-                app.ws()
-                    .broadcast_member_change(&ws_id, &member.container_id, member)
-                    .await;
-            }
-        });
+        let changes = Changes::in_workspace(workspace_id)
+            .made(copies.containers, members)
+            .copied(copies.blocks);
+        self.tell(changes);
     }
 
     /// Gives somebody who came into the workspace as a member their welcome board, a

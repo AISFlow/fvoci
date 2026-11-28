@@ -16,12 +16,14 @@
 <script lang="ts">
   import { untrack } from 'svelte';
 
-  import { isComposing, primaryModifier } from '$lib/keys.ts';
+  import { isComposing, isLetterKey, primaryModifier } from '$lib/keys.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import type { CalculationOption } from '$lib/logic/properties.ts';
   import { TITLE_COLUMN_ID } from '$lib/logic/wire.ts';
   import { Button } from '$lib/ui/button/index.js';
 
+  import BulkBar from '../BulkBar.svelte';
+  import { BULK_ROOM, cardAfter } from '../bulk-bar.ts';
   import type { ViewProps } from '../props.ts';
 
   import CalculationCell from './CalculationCell.svelte';
@@ -46,7 +48,8 @@
       onOpenCard(cardId);
     },
   });
-  const { editing, grid, keeper, rows, columnSort, host } = table;
+  const { editing, grid, keeper, rows, columnSort, host, selection } = table;
+  const selecting = $derived(selection.ids.length > 0 || selection.selecting);
 
   const rowDrag = $derived(rows.active);
   const columnDrag = $derived(columnSort.active);
@@ -64,7 +67,7 @@
       : gridTemplate(table.headerColumns.map((column) => column.width)),
   );
 
-  // Another view starts at its top left corner, with nothing being edited.
+  // Another view starts at its top left corner, with nothing being edited or selected.
   $effect(() => {
     // Read the identifier: that is what makes this run again for another view.
     const shown = view.id;
@@ -73,6 +76,7 @@
       keeper.reset();
       editing.stop();
       table.resetCollapsed();
+      selection.clear();
     });
   });
   // After the rows or the columns were drawn anew, one cell is still the Tab stop.
@@ -80,6 +84,22 @@
     grid.ensure(table.shownLists, table.headerColumns);
   });
   $effect(() => editing.watch());
+
+  /**
+   * The bar of the selection went: the focus goes to the first cell of a row
+   * it names, through the grid. Where its Delete left no row, to the cell that
+   * adds one, else to the headings.
+   */
+  function backToGrid(cardIds: readonly string[], deleted: boolean): void {
+    const scroller = table.scroller;
+    if (!scroller) return;
+    const rows = [...scroller.querySelectorAll<HTMLElement>('[data-card]')];
+    const cell =
+      cardAfter(rows, cardIds, deleted)?.querySelector<HTMLElement>('[data-cell]') ??
+      scroller.querySelector<HTMLElement>('[data-cell][data-kind="add"]') ??
+      scroller.querySelector<HTMLElement>('[data-cell][data-kind="header"]');
+    if (cell) grid.focus(cell);
+  }
 
   /** Enter on a cell does what a press on it does. */
   function activate(cell: HTMLElement): void {
@@ -117,6 +137,12 @@
       if (next && next !== cell) grid.focus(next);
     } else if (primary) {
       return;
+    } else if (isLetterKey(event, 'x') && table.canEdit) {
+      // X takes the row of the cell into the selection, or out of it, on any layout.
+      const cardId = cell.closest<HTMLElement>('[data-card]')?.dataset.card;
+      if (cardId === undefined) return;
+      event.preventDefault();
+      selection.toggle(cardId);
     } else if (event.key === 'Enter' || event.key === 'F2') {
       event.preventDefault();
       activate(cell);
@@ -164,8 +190,16 @@
   </div>
 {/snippet}
 
-<div class="relative h-full" data-testid="table-view">
-  <p id="{uid}-help" class="sr-only">{m.table_keys_help()}</p>
+<div
+  class="relative h-full"
+  data-testid="table-view"
+  style:--bulk-room={selection.ids.length > 0 ? BULK_ROOM : undefined}
+  {@attach selection.attach}
+>
+  <p id="{uid}-help" class="sr-only">
+    {m.table_keys_help()}
+    {#if table.canEdit}{m.table_keys_select_help()}{/if}
+  </p>
   <!-- svelte-ignore a11y_interactive_supports_focus (the cells of a grid take the focus, not the grid) -->
   <div
     bind:this={table.scroller}
@@ -173,6 +207,7 @@
     aria-label={view.title || m['Sidebar.untitled-view']()}
     aria-describedby="{uid}-help"
     aria-readonly={table.canEdit ? undefined : 'true'}
+    aria-multiselectable={table.canEdit ? 'true' : undefined}
     data-testid="table"
     data-scrolled={table.sideways ? '' : undefined}
     data-drag-scroll={columnDrag ? 'x' : 'y'}
@@ -269,6 +304,8 @@
               hasChildren={entry.hasChildren}
               collapsed={entry.collapsed}
               showIndent={table.hasHierarchy}
+              selected={selection.has(card.id)}
+              {selecting}
             />
           {/each}
           {#if !list.collapsed && table.canAddTo(list)}
@@ -300,6 +337,10 @@
           <div role="presentation" class="border-t bg-background"></div>
         </div>
       </div>
+      {#if selection.ids.length > 0}
+        <!-- Room to scroll the last rows out from under the bar of the selection. -->
+        <div role="presentation" class="h-[calc(var(--fab-room,0px)+var(--bulk-room,0px))]"></div>
+      {/if}
     </div>
   </div>
 
@@ -315,6 +356,9 @@
     {columnSort.announcement}
   </div>
   <div class="sr-only" role="status" data-testid="table-status">{table.said}</div>
+  {#if selection.ids.length > 0 && table.canEdit}
+    <BulkBar {board} {view} {selection} onLeave={backToGrid} />
+  {/if}
 </div>
 
 {#if notice}

@@ -10,29 +10,22 @@
 //! back the database transaction so nothing is left behind.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use fvoci_model::{
     Block, BlockType, Container, ContainerKind, ContainersAndBlocks, ContainersAndBlocksError,
     FileRecord, WorkspaceRole, renew_containers_and_blocks_ids,
 };
-use tokio::fs;
 
 use super::bundle::{BundleEntry, SafeBundle};
+use super::files::StagedFiles;
 use super::summary::{BundleLimits, ImportCounts, ImportSummary};
 use super::{ImportOptions, clear_values_of_another_kind, drop_orphans, places};
 use crate::app::App;
-use crate::app::container_copies::counted_as;
-use crate::app::doomed::Doomed;
 use crate::app::file_name::check_file_name;
 use crate::app::files::{FilePlace, file_record, stored_extension};
-use crate::app::loose_objects::WrittenPlace;
 use crate::auth::now_millis;
-use crate::auth::secret::new_secret;
-use crate::collab::AccessScope;
 use crate::error::{AppError, Reason};
-use crate::metrics::ContainerWork;
-use fvoci_store::StoreError;
+use fvoci_store::{NewContainers, StoreError};
 
 /// A staged file belonging to a [`StagedContainer`], referencing a validated bundle entry.
 #[derive(Debug, Clone)]
@@ -137,7 +130,7 @@ impl App {
         });
         self.check_org_storage_room(total_new_bytes).await?;
 
-        let written_places = self
+        let staged_files = self
             .write_staged_files(bundle, &prepared_files, limits.max_file_bytes)
             .await?;
 
@@ -147,55 +140,28 @@ impl App {
             .collect();
         let commit_result = self
             .store()
-            .create_imported_containers_blocks_and_files(
-                &mut combined,
-                &records,
+            .create_containers(
+                NewContainers::whole(&mut combined).recording(&records),
                 &options.modified_by,
             )
-            .await;
+            .await
+            .map_err(StoreError::from);
 
         let members = match commit_result {
             Ok(members) => {
-                for place in written_places {
-                    place.settled_in_transaction();
-                }
+                staged_files.settle().await;
                 members
             }
             Err(error) => {
-                for place in written_places {
-                    place.give_up().await;
-                }
+                staged_files.give_up().await;
                 return Err(AppError::from(error).context("error committing staged import"));
             }
         };
 
-        if !combined.containers.is_empty() {
-            let made = combined.containers.iter().map(|container| &container.id);
-            self.collab()
-                .recheck_access(self, AccessScope::containers(made))
-                .await;
-        }
+        self.recheck_made(&combined.containers).await;
         self.announce_created(&combined, &members).await;
-
-        for container in &combined.containers {
-            if !container.is_template
-                && let Err(error) = self
-                    .add_containers_to_default_category(
-                        &options.modified_by,
-                        &container.workspace_id,
-                        std::slice::from_ref(&container.id),
-                    )
-                    .await
-            {
-                tracing::warn!(
-                    container_id = %container.id,
-                    %error,
-                    "failed to add imported container to default sidebar category after commit"
-                );
-            }
-            self.metrics()
-                .container_copied(ContainerWork::Import, counted_as(container.kind));
-        }
+        self.file_and_count_imported(&combined.containers, &members)
+            .await;
 
         summary.imported = count_imported(&combined, records.len());
         summary.container_ids = combined
@@ -207,84 +173,53 @@ impl App {
     }
 
     /// Streams every prepared file from `bundle` to `FileBackend` under `writing` marks.
-    /// Cleans up every marked object on the first failure.
+    /// Gives up every file written on the first failure.
     async fn write_staged_files(
         &self,
         bundle: Option<&SafeBundle>,
         files: &[PreparedFile],
         max_file_bytes: u64,
-    ) -> Result<Vec<WrittenPlace>, AppError> {
+    ) -> Result<StagedFiles, AppError> {
+        let mut staged = StagedFiles::begin(self);
         if files.is_empty() {
-            return Ok(Vec::new());
+            return Ok(staged);
         }
         let Some(bundle) = bundle else {
             return Err(AppError::internal(
                 "staged import declared files without a source bundle",
             ));
         };
-        let work_dir = self
-            .config()
-            .tmp_dir()
-            .join(format!("import-stage-{}", new_secret()));
-        fs::create_dir_all(&work_dir).await.map_err(|error| {
-            AppError::internal(format_args!("cannot create staging directory: {error}"))
-        })?;
-        let doomed_dir = Doomed::directory(work_dir);
-        let temp_file = doomed_dir.path().join("entry");
-
-        let mut written_places: Vec<WrittenPlace> = Vec::with_capacity(files.len());
         for prepared in files {
-            match self
-                .write_one_staged_file(bundle, prepared, max_file_bytes, &temp_file)
-                .await
+            if let Err(error) =
+                write_one_staged_file(&mut staged, bundle, prepared, max_file_bytes).await
             {
-                Ok(written) => written_places.push(written),
-                Err(error) => {
-                    for place in written_places {
-                        place.give_up().await;
-                    }
-                    doomed_dir.remove().await;
-                    return Err(error);
-                }
+                staged.give_up().await;
+                return Err(error);
             }
         }
-        doomed_dir.remove().await;
-        Ok(written_places)
+        Ok(staged)
     }
+}
 
-    async fn write_one_staged_file(
-        &self,
-        bundle: &SafeBundle,
-        prepared: &PreparedFile,
-        max_file_bytes: u64,
-        temp_file: &Path,
-    ) -> Result<WrittenPlace, AppError> {
-        let written_bytes = bundle
-            .unpack_to_file(&prepared.entry, max_file_bytes, temp_file)
-            .await?;
-        if written_bytes > max_file_bytes {
-            return Err(AppError::too_large(
-                format_args!("staged file exceeds {max_file_bytes} bytes"),
-                max_file_bytes,
-            )
-            .with_reason(Reason::ArchiveEntryTooLarge));
-        }
-        let marked = self.mark_place(&prepared.record.path).await?;
-        let mut reader = match fs::File::open(temp_file).await {
-            Ok(file) => file,
-            Err(error) => {
-                marked.give_up_unused().await;
-                return Err(AppError::internal(format_args!(
-                    "cannot open staged file: {error}"
-                )));
-            }
-        };
-        let written = marked.write(&mut reader).await;
-        let _ = fs::remove_file(temp_file).await;
-        written.map_err(|error| {
-            AppError::internal(format_args!("unable to store imported file: {error}"))
-        })
+async fn write_one_staged_file(
+    staged: &mut StagedFiles,
+    bundle: &SafeBundle,
+    prepared: &PreparedFile,
+    max_file_bytes: u64,
+) -> Result<(), AppError> {
+    let unpacked = staged.unpacked().await?;
+    let written_bytes = bundle
+        .unpack_to_file(&prepared.entry, max_file_bytes, &unpacked)
+        .await?;
+    if written_bytes > max_file_bytes {
+        return Err(AppError::too_large(
+            format_args!("staged file exceeds {max_file_bytes} bytes"),
+            max_file_bytes,
+        )
+        .with_reason(Reason::ArchiveEntryTooLarge));
     }
+    staged.store(&prepared.record.path).await?;
+    Ok(())
 }
 
 /// Runs [`prepare_staged_for_commit`] off the async runtime so validating and renewing IDs

@@ -186,9 +186,9 @@
             }}
             disabled={working}
           />
-          <Button type="submit" size="sm" disabled={working || !name.trim()}
-            >{m.groups_create()}</Button
-          >
+          <Button type="submit" size="sm" disabled={working || !name.trim()}>
+            {m.groups_create()}
+          </Button>
         </form>
       {/if}
       {#if loaded && groups.length === 0}<p class="text-sm text-muted-foreground">

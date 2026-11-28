@@ -58,45 +58,73 @@
     }
   },
   {
-    "name": "insert content",
-    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as arch-alice",
+    "name": "insert a comment",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards/<id:4>/comments as arch-alice",
     "status": 201,
     "content_type": "application/json",
-    "body": [
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {},
-        "id": "<id:5>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:4>",
-        "title": "Exported text",
-        "type": "comment",
-        "updatedAt": "<ts>"
+    "body": {
+      "body": {
+        "content": [
+          {
+            "content": [
+              {
+                "text": "Exported text",
+                "type": "text"
+              }
+            ],
+            "type": "paragraph"
+          }
+        ],
+        "type": "doc"
       },
-      {
+      "containerId": "<id:3>",
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "fields": {},
+      "id": "<id:5>",
+      "modifiedBy": "<id:2>",
+      "parentId": "<id:4>",
+      "title": "",
+      "type": "comment",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "insert an attachment",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards/<id:4>/attachments as arch-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "body": null,
+      "containerId": "<id:3>",
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "fields": {
+        "fileId": "<secret:1>.png",
+        "size": 67
+      },
+      "id": "<id:6>",
+      "modifiedBy": "<id:2>",
+      "parentId": "<id:4>",
+      "title": "pixel.png",
+      "type": "attachment",
+      "updatedAt": "<ts>"
+    }
+  },
+  {
+    "name": "insert a view",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/views as arch-alice",
+    "status": 201,
+    "content_type": "application/json",
+    "body": {
+      "companionViews": [],
+      "view": {
         "body": null,
         "containerId": "<id:3>",
         "createdAt": "<ts>",
         "createdBy": "<id:2>",
         "fields": {
-          "fileId": "<secret:1>.png"
-        },
-        "id": "<id:6>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:4>",
-        "title": "",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {
+          "order": "V",
           "viewType": "table"
         },
         "id": "<id:7>",
@@ -106,7 +134,7 @@
         "type": "view",
         "updatedAt": "<ts>"
       }
-    ]
+    }
   },
   {
     "name": "export status and type",
@@ -179,7 +207,20 @@
         },
         {
           "data": {
-            "body": null,
+            "body": {
+              "content": [
+                {
+                  "content": [
+                    {
+                      "text": "Exported text",
+                      "type": "text"
+                    }
+                  ],
+                  "type": "paragraph"
+                }
+              ],
+              "type": "doc"
+            },
             "containerId": "<id:3>",
             "createdAt": "<ts>",
             "createdBy": "<id:2>",
@@ -187,7 +228,7 @@
             "id": "<id:5>",
             "modifiedBy": "<id:2>",
             "parentId": "<id:4>",
-            "title": "Exported text",
+            "title": "",
             "type": "comment",
             "updatedAt": "<ts>"
           },
@@ -200,12 +241,13 @@
             "createdAt": "<ts>",
             "createdBy": "<id:2>",
             "fields": {
-              "fileId": "<secret:1>.png"
+              "fileId": "<secret:1>.png",
+              "size": 67
             },
             "id": "<id:6>",
             "modifiedBy": "<id:2>",
             "parentId": "<id:4>",
-            "title": "",
+            "title": "pixel.png",
             "type": "attachment",
             "updatedAt": "<ts>"
           },
@@ -218,6 +260,7 @@
             "createdAt": "<ts>",
             "createdBy": "<id:2>",
             "fields": {
+              "order": "V",
               "viewType": "table"
             },
             "id": "<id:7>",
@@ -509,8 +552,35 @@
     ]
   },
   {
-    "name": "imported blocks",
-    "request": "GET /api/v1/w/<id:1>/boards/<id:8>/blocks as arch-bob",
+    "name": "imported cards",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:8>/cards as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "boardId": "<id:8>",
+        "body": null,
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "hasBody": false,
+        "icon": "x",
+        "id": "<id:24>",
+        "isTemplate": false,
+        "lastCommentAt": "<ts>",
+        "modifiedBy": "<id:22>",
+        "number": 1,
+        "parentId": "",
+        "properties": {},
+        "tasksDone": 0,
+        "tasksTotal": 0,
+        "title": "Exported card",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "imported views",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:8>/views as arch-bob",
     "status": 200,
     "content_type": "application/json",
     "body": [
@@ -520,59 +590,48 @@
         "createdAt": "<ts>",
         "createdBy": "<id:22>",
         "fields": {
-          "icon": "x",
-          "isTemplate": false,
-          "properties": {}
-        },
-        "id": "<id:24>",
-        "modifiedBy": "<id:22>",
-        "number": 1,
-        "parentId": "",
-        "title": "Exported card",
-        "type": "card",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:8>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:22>",
-        "fields": {},
-        "id": "<id:25>",
-        "modifiedBy": "<id:22>",
-        "parentId": "<id:24>",
-        "title": "Exported text",
-        "type": "comment",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:8>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:22>",
-        "fields": {
-          "fileId": "<secret:2>.png"
-        },
-        "id": "<id:26>",
-        "modifiedBy": "<id:22>",
-        "parentId": "<id:24>",
-        "title": "",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      },
-      {
-        "body": null,
-        "containerId": "<id:8>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:22>",
-        "fields": {
+          "order": "V",
           "viewType": "table"
         },
-        "id": "<id:27>",
+        "id": "<id:25>",
         "modifiedBy": "<id:22>",
         "parentId": "",
         "title": "Exported view",
         "type": "view",
+        "updatedAt": "<ts>"
+      }
+    ]
+  },
+  {
+    "name": "imported comments",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:8>/cards/<id:24>/comments as arch-bob",
+    "status": 200,
+    "content_type": "application/json",
+    "body": [
+      {
+        "body": {
+          "content": [
+            {
+              "content": [
+                {
+                  "text": "Exported text",
+                  "type": "text"
+                }
+              ],
+              "type": "paragraph"
+            }
+          ],
+          "type": "doc"
+        },
+        "containerId": "<id:8>",
+        "createdAt": "<ts>",
+        "createdBy": "<id:22>",
+        "fields": {},
+        "id": "<id:26>",
+        "modifiedBy": "<id:22>",
+        "parentId": "<id:24>",
+        "title": "",
+        "type": "comment",
         "updatedAt": "<ts>"
       }
     ]

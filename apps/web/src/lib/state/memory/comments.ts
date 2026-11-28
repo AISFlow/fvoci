@@ -1,7 +1,8 @@
 /**
  * The memory backend's comments as the server has them: who may change or
- * delete one (`patchBlock` and `deleteBlock` in `contracts/openapi.json`),
- * and the texts kept of one that was changed (`getCommentVersions`).
+ * delete one (`patchCardComment` and `deleteCardComment` in
+ * `contracts/openapi.json`), and the texts kept of one that was changed
+ * (`getCardCommentVersions`).
  */
 import type { DocNode } from '../../editor/schema.ts';
 import type { ContainerMember } from '../../logic/wire.ts';

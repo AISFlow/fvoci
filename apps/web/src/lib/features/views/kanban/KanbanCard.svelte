@@ -16,7 +16,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
 
-  import { primaryModifier } from '$lib/keys.ts';
   import CardPresence from '../CardPresence.svelte';
   import CardFace from '$lib/components/card-face/CardFace.svelte';
   import { m } from '$lib/i18n/paraglide/messages.js';
@@ -25,7 +24,9 @@
 
   import { badgesOf, type FaceContext } from './board-data.ts';
   import CardMenu from './CardMenu.svelte';
-  import { CARD_MENU_BUTTON, type Activation, type MoveTarget } from './kanban.ts';
+  import { activationOf, type Activation } from '../selection.svelte.ts';
+
+  import { CARD_MENU_BUTTON, type MoveTarget } from './kanban.ts';
 
   interface Props {
     board: BoardStore;
@@ -94,11 +95,8 @@
   }
 
   function activate(event: MouseEvent | KeyboardEvent): void {
-    // The other platform's modifier is no command on a card, as in the table.
-    if ((event.ctrlKey || event.metaKey) && !primaryModifier(event)) return;
-    if (primaryModifier(event)) onActivate(card.id, 'toggle');
-    else if (event.shiftKey) onActivate(card.id, 'range');
-    else onActivate(card.id, 'open');
+    const how = activationOf(event);
+    if (how) onActivate(card.id, how);
   }
 
   function onClick(event: MouseEvent): void {

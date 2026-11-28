@@ -17,7 +17,26 @@ export interface WorkspaceExample {
   cycle?: boolean;
   late?: boolean;
   variedRelations?: boolean;
+  /** The board has an owner, a rule of done and a due date: every quick filter is offered. */
+  quick?: boolean;
+  /** The view's filter has a group, a date within a period and whether a card is done. */
+  filtered?: boolean;
 }
+
+/** Not done, and due this week or titled with a "1". */
+const GROUPED_FILTER: NonNullable<BoardView['fields']['filter']> = {
+  operation: 'and',
+  filters: [
+    { propertyId: 'done', condition: 'isNotSet', values: [] },
+    {
+      operation: 'or',
+      filters: [
+        { propertyId: 'due', condition: 'isWithin', values: ['thisWeek'] },
+        { propertyId: 'title', condition: 'contains', values: ['1'] },
+      ],
+    },
+  ],
+};
 
 export function exampleWorkspace({
   count = 8,
@@ -27,6 +46,8 @@ export function exampleWorkspace({
   cycle = false,
   late = false,
   variedRelations = false,
+  quick = false,
+  filtered = false,
 }: WorkspaceExample = {}) {
   const world = new World(() => STORY_NOW);
   world.workspace = {
@@ -77,7 +98,16 @@ export function exampleWorkspace({
           { id: 'done', label: 'Done · 완료', color: 'green' },
         ],
       },
+      ...(quick
+        ? [{ id: 'owner', name: 'Owner · 담당자', type: 'person' as const, options: [] }]
+        : []),
     ],
+    ...(quick
+      ? {
+          doneWhen: { kind: 'option', propertyId: 'status', optionIds: ['done'] },
+          dueDatePropertyId: 'due',
+        }
+      : {}),
     createdAt: STORY_NOW,
     updatedAt: STORY_NOW,
   };
@@ -99,6 +129,7 @@ export function exampleWorkspace({
       visibleGroups: ['todo', 'done', ''],
       hiddenGroups: [],
       cardOrder: Array.from({ length: count }, (_, index) => `example-card-${index + 1}`),
+      ...(filtered ? { filter: GROUPED_FILTER } : {}),
     },
   });
   world.blocks.set(view.id, view);

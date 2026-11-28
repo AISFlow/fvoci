@@ -89,8 +89,10 @@
         type="submit"
         variant="outline"
         disabled={working}
-        class="justify-self-start roomy:min-h-touch">{m.mail_send()}</Button
+        class="justify-self-start roomy:min-h-touch"
       >
+        {m.mail_send()}
+      </Button>
     </form>
   {/if}
 {/await}

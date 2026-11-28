@@ -1,0 +1,32 @@
+/*
+ * The place of a board view in a body (board-view.ts): a frame as wide as
+ * the body, which never makes the page wider (what the view draws scrolls
+ * within it), and one line where the view cannot be seen. In the editor the
+ * frame is the block's: it is outlined when the block is selected.
+ */
+.doc-body .doc-board-view {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--doc-surface, var(--background));
+}
+.doc-body .doc-board-view.ProseMirror-selectednode {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+/* In the editor the frame is pressed and dragged by its edge: what the view draws is its own. */
+.ProseMirror .doc-board-view {
+  padding: 0.25rem;
+  cursor: grab;
+}
+.ProseMirror .doc-board-view-place {
+  cursor: auto;
+}
+.doc-body .doc-board-view-unseen {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}

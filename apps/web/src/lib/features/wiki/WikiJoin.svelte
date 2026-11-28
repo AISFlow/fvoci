@@ -51,6 +51,8 @@
     aria-busy={joining}
     onclick={() => {
       if (!joining) onJoin();
-    }}>{buttonLabel}</Button
+    }}
   >
+    {buttonLabel}
+  </Button>
 </div>

@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fvoci_model::DuplicateAs;
 use fvoci_model::{
     BLOCK_FIELDS_MAX_CHARS, BLOCK_TITLE_MAX_CHARS, BODY_VERSION, Block, BlockError, BlockPatch,
     BlockPatchBatch, BlockType, Body, BodyChange, ContainersAndBlocksError, FileRecord, JsonMap,
@@ -1270,93 +1269,6 @@ async fn get_block() {
         assert_no_block(store, missing).await;
     }
 
-    test.teardown().await;
-}
-
-/// Duplicating a block.
-#[tokio::test]
-async fn duplicate_block() {
-    let test = common::setup().await;
-    let store = &test.store;
-    let Fixture {
-        user_id,
-        workspace_id,
-        board_id,
-    } = fixture(store).await;
-    let board_id = board_id.as_str();
-    let user_id = user_id.as_str();
-    let [user1] = users(store).await;
-
-    let specs = [
-        &SUBTREE_SAMPLE[..],
-        &[
-            ("grandchild1a", "child1", "comment"),
-            ("grandchild2a", "child2", "comment"),
-        ],
-    ]
-    .concat();
-    let mut blocks_to_insert = named_blocks(board_id, &specs);
-    common::insert_blocks(store, &mut blocks_to_insert, &user1).await;
-    let child1_id = id_of(&blocks_to_insert, "child1");
-
-    // "duplicate existing block as no template"
-    let blocks = store
-        .duplicate_block(board_id, child1_id, user_id, DuplicateAs::Copy)
-        .await
-        .expect("an existing block is duplicated");
-    assert_eq!(
-        blocks.len(),
-        2,
-        "the block and its child that is not a comment: {blocks:?}"
-    );
-    assert_eq!(
-        blocks[0].fields.get("isTemplate"),
-        Some(&json!(false)),
-        "a copy is not a template"
-    );
-
-    // "duplicate existing block as template"
-    let blocks = store
-        .duplicate_block(board_id, child1_id, user_id, DuplicateAs::Template)
-        .await
-        .expect("an existing block is duplicated as a template");
-    assert_eq!(
-        blocks.len(),
-        2,
-        "the block and its child that is not a comment: {blocks:?}"
-    );
-    assert_eq!(
-        blocks[0].fields.get("isTemplate"),
-        Some(&json!(true)),
-        "a template copy is a template"
-    );
-
-    // "duplicate not existing block"
-    let error = store
-        .duplicate_block(board_id, &new_id(), user_id, DuplicateAs::Copy)
-        .await
-        .expect_err("a missing block cannot be duplicated");
-    assert_not_found(&error);
-
-    // "duplicate not existing board"
-    let error = store
-        .duplicate_block(&new_id(), &new_id(), user_id, DuplicateAs::Copy)
-        .await
-        .expect_err("a block of a missing board cannot be duplicated");
-    assert_not_found(&error);
-
-    // A board does not return blocks belonging to a different existing or missing board.
-    let other_board_id = another_board(store, &workspace_id, user_id).await;
-    for other in [other_board_id, new_id()] {
-        let error = store
-            .duplicate_block(&other, child1_id, user_id, DuplicateAs::Copy)
-            .await
-            .expect_err("a block cannot be duplicated through another board");
-        assert_not_found(&error);
-    }
-
-    // Delete the six sample blocks while leaving the comments.
-    common::delete_blocks(store, &blocks_to_insert[..SUBTREE_SAMPLE.len()], user_id).await;
     test.teardown().await;
 }
 

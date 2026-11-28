@@ -8,7 +8,7 @@
 use serde_json::json;
 
 use crate::common::ROOT_WORKSPACE_ID;
-use crate::fixtures::{add_member, block, id_of, merged, new_board, new_card};
+use crate::fixtures::{add_member, id_of, merged, new_board, new_card};
 use crate::harness::ROOT_API;
 use crate::harness::{API, Session};
 
@@ -294,13 +294,13 @@ pub(crate) async fn public_links(s: &mut Session) {
     .await;
     s.post(
         "insert with the read token",
-        &format!("{ROOT_API}/boards/{board}/blocks?readToken={token}"),
+        &format!("{ROOT_API}/boards/{board}/cards?readToken={token}"),
     )
-    .json(json!([block("x1", &board, "card", "x", "", json!({}))]))
+    .json(json!({"title": "x"}))
     .await;
     s.patch(
         "patch with the read token",
-        &format!("{ROOT_API}/boards/{board}/blocks/{card}?readToken={token}"),
+        &format!("{ROOT_API}/cards/{card}?readToken={token}"),
     )
     .json(json!({"title": "hijack"}))
     .await;

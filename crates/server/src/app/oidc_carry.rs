@@ -18,7 +18,7 @@ use std::time::Instant;
 use fvoci_store::{CarryOver, FlowPurpose, HeldSignIn, Identity, StoreError, StoredProvider};
 
 use super::App;
-use super::oidc::{Callback, Ending, FinishedLogin, LoginFailure, Start, StartedLogin, logged};
+use super::oidc::{Callback, Ending, FinishedLogin, LoginFailure, StartedLogin, logged};
 use crate::auth::limiter::RetryAfter;
 use crate::auth::now_millis;
 use crate::auth::oidc::provider::IdClaims;
@@ -115,7 +115,7 @@ impl App {
         &self,
         stored: &StoredProvider,
         held_hash: &str,
-    ) -> Result<Option<(StoredProvider, FlowPurpose)>, StoreError> {
+    ) -> Result<Option<StoredProvider>, StoreError> {
         let held = self
             .store()
             .oidc_held_sign_in(held_hash, now_millis())
@@ -124,13 +124,7 @@ impl App {
         if held.is_none() {
             return Ok(None);
         }
-        let purpose = FlowPurpose::CarryOver {
-            held_hash: held_hash.to_owned(),
-        };
-        Ok(self
-            .former_as_provider(stored)
-            .await?
-            .map(|former| (former, purpose)))
+        self.former_as_provider(stored).await
     }
 
     /// `stored`, the provider of the handle's organization, as a sign-in to carry over
@@ -169,10 +163,8 @@ impl App {
             return Err(carry_over_refused());
         }
         let held_hash = token_digest(held_secret);
-        let start = Start::CarryOver {
-            held_hash: &held_hash,
-        };
-        self.start_oidc_flow(org_id, address, start).await
+        let purpose = FlowPurpose::CarryOver { held_hash };
+        self.start_oidc_flow(org_id, address, purpose).await
     }
 
     /// Ends a sign-in through the former provider that was started to carry over, on

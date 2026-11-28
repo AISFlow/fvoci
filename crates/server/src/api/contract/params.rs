@@ -3,7 +3,7 @@
 //! The handlers read their parameters themselves; these types only say, in a handler's
 //! `params(...)`, which ones it reads.
 
-use fvoci_model::TimeEntryKind;
+use fvoci_model::{NotificationKind, TimeEntryKind};
 use utoipa::openapi::path::{Parameter, ParameterBuilder, ParameterIn};
 use utoipa::openapi::schema::{KnownFormat, ObjectBuilder, Schema, SchemaFormat, Type};
 use utoipa::openapi::{RefOr, Required};
@@ -73,8 +73,12 @@ parameter!(UnitVersionNumber: Path "version", i64, True, "The number of the vers
 parameter!(MonthDayOfYear: Path "monthDay", String, True, "A month and a day without a year, as `11-21`: two digits each. `02-29` is a day of its own, which only leap years have. 400 for anything else.");
 parameter!(EntryVersionNumber: Path "version", i64, True, "The number of the version of the entry's body, as `getDiaryEntryBodyVersions` lists it.");
 parameter!(BlockId: Path "blockId", String, True, "The identifier of the block.");
+parameter!(ReactedContainerId: Path "containerId", String, True, "The identifier of the board, the wiki or the course. A diary is 404, as an identifier of nothing is: its entries are its owner's alone.");
+parameter!(ReactedBlockId: Path "blockId", String, True, "The identifier of a comment, a card, a page or a unit of the container of the path. 404 for a block of another container, and for a block of any other type.");
+parameter!(ReactionEmoji: Path "emoji", String, True, "The emoji, percent-encoded as any text of a path is (`%F0%9F%91%8D` for 👍): one grapheme of at most 8 code points that has the shape of an emoji, as a pictograph with its variation selector and skin tone, joined to others by zero-width joiners, a flag or a keycap. 400 for any other text.");
 parameter!(CardId: Path "cardId", String, True, "The identifier of the card.");
 parameter!(ViewId: Path "viewId", String, True, "The identifier of the board view.");
+parameter!(AttachmentId: Path "attachmentId", String, True, "The identifier of the attachment: an attachment of the card of the path. 404 for an attachment of another card, and for a block that is no attachment.");
 parameter!(CardCommentId: Path "commentId", String, True, "The identifier of the comment: a comment on the card of the path. 404 for a comment on another card, and for a block that is no comment.");
 parameter!(WikiId: Path "wikiId", String, True, "The identifier of the wiki: a board of the `kind` `wiki`. A board of another kind is 404, as an identifier of nothing is.");
 parameter!(PageId: Path "pageId", String, True, "The identifier of the page: a page of the wiki of the path. 404 for a page of another wiki.");
@@ -90,6 +94,7 @@ parameter!(UserId: Path "userId", String, True, "The identifier of the user.");
 parameter!(ApiTokenId: Path "tokenId", String, True, "The identifier of the personal API token.");
 parameter!(InvitationId: Path "invitationId", String, True, "The identifier of the invitation, as making it and the list answer it. It is not the link's token.");
 parameter!(FileId: Path "fileId", String, True, "The identifier of the file, as the upload answered it. It is no UUID: an unguessable name that ends in the file's extension.");
+parameter!(FavoriteTargetId: Path "targetId", String, True, "The identifier of what the star is on: a board, a wiki or a course, or a card, a page or a unit of one. A diary and an entry of one are 404, as an identifier of nothing is.");
 parameter!(NotificationId: Path "notificationId", String, True, "The identifier of the notification: one of the user of the session.");
 parameter!(TimeEntryId: Path "entryId", String, True, "The identifier of the time entry: one of the user of the session.");
 parameter!(SubscribedUserId: Path "userId", String, True, "The identifier of the user: the user of the session.");
@@ -115,7 +120,7 @@ parameter!(OidcCode: Query "code", String, False, "The authorization code the pr
 parameter!(OidcError: Query "error", String, False, "The provider's code of why it did not let the person sign in.");
 parameter!(SharedReadToken: Query "readToken", String, True, "The read token of the board, as `getPublicLink` answers it while the board's public link is enabled.");
 parameter!(DisableNotify: Query "disableNotify", bool, False, "`true` keeps the change from being told to anybody: the people it newly mentions, or gives a card to, get no notification of it.");
-parameter!(BodyFormat: Query "format", String, False, "`markdown` gives the card's body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).");
+parameter!(BodyFormat: Query "format", String, False, "`markdown` gives the body in Markdown (`bodyMarkdown`, with `hasComplexBlocks` and `complexBlocks`) in place of `body`; `json`, or left out, gives `body`. Any other value is refused (400).");
 parameter!(CardText: Query "q", String, False, "Only the cards whose title holds this text, whatever the case of its letters; `#12` the card of that number.");
 parameter!(CardParent: Query "parentId", String, False, "`root` gives only the top-level cards, a card's identifier only the cards right below it.");
 parameter!(CardAssignee: Query "assigneeId", String, False, "Only the cards a property that gives them to people (`person`, `multiPerson`) gives to this user; `me` is the caller.");
@@ -131,11 +136,13 @@ parameter!(JoinedOnly: Query "joinedOnly", bool, False, "`true` gives only the c
 parameter!(Preview: Query "preview", bool, False, "`true` gives each card its `preview`. Any other value does not, and the cards have none.");
 parameter!(AsTemplate: Query "asTemplate", bool, False, "`true` makes the copy a template. Any other value does not.");
 parameter!(ToWorkspace: Query "toWorkspace", String, False, "The workspace the copy goes to: one the user works in. Left out, the workspace of the path.");
-parameter!(SourceBoardId: Query "sourceBoardId", String, False, "The board the blocks were copied from. The files the blocks refer to are copied from that board to this one, and the blocks point at the copies. Such blocks are copies: the people they name are told nothing of them.");
 parameter!(AllBlocks: Query "all", String, False, "Any value that is not empty asks for every block of the board, and the other parameters are not looked at.");
 parameter!(OneBlockId: Query "blockId", String, False, "Asks for the one block with this identifier, in a list of one. 404 if the board has no such block.");
 parameter!(ParentId: Query "parentId", String, False, "Narrows the list to the blocks below the block of this identifier.");
 parameter!(BlockTypeFilter: Query "type", String, False, "Narrows the list to the blocks of this type, written as the blocks have it.");
+parameter!(UnreadOnly: Query "unread", bool, False, "`true` lists only the notifications not read; `false`, or left out, every one. Anything else is 400.");
+parameter!(NotificationKindOnly: Query "kind", NotificationKind, False, "Lists only the notifications of this kind (`mention`, `assignment`, ...), and of them only those whose `subject` the user reads now: one that says nothing says no kind either, and a page may hold fewer than `perPage` while more follow. Left out, every kind. Anything else is 400.");
+parameter!(ArchivedOnly: Query "archived", bool, False, "`true` lists the notifications put away (`archiveNotification`) in place of those of the inbox; `false`, or left out, the inbox. Anything else is 400.");
 parameter!(ReadThrough: Query "through", i64, False, "The time, in milliseconds, up to which the notifications are read: those whose latest happened later (`updatedAt`) stay unread. Left out, now.");
 parameter!(Page: Query "page", u32, False, "The page, counted from 0. Left out, the first one. Below 0 or above 2147483647 is 400.");
 parameter!(PerPage: Query "perPage", PerPageCount, False, "How many a page has, from 1 to 1000. Left out, 50. Anything else is 400: a longer list is read page after page.");

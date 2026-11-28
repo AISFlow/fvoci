@@ -320,9 +320,7 @@ impl Run<'_> {
                 failed.len(),
                 chosen.len(),
                 failed.join(", "),
-                wrongly
-                    .map(|wrongly| format!("; and {wrongly}"))
-                    .unwrap_or_default()
+                wrongly.map_or_default(|wrongly| format!("; and {wrongly}"))
             ),
         }
     }

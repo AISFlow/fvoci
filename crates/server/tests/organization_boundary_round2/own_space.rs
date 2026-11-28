@@ -933,7 +933,7 @@ async fn make_space_changes(space: &Space) -> (String, String) {
     };
     space
         .app
-        .insert_block(&mut card, &space.owner_id, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut card, &space.owner_id, ChangeNotification::Suppress)
         .await
         .expect("the owner's change");
     assert!(
@@ -1055,8 +1055,12 @@ async fn write_in_the_diary(in_space: &App, space: &Space) {
         weather: format!("{SECRET} posted"),
         place: String::new(),
     };
+    let diary = in_space
+        .reach(&space.owner_id, &space.diary.id)
+        .await
+        .expect("the diary of the space");
     in_space
-        .create_diary_entry(&space.diary.id, day, written, &space.owner_id)
+        .create_diary_entry(&diary, day, written)
         .await
         .expect("an entry of the space");
     let mood = fvoci_model::DiaryEntryPatch {
@@ -1064,7 +1068,7 @@ async fn write_in_the_diary(in_space: &App, space: &Space) {
         ..fvoci_model::DiaryEntryPatch::default()
     };
     in_space
-        .patch_block(
+        .patch_block_unchecked(
             &space.entry.id,
             &mood.into_block_patch(),
             &space.owner_id,
@@ -1076,8 +1080,12 @@ async fn write_in_the_diary(in_space: &App, space: &Space) {
         title: format!("{SECRET} webhook unit"),
         ..fvoci_model::NewUnit::default()
     };
+    let course = in_space
+        .reach(&space.owner_id, &space.course.id)
+        .await
+        .expect("the course of the space");
     let created = in_space
-        .create_unit(&space.course.id, &new_unit, &space.owner_id)
+        .create_unit(&course, &new_unit)
         .await
         .expect("a unit of the space");
     let unit_patch = fvoci_model::BlockPatch {
@@ -1085,7 +1093,7 @@ async fn write_in_the_diary(in_space: &App, space: &Space) {
         ..fvoci_model::BlockPatch::default()
     };
     in_space
-        .patch_block(
+        .patch_block_unchecked(
             &created.id,
             &unit_patch,
             &space.owner_id,
@@ -1131,7 +1139,7 @@ async fn nothing_of_a_space_is_posted_to_the_operators_webhooks() {
         ..Block::default()
     };
     in_space
-        .insert_block(&mut secret, &space.owner_id, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut secret, &space.owner_id, ChangeNotification::Suppress)
         .await
         .expect("a card of the space");
     write_in_the_diary(&in_space, &space).await;
@@ -1140,7 +1148,7 @@ async fn nothing_of_a_space_is_posted_to_the_operators_webhooks() {
         ..fvoci_model::BlockPatch::default()
     };
     in_space
-        .patch_block(
+        .patch_block_unchecked(
             &secret.id,
             &patch,
             &space.owner_id,
@@ -1149,7 +1157,7 @@ async fn nothing_of_a_space_is_posted_to_the_operators_webhooks() {
         .await
         .expect("the card is changed");
     in_space
-        .delete_block(&secret.id, &space.owner_id, ChangeNotification::Suppress)
+        .delete_block_unchecked(&secret.id, &space.owner_id, ChangeNotification::Suppress)
         .await
         .expect("the card is deleted");
     assert!(in_space.finish_background(Duration::from_secs(5)).await);
@@ -1165,7 +1173,7 @@ async fn nothing_of_a_space_is_posted_to_the_operators_webhooks() {
         ..Block::default()
     };
     hooked
-        .insert_block(
+        .insert_block_unchecked(
             &mut open,
             &ts.client.me().await.id,
             ChangeNotification::Suppress,
@@ -1417,7 +1425,7 @@ async fn told_of_a_change(space: &Space, socket: &mut super::common::WebSocket) 
     };
     space
         .app
-        .insert_block(&mut card, &space.owner_id, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut card, &space.owner_id, ChangeNotification::Suppress)
         .await
         .expect("the owner's change");
     let mood = fvoci_model::DiaryEntryPatch {
@@ -1426,7 +1434,7 @@ async fn told_of_a_change(space: &Space, socket: &mut super::common::WebSocket) 
     };
     space
         .app
-        .patch_block(
+        .patch_block_unchecked(
             &space.entry.id,
             &mood.into_block_patch(),
             &space.owner_id,

@@ -38,8 +38,7 @@ pub(super) fn profile(trial: &Trial) -> Result<()> {
     );
     let networks: Vec<&String> = service["networks"]
         .as_object()
-        .map(|networks| networks.keys().collect())
-        .unwrap_or_default();
+        .map_or_default(|networks| networks.keys().collect());
     ensure!(
         networks == ["edge"],
         "cloudflared is on {networks:?}, not on edge alone"

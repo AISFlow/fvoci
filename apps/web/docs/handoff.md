@@ -30,11 +30,11 @@
 ## 도구
 
 - Node는 시스템의 것을 쓴다(v26).
-- `pnpm`은 루트 `package.json`의 `packageManager`가 정한 판(12.21.0)이다. 전역에 없으면 저장소 루트에서 한 번 설치하고, 명령마다 `PATH`를 앞에 붙인다.
+- `pnpm`은 루트 `package.json`의 `packageManager`가 정한 판(12.23.0)이다. 전역에 없으면 저장소 루트에서 한 번 설치하고, 명령마다 `PATH`를 앞에 붙인다.
 
   ```bash
   cd <워크트리 루트>
-  npm install --prefix target/tools/node pnpm@12.21.0
+  npm install --prefix target/tools/node pnpm@12.23.0
   export PATH=$PWD/target/tools/node/node_modules/.bin:$PATH
   ```
 

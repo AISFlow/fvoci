@@ -9,11 +9,12 @@ use std::net::IpAddr;
 
 use fvoci_model::{OidcProvider, Session};
 use fvoci_store::{
-    Applied, Binding, Identity, LinkingSession, PendingSettings, StoredProvider, Trial, Tried,
+    Applied, Binding, FlowPurpose, Identity, LinkingSession, PendingSettings, StoredProvider,
+    Trial, Tried,
 };
 
 use super::App;
-use super::oidc::{LoginFailure, Start, StartedLogin, TrialEnd, logged, refused};
+use super::oidc::{LoginFailure, StartedLogin, TrialEnd, logged, refused};
 use super::oidc_settings::Beside;
 use super::sso;
 use crate::auth::now_millis;
@@ -111,11 +112,14 @@ impl App {
         session: &Session,
         address: Option<IpAddr>,
     ) -> Result<StartedLogin, AppError> {
-        let start = Start::Trial {
-            user_id: &session.user_id,
-            session_id: &session.id,
+        // The settings it tries are those pending when it starts: their time is
+        // stamped then (`App::provider_to_start`).
+        let purpose = FlowPurpose::Trial {
+            pending_at: 0,
+            user_id: session.user_id.clone(),
+            session_id: session.id.clone(),
         };
-        self.start_oidc_flow(org_id, address, start).await
+        self.start_oidc_flow(org_id, address, purpose).await
     }
 
     /// The trial that `end` ends, of the pending settings of `stored`, as the store is

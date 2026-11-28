@@ -494,7 +494,8 @@ test.describe('editing a cell', () => {
   test('the title: edited in place', async ({ page }) => {
     const opened = await openView(page, 'Project schedule', 'Task table');
     const id = await rowId(page, 'Agree on the scope');
-    await titleCell(page, id).click({ position: { x: 6, y: 12 } });
+    // On the title: the start of the cell is the box that selects the row.
+    await titleCell(page, id).locator('[data-slot="row-title"]').click();
     const field = titleCell(page, id).locator('input');
     await expect(field).toBeFocused();
     await expect(field).toHaveValue('Agree on the scope');
@@ -1304,8 +1305,9 @@ test.describe('when the window changes size', () => {
     const resize = (width: number, height: number): Promise<void> =>
       seenResized(table(page), () => page.setViewportSize({ width, height }));
 
-    // In a window this large the whole table fits: there is nothing to scroll.
-    await resize(2400, 2000);
+    // In a window this large the whole table fits, under the header and the row of quick
+    // filters: there is nothing to scroll.
+    await resize(2400, 2200);
     await expect.poll(() => scrollPlace(page)).toEqual({ x: 0, y: 0 });
     await resize(900, 500);
     await expect.poll(() => scrollPlace(page)).toEqual(place);

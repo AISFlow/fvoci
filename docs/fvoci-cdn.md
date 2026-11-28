@@ -178,8 +178,8 @@ Cloudflare의 기본 동작([출처](https://developers.cloudflare.com/cache/con
 | Proxy Read Timeout | 125초. 넘으면 `524`. Enterprise만 조정 가능(최대 6,000초) | [Connection limits](https://developers.cloudflare.com/fundamentals/reference/connection-limits/), [Error 524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/) |
 | Proxy Write Timeout | 30초. 넘으면 `524`. 조정할 수 없다. | 위 두 문서 |
 
-- 서버의 `max_file_bytes`를 플랜 한도보다 크게 두어도 Cloudflare가 먼저 `413`으로 막는다. 두 값을 맞춘다.
-- 아카이브 가져오기는 본문이 크고 처리 시간이 길 수 있다. 플랜 한도를 넘는 파일이나 응답까지 125초를 넘기는 요청은 프록시를 거치지 않는 DNS-only 호스트 이름으로 보내거나 플랜을 올려야 한다. Cloudflare 문서도 같은 방법을 든다.
+- 파일과 가져올 아카이브는 부분(`upload_part_bytes`, 기본 8 MiB)으로 나눠 오므로 Cloudflare의 요청 본문 한도는 부분 하나에만 걸린다. `upload_part_bytes`를 플랜 한도보다 작게 둔다. 그러면 `max_file_bytes`와 `max_import_bytes`는 100 MB를 넘겨도 된다.
+- 남는 것은 시간이다. 업로드를 마치는 요청이나 아카이브 가져오기의 처리가 기본 타임아웃인 125초를 넘기면 `524`로 끝난다. Cloudflare 문서가 드는 방법처럼 그 요청만 DNS-only 호스트 이름으로 보낼 수는 없다. `https://` `server_url`에서 브라우저의 세션 쿠키는 그 호스트에만 붙는 `__Host-fvoci_session`이고, 바꾸는 요청은 `Origin`을 `server_url`과 맞춰 본다. 그런 배포는 `server_url`의 호스트 자체를 Cloudflare 프록시 밖에 두거나(DNS-only, 또는 오리진 앞 리버스 프록시로 바로), Enterprise에서 Proxy Read Timeout을 올린다.
 - 한도를 올려도 아주 큰 업로드는 크기 한도에 닿기 전에 연결 타임아웃이나 read timeout으로 실패할 수 있다고 Cloudflare 문서가 적고 있다.
 
 ### 4.4 Rate limiting rule 예시
@@ -266,7 +266,7 @@ curl -si --http1.1 --max-time 5 -H 'Connection: Upgrade' -H 'Upgrade: websocket'
 
 **WebSocket이 일정한 간격으로 끊긴다.** 간격이 약 10분이고 CloudFront를 쓰면 유휴 타임아웃이다(3.3). CDN과 서버 사이에 로드 밸런서나 프록시가 더 있으면 그 유휴 타임아웃도 확인하고, ping 간격을 경로에서 가장 짧은 유휴 타임아웃보다 짧게 둔다. 연결이 아예 열리지 않으면 `/ws` 동작이 `Sec-WebSocket-*` 헤더를 전달하는지, Cloudflare의 WebSockets 토글이 켜져 있는지 본다.
 
-**업로드가 413으로 실패한다.** Cloudflare에서는 플랜의 업로드 한도(4.3)가 가장 흔한 원인이다. 그 다음으로 서버의 `max_file_bytes`, CDN과 서버 사이 프록시의 본문 한도를 확인한다. CloudFront에 AWS WAF의 Core rule set이 붙어 있으면 413이 아니라 403으로 실패한다(3.5). 큰 아카이브 가져오기가 504(CloudFront)나 524(Cloudflare)로 끝나면 크기가 아니라 타임아웃 문제다(3.4, 4.3).
+**업로드가 413으로 실패한다.** Cloudflare에서는 플랜의 업로드 한도보다 큰 `upload_part_bytes`(4.3)가 가장 흔한 원인이다. 그 다음으로 서버의 `max_file_bytes`, CDN과 서버 사이 프록시의 본문 한도를 확인한다. CloudFront에 AWS WAF의 Core rule set이 붙어 있으면 413이 아니라 403으로 실패한다(3.5). 큰 아카이브 가져오기가 504(CloudFront)나 524(Cloudflare)로 끝나면 크기가 아니라 타임아웃 문제다(3.4, 4.3).
 
 **로그인한 뒤 다시 로그인 화면으로 돌아간다.** 순서대로 확인한다.
 

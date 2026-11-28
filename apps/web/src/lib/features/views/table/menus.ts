@@ -12,6 +12,7 @@ import EyeOffIcon from '@lucide/svelte/icons/eye-off';
 import FoldHorizontalIcon from '@lucide/svelte/icons/fold-horizontal';
 import LinkIcon from '@lucide/svelte/icons/link';
 import Maximize2Icon from '@lucide/svelte/icons/maximize-2';
+import SquareCheckIcon from '@lucide/svelte/icons/square-check';
 import Trash2Icon from '@lucide/svelte/icons/trash-2';
 import UnfoldHorizontalIcon from '@lucide/svelte/icons/unfold-horizontal';
 
@@ -125,6 +126,10 @@ export interface RowMenu {
   onCopyLink: () => void;
   /** No question is asked first: deleting a card can be undone. */
   onDelete: () => void;
+  /** Whether the row is selected. Without `onSelect` there is no "Select". */
+  selected?: boolean;
+  /** Takes the row into the selection, where a finger has no Ctrl or Shift. */
+  onSelect?: () => void;
 }
 
 /**
@@ -149,6 +154,14 @@ export function rowMenu(menu: RowMenu): MenuAction[] {
     icon: LinkIcon,
     run: menu.onCopyLink,
   });
+  if (menu.canEdit && menu.onSelect) {
+    actions.push({
+      id: 'select',
+      label: menu.selected ? m.kanban_deselect() : m.kanban_select(),
+      icon: SquareCheckIcon,
+      run: menu.onSelect,
+    });
+  }
   if (menu.canEdit) {
     actions.push({
       id: 'delete',

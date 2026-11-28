@@ -1,7 +1,7 @@
 //! Pass-2 blocking streamer for native fvoci v1 `container.jsonl` archive entries (T12).
 //!
 //! Streams rewritten blocks line by line into bounded batches sent over a backpressured
-//! channel to `Store::create_containers_and_blocks_streamed`. Handles out-of-order parent
+//! channel to `Store::create_containers`. Handles out-of-order parent
 //! blocks using a bounded spillover buffer plus bounded revisit passes that skip already
 //! emitted lines without JSON parsing.
 
@@ -234,10 +234,7 @@ impl<'a> BoardStreamer<'a> {
         let entry = zip_clone
             .by_index(self.zip_index)
             .map_err(|error| AppError::bad_request(format_args!("{error}")))?;
-        let entry_label = entry
-            .name()
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or_default();
+        let entry_label = entry.name().map_or_default(std::borrow::Cow::into_owned);
         let mut reader = BufReader::with_capacity(STREAM_READER_BUF_BYTES, entry);
         let mut line_buf = Vec::with_capacity(4096);
         let mut total_read: u64 = 0;

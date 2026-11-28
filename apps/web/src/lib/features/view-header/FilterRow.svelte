@@ -2,8 +2,10 @@
   One condition of a filter: the property it is on, the condition, and what
   it compares with. What the last part is depends on the property's kind of
   value: options and people are ticked in a list, text is typed, a date is a
-  day picked from a calendar, and a condition such as "is empty" compares
-  with nothing.
+  day picked from a calendar or, for "is within", a period chosen from a
+  list, and a condition such as "is empty" compares with nothing. Whether a
+  card is done is a property of its own where the board has a rule of done:
+  it is done, or not.
 
   In a narrow place the line folds in two: property and condition, then the
   value and the button that removes the line.
@@ -27,9 +29,11 @@
   import type { PropertyUser } from '$lib/components/properties/types.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import { filterConditionDisplayString } from '$lib/logic/filter-conditions.ts';
+  import { FILTER_PERIODS, isFilterPeriod } from '$lib/logic/filter-period.ts';
   import type { Regional } from '$lib/logic/regional.ts';
   import {
     DYNAMIC_FILTER_ME,
+    type DoneRule,
     type FilterClause,
     type FilterCondition,
     type PropertyTemplate,
@@ -38,17 +42,18 @@
 
   import {
     conditionsFor,
-    filterableProperties,
+    filterPropertyIds,
     filterValueTypeOf,
     takesValue,
-    TITLE_FILTER_ID,
   } from './filter-edit.ts';
   import FilterDate from './FilterDate.svelte';
-  import { CONDITION_NAMES, propertyName } from './texts.ts';
+  import { conditionNamesOf, PERIOD_NAMES, propertyName } from './texts.ts';
 
   interface Props {
     clause: FilterClause;
     templates: readonly PropertyTemplate[];
+    /** The board's rule of done: where there is one, a condition can be on whether a card is done. */
+    doneWhen?: DoneRule | null | undefined;
     /** The people a condition on a person property can name: the members of the board. */
     people: readonly PropertyUser[];
     /** Who a value may name though not offered: an author who left, say. */
@@ -64,6 +69,7 @@
   let {
     clause,
     templates,
+    doneWhen,
     people,
     named,
     locale,
@@ -86,9 +92,10 @@
     ...people,
   ]);
   const withValue = $derived(valueType !== 'none' && takesValue(clause.condition));
+  const conditionNames = $derived(conditionNamesOf(clause.propertyId));
 
   const propertyActions = $derived<MenuAction[]>(
-    [TITLE_FILTER_ID, ...filterableProperties(templates).map((each) => each.id)].map((id) => ({
+    filterPropertyIds(templates, doneWhen).map((id) => ({
       id,
       label: propertyName(id, templates),
       checked: id === clause.propertyId,
@@ -101,10 +108,24 @@
   const conditionActions = $derived<MenuAction[]>(
     conditions.map((condition) => ({
       id: condition,
-      label: CONDITION_NAMES[condition](),
+      label: conditionNames[condition](),
       checked: condition === clause.condition,
       run: () => {
         onCondition(condition);
+      },
+    })),
+  );
+
+  // ------------------------------------------------------------- period
+
+  const period = $derived(isFilterPeriod(clause.values[0]) ? clause.values[0] : undefined);
+  const periodActions = $derived<MenuAction[]>(
+    FILTER_PERIODS.map((each) => ({
+      id: each,
+      label: PERIOD_NAMES[each](),
+      checked: each === period,
+      run: () => {
+        if (each !== period) onValues([each]);
       },
     })),
   );
@@ -130,15 +151,24 @@
     'flex h-8 max-w-full min-w-0 shrink-0 items-center justify-between gap-1 rounded-lg border border-input-border px-2.5 text-left text-sm hover:bg-muted aria-expanded:bg-muted disabled:opacity-50 roomy:h-touch roomy:text-base';
 </script>
 
-{#snippet choice(props: Record<string, unknown>, label: string, text: string, slot: string)}
+<!-- A choice from a list. One without a choice yet (`text` empty) shows `empty`, quieter. -->
+{#snippet choice(
+  props: Record<string, unknown>,
+  label: string,
+  text: string,
+  slot: string,
+  empty = '',
+)}
   <button
     {...props}
     type="button"
     data-slot={slot}
-    class={choiceClass}
-    aria-label="{label}: {text}"
+    class={[choiceClass, slot === 'filter-period' && 'w-full']}
+    aria-label="{label}: {text || empty}"
   >
-    <span class="min-w-0 truncate">{text}</span>
+    <span class={['min-w-0 truncate', text === '' && 'text-muted-foreground']}>
+      {text || empty}
+    </span>
     <ChevronDownIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
   </button>
 {/snippet}
@@ -159,7 +189,7 @@
       {@render choice(
         { ...props, disabled: conditions.length === 0 },
         m.viewheader_filter_condition(),
-        filterConditionDisplayString(clause.condition, CONDITION_NAMES, valueType),
+        filterConditionDisplayString(clause.condition, conditionNames, valueType),
         'filter-condition',
       )}
     {/snippet}
@@ -200,6 +230,23 @@
             }}
           />
         </div>
+      {:else if valueType === 'date' && clause.condition === 'isWithin'}
+        <ActionMenu
+          title={m.viewheader_filter_period()}
+          subtitle={name}
+          actions={periodActions}
+          align="start"
+        >
+          {#snippet trigger(props: Record<string, unknown>)}
+            {@render choice(
+              props,
+              valueName,
+              period ? PERIOD_NAMES[period]() : '',
+              'filter-period',
+              m.filter_period_empty(),
+            )}
+          {/snippet}
+        </ActionMenu>
       {:else if valueType === 'date'}
         <FilterDate
           name={valueName}

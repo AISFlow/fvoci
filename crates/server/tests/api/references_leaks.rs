@@ -53,8 +53,9 @@ async fn given(reader: &Client, board: &str, source: &str) -> Vec<Given> {
     let mut all = Vec::new();
     let mut paths = vec![
         format!("{TEST_WS}/cards/{source}"),
-        format!("{TEST_WS}/boards/{board}/blocks?all=true"),
-        format!("{TEST_WS}/boards/{board}/blocks?parentId={source}&type=comment"),
+        format!("{TEST_WS}/boards/{board}/views"),
+        format!("{TEST_WS}/boards/{board}/cards/{source}/comments"),
+        format!("{TEST_WS}/boards/{board}/cards/{source}/attachments"),
         format!("{TEST_WS}/boards/{board}/cards?preview=true"),
         format!("{TEST_WS}/references/to/{source}"),
         format!("{TEST_WS}/references/search?q={HIDDEN}"),

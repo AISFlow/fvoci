@@ -13,7 +13,7 @@ use fvoci_model::{
     today_in_time_zone,
 };
 
-use super::App;
+use super::{App, Changes};
 use crate::error::AppError;
 use crate::metrics::ScheduleRedistributionScope;
 
@@ -109,9 +109,7 @@ impl App {
             self.metrics()
                 .course_schedule_redistributed(ScheduleRedistributionScope::SharedAuto);
         }
-        if !updated_ids.is_empty() {
-            self.announce_blocks(&course.workspace_id, updated_ids);
-        }
+        self.tell(Changes::in_workspace(&course.workspace_id).reread(updated_ids));
         self.course_schedule_view(course_id, user_id, enrollment)
             .await
     }
@@ -150,9 +148,7 @@ impl App {
         };
         self.metrics()
             .course_schedule_redistributed(ScheduleRedistributionScope::SharedManual);
-        if !updated_ids.is_empty() {
-            self.announce_blocks(&course.workspace_id, updated_ids);
-        }
+        self.tell(Changes::in_workspace(&course.workspace_id).reread(updated_ids));
         self.course_schedule_view_at(course_id, user_id, enrollment, today)
             .await
     }

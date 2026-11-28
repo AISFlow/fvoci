@@ -259,13 +259,12 @@ async fn a_comment_is_reached_through_its_own_page_only() {
     let card = id(&card.value());
     let on_card = client
         .post(
-            &format!("{TEST_WS}/boards/{board}/blocks"),
-            &json!([{"containerId": board, "parentId": card, "type": "comment",
-                     "body": text("on a card"), "createdAt": 1, "updatedAt": 1}]),
+            &format!("{TEST_WS}/boards/{board}/cards/{card}/comments"),
+            &json!({"body": text("on a card")}),
         )
         .await;
     on_card.check_created();
-    let on_card = on_card.value()[0].clone();
+    let on_card = on_card.value();
 
     let nothing = json!({"id": UNKNOWN_ID, "updatedAt": 1});
     let none = on_theirs(client, TEST_WS, &wiki, &page, &nothing).await;
@@ -292,18 +291,20 @@ async fn a_comment_is_reached_through_its_own_page_only() {
             .await;
         made.check_not_found();
     }
-    // Nor is a page's comment one of a board's blocks, under a board the user has.
-    let blocks = format!("{TEST_WS}/boards/{board}/blocks");
-    let block = format!("{blocks}/{}", id(&comment));
-    let patched = json!({"blockIds": [id(&comment)], "blockPatches": [{"title": "x"}]});
+    // Nor is a page's comment one of a card's, under a card the user has.
+    let below = format!("{TEST_WS}/boards/{board}/cards/{card}");
+    let block = format!("{below}/comments/{}", id(&comment));
+    let attachment = format!("{below}/attachments/{}", id(&comment));
     for refused in [
-        client.patch(&block, &json!({"title": "x"})).await,
-        client.patch(&blocks, &patched).await,
+        client
+            .patch(&block, &json!({"body": text("x"), "readAt": 1}))
+            .await,
         client.delete(&block).await,
         client.get(&format!("{block}/versions")).await,
         client.post(&format!("{block}/restore"), &json!({})).await,
+        client.delete(&attachment).await,
         client
-            .get(&format!("{blocks}?blockId={}", id(&comment)))
+            .post(&format!("{attachment}/restore"), &json!({}))
             .await,
     ] {
         refused.check_not_found();

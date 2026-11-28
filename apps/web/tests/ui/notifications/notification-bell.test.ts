@@ -21,6 +21,7 @@ const told = (id: string, updatedAt: number, readAt = 0): Notification => ({
   createdAt: updatedAt,
   updatedAt,
   readAt,
+  archivedAt: 0,
   subject: {
     kind: 'mention',
     actorId: '',
@@ -63,6 +64,10 @@ function mount(initial: Notification[]) {
       );
       return Promise.resolve();
     }),
+    markUnread: vi.fn<Notifications['markUnread']>(() => Promise.resolve()),
+    archive: vi.fn<Notifications['archive']>(() => Promise.resolve()),
+    unarchive: vi.fn<Notifications['unarchive']>(() => Promise.resolve()),
+    archiveRead: vi.fn<Notifications['archiveRead']>(() => Promise.resolve()),
   } satisfies Notifications;
   const inbox = new NotificationInbox(
     notifications,
@@ -125,6 +130,20 @@ describe('the bell', () => {
       expect(readAll()).toBeDisabled();
       expect(notifications.list).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it('reads all with ⇧U only where its button would: while one listed is unread', async () => {
+    const { notifications, answerNext } = mount([told('a', 30, 35), told('b', 20, 25)]);
+    await fireEvent.click(screen.getByTestId('open-notifications'));
+    answerNext();
+    const line = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-notification] [data-row-focus]');
+      if (!found) throw new Error('no line to press the key on');
+      return found;
+    });
+    expect(readAll()).toBeDisabled();
+    await fireEvent.keyDown(line, { key: 'U', code: 'KeyU', shiftKey: true });
+    expect(notifications.readAll).not.toHaveBeenCalled();
   });
 
   it('disables mark all while reloading a previously opened list with unread items', async () => {

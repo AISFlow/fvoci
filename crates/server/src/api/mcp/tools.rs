@@ -14,9 +14,10 @@ use serde_json::{Map, Value, json};
 use utoipa::PartialSchema;
 
 use super::arguments::{
-    FindPeopleArguments, GetItemArguments, GetOutlineArguments, ListCardsArguments,
-    ListCommentsArguments, ListFilesArguments, NoArguments, PostCommentArguments,
-    SaveCardArguments, SavePageOrUnitArguments, SearchArguments, WorkspaceArguments,
+    FindPeopleArguments, GetItemArguments, GetOutlineArguments, ListActivityArguments,
+    ListCardsArguments, ListCommentsArguments, ListFilesArguments, NoArguments,
+    PostCommentArguments, SaveCardArguments, SaveCardsArguments, SavePageOrUnitArguments,
+    SearchArguments, WorkspaceArguments,
 };
 use super::rpc::{INTERNAL_ERROR, RpcError};
 use super::{reads, writes};
@@ -35,15 +36,17 @@ pub(super) enum Tool {
     GetItem,
     GetOutline,
     ListComments,
+    ListActivity,
     ListFiles,
     GetToday,
     SaveCard,
+    SaveCards,
     SavePageOrUnit,
     PostComment,
 }
 
 /// Every tool, in the order they are listed: those that read, then those that write.
-pub(super) const TOOLS: [Tool; 13] = [
+pub(super) const TOOLS: [Tool; 15] = [
     Tool::ListWorkspaces,
     Tool::GetWorkspaceOverview,
     Tool::FindPeople,
@@ -52,9 +55,11 @@ pub(super) const TOOLS: [Tool; 13] = [
     Tool::GetItem,
     Tool::GetOutline,
     Tool::ListComments,
+    Tool::ListActivity,
     Tool::ListFiles,
     Tool::GetToday,
     Tool::SaveCard,
+    Tool::SaveCards,
     Tool::SavePageOrUnit,
     Tool::PostComment,
 ];
@@ -76,9 +81,11 @@ impl Tool {
             Self::GetItem => "get_item",
             Self::GetOutline => "get_outline",
             Self::ListComments => "list_comments",
+            Self::ListActivity => "list_activity",
             Self::ListFiles => "list_files",
             Self::GetToday => "get_today",
             Self::SaveCard => "save_card",
+            Self::SaveCards => "save_cards",
             Self::SavePageOrUnit => "save_page_or_unit",
             Self::PostComment => "post_comment",
         }
@@ -87,7 +94,9 @@ impl Tool {
     /// The scope of the token it needs.
     pub(super) fn scope(self) -> ApiTokenScope {
         match self {
-            Self::SaveCard | Self::SavePageOrUnit | Self::PostComment => ApiTokenScope::Write,
+            Self::SaveCard | Self::SaveCards | Self::SavePageOrUnit | Self::PostComment => {
+                ApiTokenScope::Write
+            }
             _ => ApiTokenScope::Read,
         }
     }
@@ -103,9 +112,11 @@ impl Tool {
             Self::GetItem => "Read a card, page or unit",
             Self::GetOutline => "Outline of a wiki or course",
             Self::ListComments => "List comments",
+            Self::ListActivity => "Activity of a card",
             Self::ListFiles => "List files",
             Self::GetToday => "Today",
             Self::SaveCard => "Save a card",
+            Self::SaveCards => "Change cards alike",
             Self::SavePageOrUnit => "Save a page or unit",
             Self::PostComment => "Post a comment",
         }
@@ -157,6 +168,14 @@ impl Tool {
                 "The comments on a card, page or unit, oldest first, each in Markdown with who wrote \
                  it and when; one an agent wrote names its token (agentTokenName)."
             }
+            Self::ListActivity => {
+                "What was done to a card, the newest first, a page at a time: its making, each \
+                 change of its title, of a property's value (as the card stores it: option and \
+                 person ids, dates), of its parent and of whether it is a template, and its coming \
+                 back from the trash, each with who did it (actorId) and, for an agent, its token \
+                 (actorTokenName). One person's changes of one thing within five minutes are one \
+                 line. Its body's changes are not in it."
+            }
             Self::ListFiles => {
                 "The files uploaded to a board or wiki, or those one card shows: their ids \
                  (fvoci-file://<fileId> in Markdown), names, types and sizes."
@@ -168,8 +187,14 @@ impl Tool {
             Self::SaveCard => {
                 "Make a card on boardId, or change cardId: title, icon, parent, property values, and \
                  the body, whole (bodyMarkdown, with readAt; refused while people type in it) or \
-                 added to (appendMarkdown, which keeps what they type). Kept as a version by this \
-                 token, and told to the card's people as the agent's."
+                 added to (appendMarkdown, which keeps what they type), and how it repeats \
+                 (recurrence: completed, it makes its next card). Kept as a version by this token, \
+                 and told to the card's people as the agent's."
+            }
+            Self::SaveCards => {
+                "Set or clear the same property values of 1 to 200 cards of one board at once, all \
+                 or none: each card changes as save_card with only properties and \
+                 deletedProperties would change it. Answers the cards in short."
             }
             Self::SavePageOrUnit => {
                 "Make a page of a wiki or a unit (or chapter) of a course, or change one: title, \
@@ -195,8 +220,10 @@ impl Tool {
             Self::GetItem => GetItemArguments::schema(),
             Self::GetOutline => GetOutlineArguments::schema(),
             Self::ListComments => ListCommentsArguments::schema(),
+            Self::ListActivity => ListActivityArguments::schema(),
             Self::ListFiles => ListFilesArguments::schema(),
             Self::SaveCard => SaveCardArguments::schema(),
+            Self::SaveCards => SaveCardsArguments::schema(),
             Self::SavePageOrUnit => SavePageOrUnitArguments::schema(),
             Self::PostComment => PostCommentArguments::schema(),
         };
@@ -209,7 +236,10 @@ impl Tool {
         json!({
             "title": self.title(),
             "readOnlyHint": reads,
-            "destructiveHint": matches!(self, Self::SaveCard | Self::SavePageOrUnit),
+            "destructiveHint": matches!(
+                self,
+                Self::SaveCard | Self::SaveCards | Self::SavePageOrUnit
+            ),
             "idempotentHint": reads,
             "openWorldHint": false,
         })
@@ -409,9 +439,11 @@ async fn run(tool: Tool, app: &App, caller: &Caller, arguments: Value) -> Result
         Tool::GetItem => reads::get_item(app, caller, decode(arguments)?).await,
         Tool::GetOutline => reads::get_outline(app, caller, decode(arguments)?).await,
         Tool::ListComments => reads::list_comments(app, caller, decode(arguments)?).await,
+        Tool::ListActivity => reads::list_activity(app, caller, decode(arguments)?).await,
         Tool::ListFiles => reads::list_files(app, caller, decode(arguments)?).await,
         Tool::GetToday => reads::today(app, caller, decode(arguments)?).await,
         Tool::SaveCard => writes::save_card(app, caller, decode(arguments)?).await,
+        Tool::SaveCards => writes::save_cards(app, caller, decode(arguments)?).await,
         Tool::SavePageOrUnit => writes::save_page_or_unit(app, caller, decode(arguments)?).await,
         Tool::PostComment => writes::post_comment(app, caller, decode(arguments)?).await,
     }

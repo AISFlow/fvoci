@@ -15,6 +15,7 @@ import { BodyUploads } from './body-uploads.svelte.ts';
 import { CollaborativeBodyState } from './collab-body.svelte.ts';
 import { CommentThreadStore } from './comment-thread.svelte.ts';
 import type { OpenHierarchyNode } from './hierarchy-writes.ts';
+import type { WithReactions } from './reaction-types.ts';
 import { mentionedIn } from './user-names.ts';
 import type { WikiStore } from './wiki.svelte.ts';
 import type { LoadStatus } from './workspace.svelte.ts';
@@ -58,6 +59,8 @@ export class PageStore implements OpenHierarchyNode {
     this.comments = new CommentThreadStore({
       workspace: wiki.workspace,
       parentId: pageId,
+      containerId: wiki.wikiId,
+      joined: (write) => this.wiki.writeJoined(write),
       role: () => this.wiki.role,
       permissions: () => this.wiki.shownPermissions,
       joinable: () => this.wiki.joinable,
@@ -109,7 +112,7 @@ export class PageStore implements OpenHierarchyNode {
     return this.wiki.wikiId;
   }
 
-  #read(): Promise<WikiPageDetail> {
+  #read(): Promise<WithReactions<WikiPageDetail>> {
     const wikis = this.wiki.workspace.backend.wiki;
     if (!wikis) return Promise.reject(new Error('this backend has no wikis'));
     return wikis.page(this.#wikiId, this.pageId);
@@ -162,9 +165,12 @@ export class PageStore implements OpenHierarchyNode {
     const first = kind === 'first';
     this.#readings += 1;
     const reading = this.#readings;
+    const mark = this.comments.reactionsMark();
     try {
-      const detail = await this.#read();
+      const { reactions, ...detail } = await this.#read();
       if (this.#closed || reading !== this.#readings) return;
+      // A reaction changes nothing of the page: they are taken whatever its `updatedAt`.
+      this.comments.takeReactions(reactions, mark);
       if (!first && detail.updatedAt <= this.#readAt) return;
       this.#applyDetail(detail);
       [this.status, this.missing] = ['ready', false];

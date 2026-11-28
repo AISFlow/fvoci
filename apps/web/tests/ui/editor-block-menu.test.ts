@@ -19,6 +19,7 @@ import { suggestionList } from '$lib/editor/suggestion-list.ts';
 
 import {
   bullets,
+  callout,
   cell,
   doc,
   item,
@@ -30,6 +31,7 @@ import {
   task,
   tasks,
   text,
+  toggle,
 } from '../support/body-docs.ts';
 
 vi.mock('$lib/editor/diagram.ts', () => ({
@@ -104,6 +106,10 @@ describe('names found by what is typed', () => {
     expect(values('$$')).toEqual(['formula']);
     expect(values('quote')).toEqual(['quote']);
     expect(values('구분')).toEqual(['divider']);
+    for (const word of ['toggle', 'details', 'collapse', '토글', '접기'])
+      expect(values(word), word).toEqual(['toggle']);
+    for (const word of ['callout', 'note', 'tip', 'warning', '콜아웃', '알림', '주의'])
+      expect(values(word), word).toEqual(['callout']);
   });
 });
 
@@ -115,6 +121,9 @@ const PLACES: Record<string, [DocNode, string]> = {
   'a to-do': [doc(tasks(task(false, paragraph(text('do'))))), 'do'],
   'a quote': [doc(quote(paragraph(text('said')))), 'said'],
   'a cell': [doc(table(row(cell({}, paragraph(text('c'))), cell({}, paragraph())))), 'c'],
+  "a toggle's summary": [doc(toggle([text('why')], paragraph(text('because')))), 'why'],
+  'what a toggle hides': [doc(toggle([text('why')], paragraph(text('because')))), 'because'],
+  'a callout': [doc(callout('tip', paragraph(text('mind')))), 'mind'],
 };
 
 /** A place by its name. */
@@ -135,6 +144,8 @@ describe('the kinds of block', () => {
       'bullet-list',
       'numbered-list',
       'quote',
+      'toggle',
+      'callout',
       'code-block',
       'formula',
       'divider',
@@ -149,6 +160,13 @@ describe('the kinds of block', () => {
     const offered = slashEntries(listed, false).map((entry) => entry.value);
     expect(offered.filter((value) => value.startsWith('heading'))).toEqual([]);
     expect(offered).not.toContain('table');
+    // Nor a toggle or a callout, which stand where a table does.
+    expect(offered).not.toContain('toggle');
+    expect(offered).not.toContain('callout');
+    const inCallout = slashEntries(create(...placeNamed('a callout')), false);
+    expect(inCallout.map((entry) => entry.value)).not.toContain('table');
+    const hidden = slashEntries(create(...placeNamed('what a toggle hides')), false);
+    expect(hidden.map((entry) => entry.value)).toContain('table');
 
     const inCell = create(...placeNamed('a cell'));
     const first = slashEntries(inCell, false)[0]?.value;

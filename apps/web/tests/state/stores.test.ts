@@ -632,7 +632,7 @@ describe('what other people do', () => {
     await settle();
     expect(board.card(beta.id)?.title).toBe('Beta, by someone else');
     expect(board.realCards.map((card) => card.title)).toContain('Theirs');
-    await other.deleteBlock(board.boardId, beta.id);
+    await other.batchDeleteCards(board.boardId, [beta.id]);
     await settle();
     expect(board.card(beta.id)).toBeUndefined();
   });

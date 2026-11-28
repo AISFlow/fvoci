@@ -154,12 +154,7 @@ pub(crate) async fn people(
         .push_bind(" tm WHERE tm.team_id = ", Id(team_id))
         .push_bind(" AND tm.org_id = ", scope.org()?)
         .push(" ORDER BY tm.user_id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect()
+    scope.all(sql).await
 }
 
 async fn reads(

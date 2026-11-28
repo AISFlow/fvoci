@@ -63,7 +63,7 @@ async fn a_card_is_found_while_it_is_there_as_it_is() {
     let th = started(&fake).await;
     let board = board(&th, ContainerVisibility::Private, "Support").await;
     let card = new_card(&th.client, &board.id, "고객 응대", "환불규정을 따른다").await;
-    let block = format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id);
+    let block = format!("{TEST_WS}/cards/{}", card.id);
 
     tend(&th.app).await;
     let mut sent = fake.documents(INDEX).remove(&card.id).expect("the card");
@@ -92,24 +92,25 @@ async fn a_card_is_found_while_it_is_there_as_it_is() {
     th.client
         .patch(&block, &json!({"title": "환불 안내"}))
         .await
-        .check_no_content();
+        .check_ok();
     tend(&th.app).await;
     assert_eq!(titles(&fake)[&card.id], "환불 안내");
     let writes = fake.recorded_at("/_bulk").len();
     th.client
-        .patch(&block, &json!({"updatedFields": {"icon": "x"}}))
+        .patch(&block, &json!({"icon": "x"}))
         .await
-        .check_no_content();
+        .check_ok();
     tend(&th.app).await;
     assert_eq!(fake.recorded_at("/_bulk").len(), writes, "nothing to send");
 
     // To the trash and back.
-    th.client.delete(&block).await.check_no_content();
+    crate::blocks::trash_card(&th.client, &board.id, &card.id)
+        .await
+        .check_no_content();
     tend(&th.app).await;
     assert_eq!(titles(&fake), BTreeMap::new(), "a card in the trash");
     assert_eq!(found(&th).await, Vec::<String>::new());
-    th.client
-        .post_empty(&format!("{block}/restore"))
+    crate::blocks::restore_card(&th.client, &board.id, &card.id)
         .await
         .check_ok();
     tend(&th.app).await;
@@ -199,8 +200,7 @@ async fn a_server_without_a_search_server_notes_nothing() {
     let th = Setup::native().start().await.init_basic().await;
     let board = board(&th, ContainerVisibility::Private, "Support").await;
     let card = new_card(&th.client, &board.id, "카드", "환불").await;
-    th.client
-        .delete(&format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id))
+    crate::blocks::trash_card(&th.client, &board.id, &card.id)
         .await
         .check_no_content();
     th.client
@@ -343,11 +343,7 @@ async fn a_server_that_gets_a_search_server_sends_everything_and_again_after_it_
     // For a while it has none, and a card goes meanwhile, unnoted.
     th.config.search = fvoci_server::config::search::SearchSettings::default();
     let mut th = th.killed_and_started_again(async |_| {}).await;
-    th.client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            board.id, first.id
-        ))
+    crate::blocks::trash_card(&th.client, &board.id, &first.id)
         .await
         .check_no_content();
     let second = new_card(&th.client, &board.id, "나중에 쓴 카드", "환불").await;

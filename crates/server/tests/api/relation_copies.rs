@@ -47,14 +47,13 @@ async fn named_board(th: &TestServer) -> Named {
         cards.insert(title.to_owned(), card.id);
     }
     let id = |title: &str| cards[title].clone();
-    let view: Vec<Block> = client
+    let view: Value = client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!([{
-                "id": "v", "containerId": board.id, "type": "view",
-                "title": "Gantt", "createdAt": 1, "updatedAt": 1,
-                "fields": {"viewType": "gantt", "dependencyPropertyId": RELATION},
-            }]),
+            &format!("{TEST_WS}/boards/{}/views", board.id),
+            &json!({
+                "title": "Gantt", "viewType": "gantt",
+                "fields": {"dependencyPropertyId": RELATION},
+            }),
         )
         .await
         .created_json();
@@ -83,12 +82,7 @@ async fn named_board(th: &TestServer) -> Named {
         )
         .await
         .check_ok();
-    client
-        .delete(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}",
-            board.id,
-            id("gone")
-        ))
+    crate::blocks::trash_card(client, &board.id, &id("gone"))
         .await
         .check_no_content();
     let stale = json!({
@@ -108,17 +102,17 @@ async fn named_board(th: &TestServer) -> Named {
     Named {
         board,
         cards,
-        view: view[0].id.clone(),
+        view: view["view"]["id"]
+            .as_str()
+            .expect("the view's identifier")
+            .to_owned(),
     }
 }
 
 /// The relation values of a board's cards by title, with each link's `card` replaced by
 /// its title (`?` for what names no card of the board) and `kind`/`lagDays` preserved.
 async fn relations_by_title(client: &Client, board_id: &str) -> HashMap<String, Value> {
-    let blocks: Vec<Block> = client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks"))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(client, board_id).await;
     let titles: HashMap<&str, &str> = blocks
         .iter()
         .filter(|block| block.block_type == fvoci_model::BlockType::Card)
@@ -223,11 +217,7 @@ async fn a_template_and_a_board_made_from_it_name_their_own_cards() {
         let values = relations_by_title(&th.client, board_id).await;
         assert_eq!(values["B"], expected_b_links(), "{board_id}");
     }
-    let blocks: Vec<Block> = th
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", made.id))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&th.client, &made.id).await;
     let named_ids: Vec<&str> = blocks
         .iter()
         .filter_map(|block| block.fields.get("properties")?.get(RELATION))
@@ -283,15 +273,15 @@ async fn a_copy_of_a_card_names_the_cards_its_source_named() {
         ("B", expected_b_links()),
         ("A", json!([{"card": "gone", "kind": "sf", "lagDays": 2}])),
     ] {
-        let copies: Vec<Block> = th
+        let copy: Value = th
             .client
             .post_empty(&format!(
-                "{TEST_WS}/boards/{}/blocks/{}/duplicate",
+                "{TEST_WS}/boards/{}/cards/{}/duplicate",
                 board.id, cards[source]
             ))
             .await
             .created_json();
-        let resolved: Vec<Value> = copies[0].fields["properties"][RELATION]
+        let resolved: Vec<Value> = copy["properties"][RELATION]
             .as_array()
             .expect("a list")
             .iter()
@@ -314,35 +304,40 @@ async fn a_copy_of_a_card_names_the_cards_its_source_named() {
             "{source}: the same cards with kind and lagDays preserved; what never was and the source itself are left out"
         );
     }
-    let blocks: Vec<Block> = th
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&th.client, &board.id).await;
     assert!(blocks.iter().any(|block| block.id == view));
     th.teardown().await;
 }
 
-/// A relation is a card's: another block's value names nothing, is not checked, and
-/// does not stop a copy.
+/// A relation is a card's: another block's value, as an older server stored it, names
+/// nothing and does not stop a copy.
 #[tokio::test]
 async fn a_relation_value_of_a_block_that_is_no_card_does_not_stop_a_copy() {
     let th = Setup::native().start().await.init_basic().await;
     let Named { board, cards, .. } = named_board(&th).await;
-    th.client
-        .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!([{
-                "id": "att", "containerId": board.id, "parentId": cards["A"], "type": "attachment",
-                "title": "Odd",
-                "fields": {"properties": {RELATION: [
-                    {"card": cards["A"], "kind": "fs", "lagDays": 0},
-                    {"card": new_id(), "kind": "ss", "lagDays": 1},
-                ]}},
-            }]),
+    let fields = json!({"properties": {RELATION: [
+        {"card": cards["A"], "kind": "fs", "lagDays": 0},
+        {"card": new_id(), "kind": "ss", "lagDays": 1},
+    ]}});
+    let mut odd = Block {
+        id: new_id(),
+        container_id: board.id.clone(),
+        parent_id: cards["A"].clone(),
+        block_type: fvoci_model::BlockType::Attachment,
+        title: "Odd".to_owned(),
+        fields: fields.as_object().expect("an object").clone(),
+        created_at: 1,
+        updated_at: 1,
+        ..Block::default()
+    };
+    th.app
+        .insert_block_unchecked(
+            &mut odd,
+            &th.client.me().await.id,
+            fvoci_server::app::ChangeNotification::Suppress,
         )
         .await
-        .check_created();
+        .expect("stored as an older server would have");
     let copy: ContainersAndBlocks = th
         .client
         .post_empty(&format!("{TEST_WS}/containers/{}/duplicate", board.id))

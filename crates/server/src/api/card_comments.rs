@@ -2,27 +2,24 @@
 //! and restoring comments, and reading earlier comment versions.
 
 use axum::body::Bytes;
-use axum::extract::Path;
-use fvoci_model::{Block, BlockType, Body, BodyChange, CommentVersion, ContainerKinds};
+use fvoci_model::{Block, BlockType, Body, BodyChange, CommentVersion, CommentWithReactions};
 use serde::Deserialize;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::comments::{
-    CommentParentKind, CommenterOf, comments_on, create_comment_on, created_comment,
-    delete_comment_on, existing_comment_on, find_live_comment_on, get_comment_versions_on,
-    patch_comment_on, restore_comment_on,
+    CommenterOf, comment_versions_of, create_comment_of, delete_comment_of, list_comments_of,
+    patch_comment_of, restore_comment_of,
 };
 use super::contract::params::{BoardId, CardCommentId, CardId, DisableNotify, MemberWorkspaceId};
 use super::contract::tag;
+use super::items::{CardItem, ItemOf};
 use super::query::{DisableNotifyQuery, QueryParams};
 use super::workspace::InWorkspace;
-use super::{ApiResult, json_response, require_container_permission};
-use super::{Delegated, Read, Write};
+use super::{ApiResult, Delegated, Read, Write};
 use crate::app::App;
 use crate::error::AppError;
-use crate::permissions::ContainerPermission;
 
 pub(super) fn routes() -> OpenApiRouter<App> {
     OpenApiRouter::new()
@@ -36,31 +33,6 @@ pub(super) fn routes() -> OpenApiRouter<App> {
         ))
         .routes(routes!(handle_get_card_comment_versions))
         .routes(routes!(handle_restore_card_comment))
-}
-
-const READ_DENIED: &str = "access denied to fetch card comments";
-const CREATE_DENIED: &str = "access denied to comment on the card";
-const CHANGES_DENIED: &str = "access denied to change the comments of the card";
-
-pub(super) struct CardCommentParent;
-
-impl CommentParentKind for CardCommentParent {
-    const CONTAINER_PARAM: &'static str = "boardId";
-    const PARENT_PARAM: &'static str = "cardId";
-    const CREATE_DENIED: &'static str = CREATE_DENIED;
-    const CHANGES_DENIED: &'static str = CHANGES_DENIED;
-
-    fn kinds() -> ContainerKinds {
-        ContainerKinds::BOARDS
-    }
-
-    async fn load_parent(
-        ws: &InWorkspace,
-        board_id: &str,
-        card_id: &str,
-    ) -> Result<Block, AppError> {
-        card_on_board(ws, board_id, card_id).await
-    }
 }
 
 /// The card `card_id` of the board `board_id`, live; 404 for anything else.
@@ -122,46 +94,25 @@ pub(crate) struct CardCommentPatch {
 /// The comments on a card
 ///
 /// Every comment on the card, oldest first, as blocks of the `type` `comment` whose
-/// parent is the card. For who reads the board: its members, and of an open board
-/// whoever works in the workspace. A card in the trash is not there (404).
+/// parent is the card, each with its `reactions` where it has any. For who reads the
+/// board: its members, and of an open board whoever works in the workspace. A card in
+/// the trash is not there (404).
 #[utoipa::path(
     get,
     path = "/w/{workspaceId}/boards/{boardId}/cards/{cardId}/comments",
     operation_id = "getCardComments",
     tag = tag::CARDS,
     params(MemberWorkspaceId, BoardId, CardId),
-    responses((status = 200, description = "The comments, oldest first.", body = Vec<Block>)),
+    responses((
+        status = 200,
+        description = "The comments, oldest first.",
+        body = Vec<CommentWithReactions>,
+    )),
 )]
 async fn handle_get_card_comments(
-    Delegated(ws, ..): Delegated<Read, InWorkspace>,
-    Path((_, board_id, card_id)): Path<(String, String, String)>,
+    Delegated(card, ..): Delegated<Read, ItemOf<CardItem>>,
 ) -> ApiResult {
-    Ok(json_response(
-        &card_comments(&ws, &board_id, &card_id).await?,
-    ))
-}
-
-/// The comments on the card `card_id` of the board `board_id`, as `getCardComments`
-/// lists them.
-///
-/// # Errors
-///
-/// As `getCardComments` answers.
-pub(super) async fn card_comments(
-    ws: &InWorkspace,
-    board_id: &str,
-    card_id: &str,
-) -> Result<Vec<Block>, AppError> {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        board_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    let card = card_on_board(ws, board_id, card_id).await?;
-    comments_on(ws, board_id, &card.id).await
+    list_comments_of(card).await
 }
 
 /// Write a comment on a card
@@ -182,20 +133,11 @@ pub(super) async fn card_comments(
     responses((status = 201, description = "The comment as it was stored.", body = Block)),
 )]
 async fn handle_create_card_comment(
-    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardCommentParent>>,
+    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardItem>>,
     QueryParams(query): QueryParams<DisableNotifyQuery>,
     body: Bytes,
 ) -> ApiResult {
-    let comment = create_comment_on::<NewCardComment>(
-        &commenter.ws,
-        &commenter.container_id,
-        commenter.parent,
-        "card",
-        &body,
-        query.notification(),
-    )
-    .await?;
-    Ok(created_comment(&comment))
+    create_comment_of::<_, NewCardComment>(commenter, &body, query.notification()).await
 }
 
 /// Change a comment on a card
@@ -212,23 +154,14 @@ async fn handle_create_card_comment(
     responses((status = 200, description = "The comment as it is now.", body = Block)),
 )]
 async fn handle_patch_card_comment(
-    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardCommentParent>>,
+    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardItem>>,
     QueryParams(query): QueryParams<DisableNotifyQuery>,
     body: Bytes,
 ) -> ApiResult {
-    let comment_id = commenter.comment_id()?;
-    let comment = existing_comment_on(&commenter.ws, &commenter.parent, comment_id).await?;
-    let patched = patch_comment_on::<CardCommentPatch>(
-        &commenter.ws,
-        &commenter.container_id,
-        &comment,
-        CHANGES_DENIED,
-        &body,
-        query.notification(),
-        |patch| patch.read_at,
-    )
-    .await?;
-    Ok(json_response(&patched))
+    patch_comment_of::<_, CardCommentPatch>(commenter, &body, query.notification(), |patch| {
+        patch.read_at
+    })
+    .await
 }
 
 /// Delete a comment on a card
@@ -244,18 +177,10 @@ async fn handle_patch_card_comment(
     responses((status = 204, description = "The comment is deleted.")),
 )]
 async fn handle_delete_card_comment(
-    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardCommentParent>>,
+    Delegated(commenter, ..): Delegated<Write, CommenterOf<CardItem>>,
     QueryParams(query): QueryParams<DisableNotifyQuery>,
 ) -> ApiResult {
-    let comment_id = commenter.comment_id()?;
-    let comment = existing_comment_on(&commenter.ws, &commenter.parent, comment_id).await?;
-    delete_comment_on(
-        &commenter.ws,
-        &comment,
-        CHANGES_DENIED,
-        query.notification(),
-    )
-    .await
+    delete_comment_of(commenter, query.notification()).await
 }
 
 /// Restore a deleted comment on a card
@@ -271,11 +196,8 @@ async fn handle_delete_card_comment(
     params(MemberWorkspaceId, BoardId, CardId, CardCommentId),
     responses((status = 200, description = "The comment as it is again.", body = Block)),
 )]
-async fn handle_restore_card_comment(commenter: CommenterOf<CardCommentParent>) -> ApiResult {
-    let comment_id = commenter.comment_id()?;
-    let comment =
-        restore_comment_on(&commenter.ws, &commenter.parent, comment_id, CHANGES_DENIED).await?;
-    Ok(json_response(&comment))
+async fn handle_restore_card_comment(commenter: CommenterOf<CardItem>) -> ApiResult {
+    restore_comment_of(commenter).await
 }
 
 /// Earlier versions of a comment on a card
@@ -291,18 +213,7 @@ async fn handle_restore_card_comment(commenter: CommenterOf<CardCommentParent>) 
     responses((status = 200, description = "The earlier versions, the first one first.", body = Vec<CommentVersion>)),
 )]
 async fn handle_get_card_comment_versions(
-    Delegated(ws, ..): Delegated<Read, InWorkspace>,
-    Path((_, board_id, card_id, comment_id)): Path<(String, String, String, String)>,
+    Delegated(card, ..): Delegated<Read, ItemOf<CardItem>>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &board_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    let card = card_on_board(&ws, &board_id, &card_id).await?;
-    let live = find_live_comment_on(&ws, &card, &comment_id).await?;
-    get_comment_versions_on(&ws, &card, live, &comment_id).await
+    comment_versions_of(card).await
 }

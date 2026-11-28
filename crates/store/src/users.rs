@@ -14,14 +14,14 @@ use fvoci_model::{
 
 use crate::Store;
 use crate::audit::AuditActor;
-use crate::db::{Dialect, Id, InstanceHeld, LockRank, Param, Row, Scope, Sql};
+use crate::db::{FromRow, Id, InstanceHeld, LockRank, Param, Row, RowLock, Scope, Sql};
 use crate::error::{StoreError, Taken};
 use crate::password_reset;
 use crate::person_names;
 use crate::sessions::{self, PasswordSet, SessionsEnded};
-use crate::{directory, members, users_by_id};
+use crate::{directory, members};
 
-/// The columns of a user, in the order [`user_from_row`] reads them.
+/// The columns of a user, in the order [`User::from_row`] reads them.
 pub(crate) const USER_COLUMNS: &str = concat!(
     "id, username, email, password_hash, password_locked_at, created_at, updated_at, deleted_at, \
      is_admin, display_name, email_verified_at, ",
@@ -77,10 +77,7 @@ impl Store {
     pub async fn get_registered_user_count(&self) -> Result<i64, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL");
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -110,11 +107,7 @@ impl Store {
         self.with_conn(async |scope| {
             let mut sql = scope.sql("SELECT id FROM users WHERE erased_at = 0 AND ");
             Lookup::Username(username).push_condition(&mut sql);
-            scope
-                .fetch_optional(sql)
-                .await?
-                .map(|row| row.id(0))
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -125,9 +118,12 @@ impl Store {
     ///
     /// Returns [`StoreError::NotFound`] if none of the users exists and
     /// [`StoreError::NotAllFound`] unless exactly one user is found per identifier.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn get_users_list(&self, user_ids: &[String]) -> Result<Vec<User>, StoreError> {
-        self.with_conn(async |scope| users_by_id::users_by_ids(scope, user_ids, |_, _| ()).await)
-            .await
+        self.with_conn(async |scope| {
+            crate::users_by_id::users_by_ids(scope, user_ids, |_, _| ()).await
+        })
+        .await
     }
 
     /// Returns the user with the given email address, unless deleted.
@@ -271,7 +267,7 @@ impl Store {
                     let mut sql =
                         scope.sql("SELECT 1 FROM users WHERE deleted_at IS NULL AND is_admin = ");
                     sql.bind(true).push_bind(" AND id = ", Id(actor_id));
-                    if scope.fetch_optional(sql).await?.is_none() {
+                    if !scope.exists(sql).await? {
                         return Ok(AdminChange::NotAnAdministrator);
                     }
                 }
@@ -281,7 +277,7 @@ impl Store {
                     sql.bind(true)
                         .push_bind(" AND id <> ", Id(user_id))
                         .push(" LIMIT 1");
-                    if scope.fetch_optional(sql).await?.is_none() {
+                    if !scope.exists(sql).await? {
                         return Ok(AdminChange::LastAdmin);
                     }
                     if follows && crate::org_admin::is_last_org_admin(scope, user_id).await? {
@@ -392,6 +388,7 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StoreError::Database`] if the query fails.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn get_users_by_workspace(&self) -> Result<Vec<User>, StoreError> {
         self.with_conn(async |scope| {
             let mut sql = select_users(scope);
@@ -529,29 +526,26 @@ pub(crate) async fn search_users(
 }
 
 pub(crate) async fn fetch_users(scope: &mut Scope<'_>, sql: Sql) -> Result<Vec<User>, StoreError> {
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(user_from_row)
-        .collect()
+    scope.all(sql).await
 }
 
-fn user_from_row(row: &Row) -> Result<User, StoreError> {
-    Ok(User {
-        id: row.id(0)?,
-        username: row.text(1)?,
-        email: row.text(2)?,
-        password_hash: row.text(3)?,
-        password_locked_at: row.int(4)?,
-        created_at: row.int(5)?,
-        updated_at: row.int(6)?,
-        deleted_at: row.opt_int(7)?,
-        is_admin: row.bool(8)?,
-        display_name: row.text(9)?,
-        email_verified_at: row.int(10)?,
-        name: person_names::name_from_row(row, 11)?,
-    })
+impl FromRow for User {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(User {
+            id: row.id(0)?,
+            username: row.text(1)?,
+            email: row.text(2)?,
+            password_hash: row.text(3)?,
+            password_locked_at: row.int(4)?,
+            created_at: row.int(5)?,
+            updated_at: row.int(6)?,
+            deleted_at: row.opt_int(7)?,
+            is_admin: row.bool(8)?,
+            display_name: row.text(9)?,
+            email_verified_at: row.int(10)?,
+            name: person_names::name_from_row(row, 11)?,
+        })
+    }
 }
 
 /// The error for a user that a read did not find (`user not found`).
@@ -638,7 +632,7 @@ pub(crate) async fn has_address(scope: &mut Scope<'_>, email: &str) -> Result<bo
         ") OR (erase_started_at > 0 AND erased_at = 0)) AND ",
     ]);
     Lookup::Email(email).push_condition(&mut sql);
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// Whether there is a user row with the identifier, deactivated or not: whether a row
@@ -649,7 +643,7 @@ pub(crate) async fn user_row_exists(
 ) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT 1 FROM users WHERE id = ");
     sql.bind(Id(user_id));
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 pub(crate) async fn get_user_by_id(
@@ -756,12 +750,9 @@ pub(crate) async fn lock_password(
 ///
 /// Returns [`StoreError::UserNotFound`] if there is no such user.
 pub(crate) async fn lock_user(scope: &mut Scope<'_>, user_id: &str) -> Result<(), StoreError> {
-    scope.record_lock(LockRank::Users, user_id);
     let mut sql = scope.sql("SELECT id FROM users WHERE deleted_at IS NULL AND id = ");
     sql.bind(Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR NO KEY UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::NoKeyUpdate));
     match scope.fetch_optional(sql).await? {
         Some(_) => Ok(()),
         None => Err(StoreError::UserNotFound(user_id.to_owned())),
@@ -775,12 +766,11 @@ pub(crate) async fn hold_user_for_cleanup(
     scope: &mut Scope<'_>,
     user_id: &str,
 ) -> Result<(), StoreError> {
-    scope.record_lock(LockRank::Users, user_id);
-    if scope.dialect() == Dialect::Postgres {
-        let mut sql = scope.sql("SELECT id FROM users WHERE id = ");
-        sql.bind(Id(user_id)).push(" FOR NO KEY UPDATE");
-        scope.fetch_optional(sql).await?;
-    }
+    let mut sql = scope.sql("SELECT id FROM users WHERE id = ");
+    sql.bind(Id(user_id));
+    scope
+        .hold(LockRank::Users, user_id, sql, RowLock::NoKeyUpdate)
+        .await?;
     Ok(())
 }
 
@@ -788,13 +778,10 @@ pub(crate) async fn hold_user_for_cleanup(
 /// ends, and says whether it is in use: an asking to delete it waits for this, or
 /// this finds it asked.
 pub(crate) async fn hold_in_use(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, StoreError> {
-    scope.record_lock(LockRank::Users, user_id);
     let mut sql = scope.sql("SELECT id FROM users WHERE deleted_at IS NULL AND id = ");
     sql.bind(Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE");
-    }
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    sql.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::Share));
+    scope.exists(sql).await
 }
 
 /// Whether the account `user_id` has a password to sign in with, by the same rule as
@@ -814,11 +801,8 @@ pub(crate) async fn has_password(scope: &mut Scope<'_>, user_id: &str) -> Result
 pub(crate) async fn lock_instance<'c>(
     scope: &mut Scope<'c>,
 ) -> Result<InstanceHeld<'c>, StoreError> {
-    scope.record_lock(LockRank::Instance, "1");
     let mut sql = scope.sql("SELECT id FROM instance WHERE id = 1");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Instance, "1", RowLock::Update));
     scope.fetch_optional(sql).await?;
     Ok(InstanceHeld::new())
 }
@@ -836,14 +820,14 @@ pub(crate) async fn follow_org_role<'c>(
     if !is_admin {
         let mut sql = scope.sql("SELECT 1 FROM users WHERE is_admin = ");
         sql.bind(true).push_bind(" AND id = ", Id(user_id));
-        if scope.fetch_optional(sql).await?.is_none() {
+        if !scope.exists(sql).await? {
             return Ok(true);
         }
         let mut sql = scope.sql("SELECT 1 FROM users WHERE deleted_at IS NULL AND is_admin = ");
         sql.bind(true)
             .push_bind(" AND id <> ", Id(user_id))
             .push(" LIMIT 1");
-        if scope.fetch_optional(sql).await?.is_none() {
+        if !scope.exists(sql).await? {
             return Ok(false);
         }
     }

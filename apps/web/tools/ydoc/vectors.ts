@@ -44,6 +44,13 @@ import {
 } from '../../src/lib/editor/schema.ts';
 
 import { BODIES, READINGS, REFUSED, REPAIRS, SESSION, type RawCase } from './cases.ts';
+import {
+  DETAILS_MERGED_REFUSED,
+  DETAILS_MERGED_REPAIRS,
+  DETAILS_READINGS,
+  DETAILS_REFUSED,
+  DETAILS_REPAIRS,
+} from './details-cases.ts';
 import { rawType, type RawNode } from './shape.ts';
 import {
   TABLE_MERGED_REFUSED,
@@ -375,16 +382,20 @@ export function buildVectors(schema: Schema, bodyCases: BodyCase[]): YdocVectors
     },
     documents,
     bodies,
-    readings: raw(READINGS, 'kept'),
+    readings: [...raw(READINGS, 'kept'), ...raw(DETAILS_READINGS, 'kept')],
     refused: [
       ...raw(REFUSED, 'refused'),
       ...raw(TABLE_REFUSED, 'refused'),
       ...mergedVectors(TABLE_MERGED_REFUSED, schema, 'refused'),
+      ...raw(DETAILS_REFUSED, 'refused'),
+      ...mergedVectors(DETAILS_MERGED_REFUSED, schema, 'refused'),
     ],
     repairs: [
       ...mergedRepairs(schema),
       ...raw(REPAIRS, 'repaired'),
       ...raw(TABLE_REPAIRS, 'repaired'),
+      ...raw(DETAILS_REPAIRS, 'repaired'),
+      ...mergedVectors(DETAILS_MERGED_REPAIRS, schema, 'repaired'),
     ],
     shortened: [
       ...raw(TABLE_SHORTENED, 'shortened'),

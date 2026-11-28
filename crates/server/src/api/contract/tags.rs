@@ -13,7 +13,6 @@ pub(crate) mod tag {
     pub(crate) const COURSES: &str = "courses";
     pub(crate) const MEMBERS: &str = "members";
     pub(crate) const PUBLIC_LINKS: &str = "public-links";
-    pub(crate) const BLOCKS: &str = "blocks";
     pub(crate) const CARDS: &str = "cards";
     pub(crate) const REFERENCES: &str = "references";
     pub(crate) const SIDEBAR: &str = "sidebar";
@@ -28,7 +27,7 @@ pub(crate) mod tag {
 }
 
 /// The tags in the order the document lists them, each with what it is about.
-pub(super) const TAGS: [(&str, &str); 22] = [
+pub(super) const TAGS: [(&str, &str); 21] = [
     (
         tag::SYSTEM,
         "Whether the server is there, and what a client must know before it signs in.",
@@ -83,10 +82,6 @@ pub(super) const TAGS: [(&str, &str); 22] = [
     (
         tag::PUBLIC_LINKS,
         "Sharing a board with whoever has its public link.",
-    ),
-    (
-        tag::BLOCKS,
-        "The blocks of a board: cards, views, comments, and what a card is made of.",
     ),
     (tag::CARDS, "The blocks of type `card`, as cards."),
     (

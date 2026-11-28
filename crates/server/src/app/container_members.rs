@@ -7,7 +7,7 @@ use fvoci_store::{AddedToContainerNotice, AuditEntry, Joined, MemberChange, Stan
 
 use super::{App, ContainerAccess};
 use crate::collab::AccessScope;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 use crate::permissions::{self, ContainerPermission};
 
 /// The message of the refusal to remove or demote a board's only admin.
@@ -106,10 +106,13 @@ impl App {
         member: &ContainerMember,
         word: Word<'_>,
     ) -> Result<Option<ContainerMember>, AppError> {
-        let container = match self.store().get_container(&member.container_id).await {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(container) = self
+            .store()
+            .get_container(&member.container_id)
+            .await
+            .found()?
+        else {
+            return Ok(None);
         };
 
         // Added unless already there, in one step: of two requests that add the same
@@ -314,11 +317,11 @@ impl App {
         user_id: &str,
     ) -> Result<ContainerMember, AppError> {
         let container = self.container(container_id).await?;
-        let joined = match self.store().join_container(container_id, user_id).await {
-            Ok(joined) => joined,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found("board")),
-            Err(error) => return Err(error.into()),
-        };
+        let joined = self
+            .store()
+            .join_container(container_id, user_id)
+            .await
+            .or_missing("board")?;
         match joined {
             Joined::New(member) => {
                 self.collab()
@@ -407,10 +410,13 @@ impl App {
         member: &ContainerMember,
         word: Word<'_>,
     ) -> Result<Option<ContainerMember>, AppError> {
-        let container = match self.store().get_container(&member.container_id).await {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(container) = self
+            .store()
+            .get_container(&member.container_id)
+            .await
+            .found()?
+        else {
+            return Ok(None);
         };
         let scope = AccessScope::container(&container.id).of_user(&member.user_id);
         self.collab().narrowing_access(self, &scope);
@@ -476,10 +482,8 @@ impl App {
         container_id: &str,
         user_id: &str,
     ) -> Result<(), AppError> {
-        let container = match self.store().get_container(container_id).await {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Ok(()),
-            Err(error) => return Err(error.into()),
+        let Some(container) = self.store().get_container(container_id).await.found()? else {
+            return Ok(());
         };
         let scope = AccessScope::container(container_id).of_user(user_id);
         self.collab().narrowing_access(self, &scope);

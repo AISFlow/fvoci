@@ -6,7 +6,7 @@ use axum::http::HeaderMap;
 use fvoci_model::{
     Container, ContainerKind, ContainerPatch, ContainerPermissions, ContainerVisibility,
     ContainersAndBlocks, CopiedContainerResult, CopyContainerToWorkspaceRequest, DuplicateAs,
-    JsonMap, MinimumRole,
+    JsonMap, MinimumRole, NewBoardView,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -31,7 +31,7 @@ use super::{
 use super::{
     TRUE, json_object, require_container_permission, require_granted, require_workspace_access,
 };
-use crate::app::{App, BoardScaffolding, as_managed};
+use crate::app::{App, BoardStart, as_managed};
 use crate::error::AppError;
 use crate::permissions::{ContainerPermission, Grant};
 
@@ -111,30 +111,6 @@ pub(super) fn check_closed_members(
     Ok(())
 }
 
-/// Does [`check_closed_members`] for each object of the list that is the member `list` of
-/// `body` (`containers`).
-///
-/// # Errors
-///
-/// Returns the refusal of the first object that has one.
-pub(super) fn check_listed_boards(
-    body: &JsonMap,
-    list: &str,
-    kind: BoardObject,
-) -> Result<(), AppError> {
-    let objects = body
-        .get(list)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten();
-    for (index, object) in objects.enumerate() {
-        if let Some(object) = object.as_object() {
-            check_closed_members(object, &format!("/{list}/{index}"), kind)?;
-        }
-    }
-    Ok(())
-}
-
 /// Decodes the body of a board patch. A type or minimum role outside its closed set is
 /// refused at the member ([`check_closed_members`]).
 fn decode_container_patch(body: &[u8]) -> Result<ContainerPatch, AppError> {
@@ -154,7 +130,10 @@ fn decode_container_patch(body: &[u8]) -> Result<ContainerPatch, AppError> {
 ///
 /// The user becomes the board's admin, and the board is filed under the user's default
 /// category, unless it is a template. A board is made here and no wiki: a `kind` other
-/// than `board` is 400 at `/kind` (`createWiki` makes a wiki).
+/// than `board` is 400 at `/kind` (`createWiki` makes a wiki). Its first view
+/// (`firstView`) is made with it, all or none, as `createBoardView` makes a view; a view
+/// it refuses is 400 under `/firstView`, and so is one with `scaffold`, which brings its
+/// own. `getBoardViews` reads it.
 #[utoipa::path(
     post,
     path = "/w/{workspaceId}/boards",
@@ -170,13 +149,7 @@ async fn handle_create_board(ws: InWorkspace, headers: HeaderMap, body: Bytes) -
     ws.require_container_maker("access denied to create board")?;
     let mut requested = json_object(decode_json(&body)?)?;
     check_closed_members(&requested, "", BoardObject::Board)?;
-    let scaffolding = match requested.remove("scaffold") {
-        None | Some(Value::Bool(false)) => BoardScaffolding::None,
-        Some(Value::Bool(true)) => BoardScaffolding::Default,
-        Some(_) => {
-            return Err(AppError::bad_request("scaffold must be a boolean").with_field("scaffold"));
-        }
-    };
+    let start = board_start(&mut requested)?;
     let mut board: Container =
         serde_json::from_value(Value::Object(requested)).map_err(AppError::bad_request)?;
     ws.place_container(&mut board, "workspaceId")?;
@@ -184,9 +157,43 @@ async fn handle_create_board(ws: InWorkspace, headers: HeaderMap, body: Bytes) -
 
     let board = ws
         .app
-        .create_board_maybe_scaffolded(board, scaffolding, user_id, accept_language(&headers))
+        .create_board(board, start, user_id, accept_language(&headers))
         .await?;
     Ok(created(&board))
+}
+
+/// What a new board starts with, as the members `scaffold` and `firstView` of its request
+/// say, taken out of it.
+fn board_start(requested: &mut JsonMap) -> Result<BoardStart, AppError> {
+    let scaffold = match requested.remove("scaffold") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => {
+            return Err(AppError::bad_request("scaffold must be a boolean").with_field("scaffold"));
+        }
+    };
+    let Some(first_view) = requested.remove("firstView") else {
+        return Ok(if scaffold {
+            BoardStart::Scaffolded
+        } else {
+            BoardStart::Empty
+        });
+    };
+    if scaffold {
+        return Err(AppError::bad_request(
+            "a scaffolded board gets the first view of its scaffolding",
+        )
+        .with_field("firstView"));
+    }
+    let view: NewBoardView = serde_json::from_value(first_view)
+        .map_err(|error| AppError::bad_request(error).with_field("firstView"))?;
+    if view.after.as_deref().is_some_and(|after| !after.is_empty()) {
+        return Err(
+            AppError::bad_request("the first view of a board goes after no other view")
+                .with_pointer("/firstView/after"),
+        );
+    }
+    Ok(BoardStart::WithView(view))
 }
 
 /// A board

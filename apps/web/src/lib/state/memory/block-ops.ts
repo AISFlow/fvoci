@@ -18,18 +18,14 @@ import type {
   ViewDraft,
 } from '../backend.ts';
 import { applyCardPatch, applyViewPatch } from '../patches.ts';
+import type { WithReactions } from '../reaction-types.ts';
 
 import { checkedComment, checkedWhole, flushCard } from './bodies.ts';
 import { writtenWhole } from './body-versions.ts';
+import { noteCardChanged, noteCardMade } from './card-activity.ts';
 import { checkCardParent, storeNewCard } from './card-hierarchy.ts';
-import {
-  lastCommentAt,
-  mayChangeComment,
-  mayRemoveComments,
-  noteChange,
-  roleOn,
-  type Role,
-} from './comments.ts';
+import { makeNextCard, settleCardChange } from './card-recurrence.ts';
+import { lastCommentAt, mayChangeComment, noteChange } from './comments.ts';
 import { memberRole } from './container-access.ts';
 import {
   containerInWorld,
@@ -39,9 +35,10 @@ import {
 } from './container-ops.ts';
 import { noteComment } from './notifications.ts';
 import { checkRelations } from './references.ts';
+import { withMemoryReactions } from './reactions.ts';
 import { fail } from './refuse.ts';
 import { attachmentOf, commentOf, copy, detailOf, scramble, summaryOf, viewOf } from './shapes.ts';
-import { deletion, mayManageCards, subtreeOf, takeBlockBack } from './trash.ts';
+import { mayManageCards } from './trash.ts';
 import type { StoredBlock, StoredCard, StoredView, World } from './world.ts';
 
 export function blockInBoard(
@@ -99,14 +96,15 @@ export function patchMemoryView(
   return { before: viewOf(stored), after: viewOf(view) };
 }
 
+/** The card as `getCard` answers it: with its body and its reactions. */
 export function readMemoryCard(
   ctx: MemoryContainerContext,
   boardId: string,
   cardId: string,
-): CardDetail {
+): WithReactions<CardDetail> {
   memberRole(ctx.world, ctx.userId, boardId);
   const card = flushCard(ctx.world, blockInBoard(ctx.world, boardId, cardId, 'card') as StoredCard);
-  return withLastComment(ctx.world, detailOf(card));
+  return withMemoryReactions(ctx.world, withLastComment(ctx.world, detailOf(card)));
 }
 
 export function createMemoryCard(
@@ -118,6 +116,7 @@ export function createMemoryCard(
   mayManageCards(ctx.world, ctx.userId, boardId, 'access denied to create card');
   const block = newStoredBlock(ctx, boardId, draft.parentId ?? '', 'card');
   const stored = storeNewCard(ctx.world, board, block, draft);
+  noteCardMade(ctx.world, stored, ctx.userId);
   tellBlocks(ctx.world, boardId, [stored]);
   return withLastComment(ctx.world, summaryOf(stored));
 }
@@ -131,17 +130,15 @@ export function patchMemoryCard(
   mayManageCards(ctx.world, ctx.userId, boardId, 'access denied to patch card');
   const before = blockInBoard(ctx.world, boardId, cardId, 'card') as StoredCard;
   const card = applyCardPatch(before, patch);
+  const board = containerInWorld(ctx.world, boardId);
   checkCardParent(ctx.world, boardId, card, card.parentId, false, before);
-  checkRelations(
-    ctx.world,
-    containerInWorld(ctx.world, boardId),
-    card,
-    before,
-    'updatedProperties',
-  );
+  checkRelations(ctx.world, board, card, before, 'updatedProperties');
+  const next = settleCardChange(ctx, board, before, card);
   ctx.world.blocks.set(cardId, card);
   touchBlock(ctx, card);
-  tellBlocks(ctx.world, boardId, [card]);
+  noteCardChanged(ctx.world, before, card, ctx.userId);
+  const made = next ? [makeNextCard(ctx, board, card, next)] : [];
+  tellBlocks(ctx.world, boardId, [card, ...made]);
   return withLastComment(ctx.world, summaryOf(card));
 }
 
@@ -163,15 +160,16 @@ export function writeMemoryCardBody(
   return withLastComment(ctx.world, detailOf(card));
 }
 
+/** The comments of the card as `getCardComments` lists them: each with its reactions. */
 export function listMemoryComments(
   ctx: MemoryContainerContext,
   boardId: string,
   cardId: string,
-): Comment[] {
+): WithReactions<Comment>[] {
   memberRole(ctx.world, ctx.userId, boardId);
   blockInBoard(ctx.world, boardId, cardId, 'card');
   return scramble(ctx.world.childrenOf(cardId).filter((block) => block.type === 'comment')).map(
-    commentOf,
+    (block) => withMemoryReactions(ctx.world, commentOf(block)),
   );
 }
 
@@ -251,45 +249,6 @@ export function createMemoryAttachment(
   ctx.world.blocks.set(block.id, block);
   tellBlocks(ctx.world, boardId, [block]);
   return attachmentOf(block);
-}
-
-export function deleteMemoryBlock(
-  ctx: MemoryContainerContext,
-  boardId: string,
-  blockId: string,
-): void {
-  const block = blockInBoard(ctx.world, boardId, blockId);
-  const gone = subtreeOf(ctx.world, block);
-  const entry = { containerId: boardId, blocks: gone, ...deletion(ctx) };
-  const role: Role = roleOn(ctx.world.members.get(boardId) ?? [], ctx.userId);
-  if (block.type === 'comment' && !mayRemoveComments(role, ctx.userId, entry)) {
-    fail(403, "access denied to delete other users' comments");
-  }
-  for (const each of gone) ctx.world.blocks.delete(each.id);
-  ctx.world.deletedBlocks.set(blockId, entry);
-  ctx.world.tellContainer(boardId, {
-    kind: 'blocksDeleted',
-    containerId: boardId,
-    blockIds: gone.map((each) => each.id),
-  });
-}
-
-export function restoreMemoryBlock(
-  ctx: MemoryContainerContext,
-  boardId: string,
-  blockId: string,
-): void {
-  const restored = takeBlockBack(
-    ctx.world,
-    ctx.userId,
-    boardId,
-    blockId,
-    () => memberRole(ctx.world, ctx.userId, boardId),
-    () => {
-      containerInWorld(ctx.world, boardId);
-    },
-  );
-  tellBlocks(ctx.world, boardId, restored);
 }
 
 export function listMemoryViews(ctx: MemoryContainerContext, boardId: string): BoardView[] {

@@ -7,18 +7,38 @@
   The name is the way to the property's definition (PropertyMenu), and under
   the list a property can be added. Both change the board for every card. On
   a board the reader may not edit, names and values are only shown.
+
+  The picker of the due date also says how the card repeats, and on a board
+  that does not let cards repeat yet, holds the board's settings that do.
 -->
 <script lang="ts">
   import ActionMenu from '$lib/components/menu/ActionMenu.svelte';
   import type { MenuAction } from '$lib/components/menu/actions.ts';
   import { PropertyValue, type PropertyUser } from '$lib/components/properties/index.ts';
+  import { referrersOf } from '$lib/components/properties/kinds/referrers.ts';
+  import ReverseRelations from '$lib/components/properties/kinds/ReverseRelations.svelte';
   import { m } from '$lib/i18n/paraglide/messages.js';
+  import RecurrenceFields from '$lib/components/recurrence/RecurrenceFields.svelte';
+  import BoardDueRules from '$lib/components/board-rules/BoardDueRules.svelte';
   import { overlayPresentation } from '$lib/layout/presentation.ts';
   import { page } from '$lib/layout/room.svelte.ts';
   import { orderingRelations } from '$lib/logic/gantt.ts';
   import { SELECTABLE_PROPERTY_TYPES } from '$lib/logic/properties.ts';
-  import type { BoardView, PropertyType, PropertyValue as StoredValue } from '$lib/logic/wire.ts';
-  import type { BoardStore, CardSummary } from '$lib/state/index.ts';
+  import { boardLetsCardsRepeat, duePropertyOf, type Recurrence } from '$lib/logic/recurrence.ts';
+  import {
+    cardRecurrence,
+    withCardRecurrence,
+    type BoardView,
+    type DoneRule,
+    type PropertyType,
+    type PropertyValue as StoredValue,
+  } from '$lib/logic/wire.ts';
+  import {
+    setBoardDoneRule,
+    setBoardDueProperty,
+    type BoardStore,
+    type CardSummary,
+  } from '$lib/state/index.ts';
   import { Button } from '$lib/ui/button/index.js';
 
   import { propertyTypeIcon } from './icons.ts';
@@ -48,6 +68,13 @@
     ),
   );
   const presentation = $derived(overlayPresentation(page.stage));
+  /** The property the card is due by, whose picker says how it repeats. */
+  const dueId = $derived(board.board ? duePropertyOf(board.board)?.id : undefined);
+  const repeatable = $derived(board.board ? boardLetsCardsRepeat(board.board) : false);
+
+  function setRecurrence(recurrence: Recurrence | undefined): void {
+    void board.changeCard(card.id, (each) => withCardRecurrence(each, recurrence), 'setRecurrence');
+  }
   /** The people a person property can be set to: the members of the board. */
   const users = $derived<readonly PropertyUser[]>(board.people);
   /** Who a value may name: everyone the workspace knows, authors who left among them. */
@@ -70,6 +97,28 @@
     })),
   );
 </script>
+
+{#snippet repeatFields()}
+  <RecurrenceFields
+    recurrence={cardRecurrence(card)}
+    allowed={repeatable}
+    onChange={setRecurrence}
+  />
+  {#if !repeatable && board.canManageProperties && board.board && !board.board.isTemplate}
+    <!-- The board's settings that let it, for who may set them. -->
+    <BoardDueRules
+      properties={board.board.cardProperties}
+      dueDatePropertyId={board.board.dueDatePropertyId}
+      doneWhen={board.board.doneWhen}
+      onDueProperty={(propertyId: string | undefined) => {
+        setBoardDueProperty(board, propertyId);
+      }}
+      onDoneRule={(rule: DoneRule | undefined) => {
+        setBoardDoneRule(board, rule);
+      }}
+    />
+  {/if}
+{/snippet}
 
 <section aria-label={m['ViewHeader.properties']()} data-testid="card-properties">
   <dl class="flex flex-col">
@@ -114,7 +163,14 @@
             onRenameOption={options.onRenameOption}
             onRecolorOption={options.onRecolorOption}
             onDeleteOption={options.onDeleteOption}
+            dateExtra={template.id === dueId ? repeatFields : undefined}
           />
+          {#if template.type === 'relation'}
+            <ReverseRelations
+              referrers={referrersOf(board.cardsById.values(), template.id, card.id)}
+              {onOpenCard}
+            />
+          {/if}
         </dd>
       </div>
     {/each}

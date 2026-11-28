@@ -1,17 +1,55 @@
-//! Who may change, move, delete and bring back a comment: its author from the
+//! Who may change, delete and bring back a comment on a card: its author from the
 //! commenter's role up, and somebody else's by the board's admins only.
+
+use std::time::Duration;
 
 use fvoci_model::{Block, BlockType};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 use crate::blocks::{
-    NO_CHANGES, QUIET, Socket, batch, block_path, blocks_of, blocks_path, boards_with_roles,
-    card_with_content, child_of, delete, find, insert_one, new_block, title_patch, titles,
-    undelete_path,
+    QUIET, Socket, blocks_of, boards_with_roles, card_with_content, child_of, delete, find,
+    insert_one, new_block, restore_card, titles, trash_card,
 };
-use crate::common::TEST_WS;
-use crate::common::{Setup, TEST_WORKSPACE_ID};
+use crate::common::{Client, Setup, TEST_WORKSPACE_ID, TEST_WS, TestServer};
+
+/// The path of `comment` on its card.
+fn comment_path(comment: &Block) -> String {
+    format!(
+        "{TEST_WS}/boards/{}/cards/{}/comments/{}",
+        comment.container_id, comment.parent_id, comment.id
+    )
+}
+
+/// The path that brings `comment` back from the trash.
+fn restore_path(comment: &Block) -> String {
+    format!("{}/restore", comment_path(comment))
+}
+
+/// A comment saying `text` on `card`, by `client`'s user.
+async fn comment_by(client: &Client, card: &Block, text: &str) -> Block {
+    insert_one(client, &child_of(card, BlockType::Comment, text)).await
+}
+
+/// A body of one paragraph saying `text`.
+fn doc(text: &str) -> Value {
+    json!({"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": text}]},
+    ]})
+}
+
+/// What `block` says in its body.
+fn said(block: &Block) -> Option<Value> {
+    block.body.as_ref().map(|body| body.document().clone())
+}
+
+/// Whether the board's blocks, as its admin reads them, hold `block`.
+async fn holds(th: &TestServer, board_id: &str, block: &Block) -> bool {
+    blocks_of(&th.client, board_id)
+        .await
+        .iter()
+        .any(|read| read.id == block.id)
+}
 
 /// A comment can only be deleted by its author or by a board admin, not by another editor.
 #[tokio::test]
@@ -22,25 +60,21 @@ async fn delete_comment_of_another_user_needs_the_permission_to_delete_others_co
     let board_id = &boards.board.id;
 
     // The comment was written by the commenter.
-    let response = boards
-        .editor
-        .delete(&block_path(board_id, &content.comment.id))
-        .await;
+    let response = boards.editor.delete(&comment_path(&content.comment)).await;
     response.check_forbidden();
     assert_eq!(
         response.error_message(),
         "access denied to delete other users' comments",
         "an editor is refused"
     );
-    let stored = blocks_of(&th.client, board_id).await;
     assert!(
-        titles(&stored).contains(&"comment"),
-        "the comment is still there: {:?}",
-        titles(&stored)
+        holds(&th, board_id, &content.comment).await,
+        "the comment is still there"
     );
 
     // Other blocks of other users are deleted by an editor as before.
     delete(&boards.editor, &content.text).await;
+    th.teardown().await;
 }
 
 /// The cases that stay allowed: an editor deletes a comment of their own, and an admin
@@ -52,21 +86,22 @@ async fn delete_comment_by_its_author_or_by_an_admin_works() {
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
 
-    let own = child_of(&content.card, BlockType::Comment, "the editor's comment");
-    let own = insert_one(&boards.editor, &own).await;
+    let own = comment_by(&boards.editor, &content.card, "the editor's comment").await;
     delete(&boards.editor, &own).await;
 
     // The commenter's comment, deleted by the board's admin.
     delete(&th.client, &content.comment).await;
 
     let stored = blocks_of(&th.client, board_id).await;
-    assert_eq!(titles(&stored), ["card", "text"], "both comments are gone");
+    let mut left = titles(&stored);
+    left.sort_unstable();
+    assert_eq!(left, ["card", "text"], "both comments are gone");
+    th.teardown().await;
 }
 
 /// A commenter deletes their own comment and brings it back, and does neither to anything
 /// else: not to somebody else's comment, not to a card, and not to their comment that went
-/// with a
-/// card, since the card decides what comes back.
+/// with a card, since the card decides what comes back.
 #[tokio::test]
 async fn a_commenter_deletes_and_brings_back_their_own_comment() {
     let th = Setup::native().start().await.init_basic().await;
@@ -76,173 +111,54 @@ async fn a_commenter_deletes_and_brings_back_their_own_comment() {
     let own = &content.comment;
 
     delete(&boards.commenter, own).await;
-    assert!(!titles(&blocks_of(&th.client, board_id).await).contains(&"comment"));
+    assert!(!holds(&th, board_id, own).await, "in the trash");
     boards
         .commenter
-        .post(&undelete_path(board_id, &own.id), &json!({}))
+        .post_empty(&restore_path(own))
         .await
         .check_ok();
-    assert!(titles(&blocks_of(&th.client, board_id).await).contains(&"comment"));
+    assert!(holds(&th, board_id, own).await, "back");
 
-    let editors = insert_one(
-        &boards.editor,
-        &child_of(&content.card, BlockType::Comment, "the editor's"),
-    )
-    .await;
+    let editors = comment_by(&boards.editor, &content.card, "the editor's").await;
     boards
         .commenter
-        .delete(&block_path(board_id, &editors.id))
+        .delete(&comment_path(&editors))
         .await
         .check_error(
             StatusCode::FORBIDDEN,
             "access denied to delete other users' comments",
         );
+    trash_card(&boards.commenter, board_id, &content.card.id)
+        .await
+        .check_error(StatusCode::FORBIDDEN, "access denied to delete cards");
+
+    // The card, deleted by the editor with the commenter's comment on it: the card
+    // comes back, not the comment alone, which is on no card there is.
+    delete(&boards.editor, &content.card).await;
+    restore_card(&boards.commenter, board_id, &content.card.id)
+        .await
+        .check_error(StatusCode::FORBIDDEN, "access denied to restore cards");
     boards
         .commenter
-        .delete(&block_path(board_id, &content.card.id))
+        .post_empty(&restore_path(own))
         .await
-        .check_error(StatusCode::FORBIDDEN, NO_CHANGES);
-
-    // The card, deleted by the editor with the commenter's comment on it.
-    delete(&boards.editor, &content.card).await;
-    for id in [&content.card.id, &own.id] {
-        boards
-            .commenter
-            .post(&undelete_path(board_id, id), &json!({}))
-            .await
-            .check_error(StatusCode::FORBIDDEN, NO_CHANGES);
-    }
+        .check_error(StatusCode::NOT_FOUND, "card not found");
     assert!(
         blocks_of(&th.client, board_id).await.is_empty(),
         "all still in the trash"
     );
+    th.teardown().await;
 }
 
-/// The refusal of a comment that is not on a card.
-const OFF_A_CARD: &str =
-    "the parent of a comment is a card of the board, a page of the wiki or a unit of the course";
-/// The refusal of a block below a comment.
-const BELOW_A_COMMENT: &str = "a comment is the parent of no block";
-
-/// A comment is always on a card of its board and nothing is below it, however a block is
-/// written: a new comment, a block that becomes one and a block that moves are refused
-/// (400) at the `parentId` of the request, and a card that has comments stays a card.
+/// A comment or an attachment comes back from the trash only onto a card: one whose card
+/// became a view, or whose card became a comment, while it was in the trash (as an older
+/// server may have left them) is on no card (404), and stays in the trash.
 #[tokio::test]
-async fn a_comment_is_on_a_card_and_has_nothing_below_it() {
+async fn a_block_comes_back_from_the_trash_only_onto_a_card() {
     let th = Setup::native().start().await.init_basic().await;
     let boards = boards_with_roles(&th).await;
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
-    let card = &content.card;
-    let comment = &content.comment;
-
-    let attachment = insert_one(
-        &th.client,
-        &child_of(card, BlockType::Attachment, "attachment"),
-    )
-    .await;
-    for (new, refusal) in [
-        (
-            new_block(board_id, BlockType::Comment, "on the board"),
-            OFF_A_CARD,
-        ),
-        (
-            child_of(&attachment, BlockType::Comment, "on an attachment"),
-            OFF_A_CARD,
-        ),
-        (child_of(comment, BlockType::Comment, "a reply"), OFF_A_CARD),
-        (
-            child_of(comment, BlockType::Attachment, "below"),
-            BELOW_A_COMMENT,
-        ),
-    ] {
-        let response = th.client.insert_blocks(board_id, &[new]).await;
-        response.check_error(StatusCode::BAD_REQUEST, refusal);
-        assert_eq!(response.refused_at(), "/0/parentId");
-    }
-
-    // A move, alone, in a batch and with the board. The board is no parent of anything.
-    let path = block_path(board_id, &comment.id);
-    for (target, refusal) in [
-        (board_id.as_str(), "the parent is not a block of the board"),
-        (attachment.id.as_str(), OFF_A_CARD),
-    ] {
-        let response = th.client.patch(&path, &json!({"parentId": target})).await;
-        response.check_error(StatusCode::BAD_REQUEST, refusal);
-        assert_eq!(response.refused_at(), "/parentId");
-    }
-    let under_comment = json!({"parentId": comment.id});
-    let response = th
-        .client
-        .patch(&block_path(board_id, &attachment.id), &under_comment)
-        .await;
-    response.check_error(StatusCode::BAD_REQUEST, BELOW_A_COMMENT);
-    assert_eq!(response.refused_at(), "/parentId");
-    let response = th
-        .client
-        .patch(
-            &blocks_path(board_id),
-            &json!({"blockIds": [attachment.id], "blockPatches": [under_comment]}),
-        )
-        .await;
-    response.check_error(StatusCode::BAD_REQUEST, BELOW_A_COMMENT);
-    assert_eq!(response.refused_at(), "/blockPatches/0/parentId");
-    let response = th
-        .client
-        .patch(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containerIds": [board_id], "containerPatches": [{}],
-                "blockIds": [attachment.id], "blockPatches": [under_comment],
-            }),
-        )
-        .await;
-    response.check_error(StatusCode::BAD_REQUEST, BELOW_A_COMMENT);
-    assert_eq!(response.refused_at(), "/blockPatches/0/parentId");
-
-    // An attachment cannot be placed below another attachment either, and a change of
-    // type is always refused on any existing block.
-    let nested_attachment = th
-        .client
-        .insert_blocks(
-            board_id,
-            &[child_of(
-                &attachment,
-                BlockType::Attachment,
-                "below the attachment",
-            )],
-        )
-        .await;
-    nested_attachment.check_bad_request();
-    assert_eq!(nested_attachment.refused_at(), "/0/parentId");
-    let view = insert_one(&th.client, &new_block(board_id, BlockType::View, "view")).await;
-    for (block, to) in [(&attachment, "comment"), (card, "view"), (&view, "comment")] {
-        let response = th
-            .client
-            .patch(&block_path(board_id, &block.id), &json!({"type": to}))
-            .await;
-        response.check_error(StatusCode::BAD_REQUEST, "a block's type does not change");
-        assert_eq!(response.refused_at(), "/type", "{to}");
-    }
-
-    // On a card it is all as before: a comment is made and moved to another card.
-    let second = insert_one(&th.client, &new_block(board_id, BlockType::Card, "second")).await;
-    th.client
-        .patch(&path, &json!({"parentId": second.id}))
-        .await
-        .check_no_content();
-}
-
-/// A block comes back from the trash only where it may be: a comment whose card became a
-/// view, or a block whose parent became a comment, while it was in the trash, is refused
-/// (409) and stays there.
-#[tokio::test]
-async fn a_block_comes_back_from_the_trash_only_where_it_may_be() {
-    let th = Setup::native().start().await.init_basic().await;
-    let boards = boards_with_roles(&th).await;
-    let content = card_with_content(&th, &boards).await;
-    let board_id = &boards.board.id;
-    let refused = |what: &str| format!("the block cannot come back where it was: {what}");
 
     delete(&boards.commenter, &content.comment).await;
     th.app
@@ -255,9 +171,9 @@ async fn a_block_comes_back_from_the_trash_only_where_it_may_be() {
         .expect("legacy card converted to view in DB");
     boards
         .commenter
-        .post(&undelete_path(board_id, &content.comment.id), &json!({}))
+        .post_empty(&restore_path(&content.comment))
         .await
-        .check_error(StatusCode::CONFLICT, &refused(OFF_A_CARD));
+        .check_error(StatusCode::NOT_FOUND, "card not found");
 
     let middle = insert_one(&th.client, &new_block(board_id, BlockType::Card, "middle")).await;
     let below = insert_one(
@@ -275,21 +191,24 @@ async fn a_block_comes_back_from_the_trash_only_where_it_may_be() {
         .await
         .expect("legacy parent converted to comment in DB");
     th.client
-        .post(&undelete_path(board_id, &below.id), &json!({}))
+        .post_empty(&format!(
+            "{TEST_WS}/boards/{board_id}/cards/{}/attachments/{}/restore",
+            middle.id, below.id
+        ))
         .await
-        .check_error(StatusCode::CONFLICT, &refused(BELOW_A_COMMENT));
-    let read = blocks_of(&th.client, board_id).await;
-    let read = titles(&read);
-    assert!(
-        !read.contains(&"comment") && !read.contains(&"below"),
-        "both still in the trash: {read:?}"
-    );
+        .check_error(StatusCode::NOT_FOUND, "card not found");
+    for block in [&content.comment, &below] {
+        assert!(
+            !holds(&th, board_id, block).await,
+            "still in the trash: {}",
+            block.id
+        );
+    }
+    th.teardown().await;
 }
 
 /// The author of a comment deletes it and brings it back; a comment of theirs that
-/// somebody else deleted is the board's admins' to bring back, not theirs. (Deleting a
-/// comment would take what is below it, and a block of somebody else there would
-/// refuse it; a comment has nothing below it, so that check is left as a guard.)
+/// somebody else deleted is the board's admins' to bring back, not theirs.
 #[tokio::test]
 async fn the_author_of_a_comment_brings_back_only_what_they_deleted() {
     let th = Setup::native().start().await.init_basic().await;
@@ -297,100 +216,80 @@ async fn the_author_of_a_comment_brings_back_only_what_they_deleted() {
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
     let own = &content.comment;
-    let back = undelete_path(board_id, &own.id);
+    let back = restore_path(own);
 
     delete(&boards.commenter, own).await;
-    boards.commenter.post(&back, &json!({})).await.check_ok();
+    boards.commenter.post_empty(&back).await.check_ok();
     delete(&th.client, own).await;
-    boards.commenter.post(&back, &json!({})).await.check_error(
+    boards.commenter.post_empty(&back).await.check_error(
         StatusCode::FORBIDDEN,
         "a comment somebody else deleted is brought back by the board's admins",
     );
-    assert!(
-        !titles(&blocks_of(&th.client, board_id).await).contains(&"comment"),
-        "still in the trash"
-    );
-    th.client.post(&back, &json!({})).await.check_ok();
-    assert!(titles(&blocks_of(&th.client, board_id).await).contains(&"comment"));
+    assert!(!holds(&th, board_id, own).await, "still in the trash");
+    th.client.post_empty(&back).await.check_ok();
+    assert!(holds(&th, board_id, own).await, "back");
+    th.teardown().await;
 }
 
 /// What comes back is the whole deletion, so the block that was deleted decides: a
 /// comment of somebody else that went with its card comes back with the card, which an
-/// editor may delete and
-/// bring back, naming the card or the comment.
+/// editor may delete and bring back.
 #[tokio::test]
 async fn a_deletion_comes_back_as_its_top_block_allows() {
     let th = Setup::native().start().await.init_basic().await;
     let boards = boards_with_roles(&th).await;
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
-    let others = &content.comment;
 
-    // The card, deleted by the editor with the commenter's comment on it: the editor
-    // brings it back, naming the card or the comment.
     delete(&boards.editor, &content.card).await;
-    boards
-        .editor
-        .post(&undelete_path(board_id, &others.id), &json!({}))
+    restore_card(&boards.editor, board_id, &content.card.id)
         .await
         .check_ok();
-    let read = blocks_of(&th.client, board_id).await;
-    assert!(
-        titles(&read).contains(&"card") && titles(&read).contains(&"comment"),
-        "{:?}",
-        titles(&read)
-    );
+    for block in [&content.card, &content.comment] {
+        assert!(holds(&th, board_id, block).await, "back: {}", block.id);
+    }
+    th.teardown().await;
 }
 
 /// A deleted comment is brought back only by who may delete it: its author, and the
 /// comment of somebody else the board's admins only. An editor and a commenter are
-/// refused another's. A card is
-/// brought back by an editor as before.
+/// refused another's. A card is brought back by an editor as before.
 #[tokio::test]
 async fn a_deleted_comment_is_brought_back_only_by_who_may_delete_it() {
     let th = Setup::native().start().await.init_basic().await;
     let boards = boards_with_roles(&th).await;
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
-    let others = undelete_path(board_id, &content.comment.id);
+    let others = restore_path(&content.comment);
+    let refused = "access denied to undelete other users' comments";
 
     // The commenter's comment, deleted by the admin.
     delete(&th.client, &content.comment).await;
-    boards.editor.post(&others, &json!({})).await.check_error(
-        StatusCode::FORBIDDEN,
-        "access denied to undelete other users' comments",
-    );
-    let editors = insert_one(
-        &boards.editor,
-        &child_of(&content.card, BlockType::Comment, "the editor's comment"),
-    )
-    .await;
+    boards
+        .editor
+        .post_empty(&others)
+        .await
+        .check_error(StatusCode::FORBIDDEN, refused);
+    let editors = comment_by(&boards.editor, &content.card, "the editor's comment").await;
     delete(&boards.editor, &editors).await;
     boards
         .commenter
-        .post(&undelete_path(board_id, &editors.id), &json!({}))
+        .post_empty(&restore_path(&editors))
         .await
-        .check_error(
-            StatusCode::FORBIDDEN,
-            "access denied to undelete other users' comments",
-        );
+        .check_error(StatusCode::FORBIDDEN, refused);
     assert!(
-        !titles(&blocks_of(&th.client, board_id).await).contains(&"comment"),
+        !holds(&th, board_id, &content.comment).await,
         "still in the trash"
     );
-    th.client.post(&others, &json!({})).await.check_ok();
-    assert!(titles(&blocks_of(&th.client, board_id).await).contains(&"comment"));
+    th.client.post_empty(&others).await.check_ok();
+    assert!(holds(&th, board_id, &content.comment).await, "back");
 
     // The editor's own comment, and a card, by the editor.
-    let own = insert_one(
-        &boards.editor,
-        &child_of(&content.card, BlockType::Comment, "the editor's"),
-    )
-    .await;
+    let own = comment_by(&boards.editor, &content.card, "the editor's").await;
     delete(&boards.editor, &own).await;
     boards
         .editor
-        .post(&undelete_path(board_id, &own.id), &json!({}))
+        .post_empty(&restore_path(&own))
         .await
         .check_ok();
     let card = insert_one(
@@ -399,23 +298,18 @@ async fn a_deleted_comment_is_brought_back_only_by_who_may_delete_it() {
     )
     .await;
     delete(&th.client, &card).await;
-    boards
-        .editor
-        .post(&undelete_path(board_id, &card.id), &json!({}))
+    restore_card(&boards.editor, board_id, &card.id)
         .await
         .check_ok();
-    let read = blocks_of(&th.client, board_id).await;
-    assert!(
-        titles(&read).contains(&"the editor's") && titles(&read).contains(&"card two"),
-        "{:?}",
-        titles(&read)
-    );
+    for block in [&own, &card] {
+        assert!(holds(&th, board_id, block).await, "back: {}", block.id);
+    }
+    th.teardown().await;
 }
 
 /// A comment is changed by its author with the commenter's role, and the comment of
 /// somebody else by the board's admins only, as it is deleted; an editor may not change
-/// it. `patchBlock`, `patchBlocks` and `patchContainersAndBlocks` alike. Who changed it and
-/// when is what its `modifiedBy` and `updatedAt` say to the members.
+/// it. Who changed it and when is what its `modifiedBy` and `updatedAt` say to the members.
 #[tokio::test]
 async fn a_comment_is_changed_by_its_author_or_an_admin() {
     let th = Setup::native().start().await.init_basic().await;
@@ -425,168 +319,117 @@ async fn a_comment_is_changed_by_its_author_or_an_admin() {
     let commenter = boards.commenter.me().await;
     let admin = th.client.me().await;
     let comment = &content.comment;
-    let path = block_path(board_id, &comment.id);
-    let many = format!("{TEST_WS}/boards/{board_id}/blocks");
-    let together = |patch: Value| {
-        json!({
-            "containerIds": [board_id], "containerPatches": [{}],
-            "blockIds": [comment.id], "blockPatches": [patch],
-        })
-    };
-    let others_refused = "access denied to change other users' comments";
-    let stored = |blocks: &[Block]| {
-        blocks
-            .iter()
-            .find(|block| block.id == comment.id)
-            .cloned()
-            .expect("the comment is there")
-    };
+    let path = comment_path(comment);
+    let write = |text: &str, read: &Block| json!({"body": doc(text), "readAt": read.updated_at});
 
-    // The author, with no more than the commenter's role, on both routes.
+    // The author, with no more than the commenter's role.
     let mut member = Socket::subscribed_to_workspace(&th, &th.client, TEST_WORKSPACE_ID).await;
-    boards
+    tokio::time::sleep(Duration::from_millis(3)).await;
+    let read: Block = boards
         .commenter
-        .patch(&path, &title_patch("by its author"))
+        .patch(&path, &write("by its author", comment))
         .await
-        .check_no_content();
+        .ok_json();
     let told = member.next_block().await;
-    let read = stored(&blocks_of(&th.client, board_id).await);
-    assert_eq!(read.title, "by its author");
+    assert_eq!(said(&read), Some(doc("by its author")));
     assert_eq!(read.modified_by, commenter.id, "who changed it");
     assert!(read.updated_at > comment.updated_at, "and when: later");
     assert_eq!(told["modifiedBy"], json!(commenter.id), "{told}");
     assert_eq!(told["updatedAt"], json!(read.updated_at), "{told}");
-    boards
-        .commenter
-        .patch(&many, &batch(&[(comment, "again by its author")]))
-        .await
-        .check_no_content();
-    th.client
-        .patch(&many, &batch(&[(comment, "by the admin, many")]))
-        .await
-        .check_no_content();
-    let read = stored(&blocks_of(&th.client, board_id).await);
-    assert_eq!(
-        read.modified_by, admin.id,
-        "patchBlocks says who changed it"
-    );
-    boards
-        .commenter
-        .patch(&many, &batch(&[(comment, "again by its author")]))
-        .await
-        .check_no_content();
 
-    // An editor is refused, on every route, and nothing changes.
-    let response = boards
+    // An editor is refused, and nothing changes.
+    boards
         .editor
-        .patch(&path, &title_patch("by an editor"))
-        .await;
-    response.check_error(StatusCode::FORBIDDEN, others_refused);
-    let response = boards
-        .editor
-        .patch(&many, &batch(&[(comment, "by an editor")]))
-        .await;
-    response.check_error(StatusCode::FORBIDDEN, others_refused);
-    let response = boards
-        .editor
-        .patch(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &together(json!({"title": "by an editor"})),
-        )
-        .await;
-    response.check_error(StatusCode::FORBIDDEN, others_refused);
-    let read = stored(&blocks_of(&th.client, board_id).await);
+        .patch(&path, &write("by an editor", &read))
+        .await
+        .check_error(
+            StatusCode::FORBIDDEN,
+            "access denied to change other users' comments",
+        );
+    let stored = blocks_of(&th.client, board_id).await;
+    let stored = find(&stored, &comment.id);
     assert_eq!(
-        read.title, "again by its author",
-        "the editors changed nothing"
+        said(stored),
+        Some(doc("by its author")),
+        "the editor changed nothing"
     );
-    assert_eq!(read.modified_by, commenter.id);
+    assert_eq!(stored.modified_by, commenter.id);
 
     // The board's admin changes it, and is who changed it last.
     while member.next_json(QUIET).await.is_some() {}
-    th.client
-        .patch(&path, &title_patch("by the admin"))
+    let read: Block = th
+        .client
+        .patch(&path, &write("by the admin", &read))
         .await
-        .check_no_content();
+        .ok_json();
     let told = member.next_block().await;
     assert_eq!(told["modifiedBy"], json!(admin.id), "{told}");
-    th.client
-        .patch(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &together(json!({"title": "by the admin again"})),
-        )
-        .await
-        .check_ok();
-    let read = stored(&blocks_of(&th.client, board_id).await);
-    assert_eq!(read.title, "by the admin again");
+    assert_eq!(said(&read), Some(doc("by the admin")));
     assert_eq!(read.modified_by, admin.id);
+    th.teardown().await;
 }
 
 /// The commenter's role changes the commenter's own comment, not a card, and makes no
-/// card of a comment; a viewer changes nothing.
+/// card; a patch of a comment takes no `type` to make one of it. A viewer changes nothing.
 #[tokio::test]
 async fn a_commenter_changes_no_card_and_makes_none() {
     let th = Setup::native().start().await.init_basic().await;
     let boards = boards_with_roles(&th).await;
     let content = card_with_content(&th, &boards).await;
     let board_id = &boards.board.id;
-    let path = block_path(board_id, &content.comment.id);
-    let many = format!("{TEST_WS}/boards/{board_id}/blocks");
+    let own = comment_by(&boards.commenter, &content.card, "own").await;
 
     boards
         .commenter
-        .patch(&path, &json!({"type": "card"}))
-        .await
-        .check_error(StatusCode::BAD_REQUEST, "a block's type does not change");
-    boards
-        .commenter
-        .patch(
-            &block_path(board_id, &content.card.id),
-            &title_patch("a card"),
-        )
-        .await
-        .check_error(StatusCode::FORBIDDEN, "access denied to make board changes");
-    let own = insert_one(
-        &boards.commenter,
-        &child_of(&content.card, BlockType::Comment, "own"),
-    )
-    .await;
-    boards
-        .commenter
-        .patch(
-            &many,
-            &batch(&[(&own, "own, changed"), (&content.card, "x")]),
-        )
-        .await
-        .check_error(StatusCode::FORBIDDEN, "access denied to make board changes");
-    boards
-        .commenter
-        .patch(
-            &many,
-            &json!({"blockIds": [own.id], "blockPatches": [{"type": "card"}]}),
-        )
+        .patch(&comment_path(&own), &json!({"type": "card"}))
         .await
         .check_bad_request();
+    boards
+        .commenter
+        .patch(
+            &format!("{TEST_WS}/cards/{}", content.card.id),
+            &json!({"title": "a card"}),
+        )
+        .await
+        .check_error(StatusCode::FORBIDDEN, "access denied to patch card");
+    boards
+        .commenter
+        .post(
+            &format!("{TEST_WS}/boards/{board_id}/cards/batch-patch"),
+            &json!({"cardIds": [content.card.id], "updatedProperties": {}}),
+        )
+        .await
+        .check_error(StatusCode::FORBIDDEN, "access denied to patch cards");
+    boards
+        .commenter
+        .post(
+            &format!("{TEST_WS}/boards/{board_id}/cards"),
+            &json!({"title": "made"}),
+        )
+        .await
+        .check_error(StatusCode::FORBIDDEN, "access denied to create card");
     // A viewer changes nothing.
     boards
         .viewer
-        .patch(&block_path(board_id, &own.id), &title_patch("by a viewer"))
+        .patch(
+            &comment_path(&own),
+            &json!({"body": doc("by a viewer"), "readAt": own.updated_at}),
+        )
         .await
-        .check_error(StatusCode::FORBIDDEN, "access denied to make board changes");
+        .check_forbidden();
     let read = blocks_of(&th.client, board_id).await;
+    assert_eq!(said(find(&read, &own.id)), Some(doc("own")), "not changed");
+    assert_eq!(find(&read, &content.card.id).title, "card", "not changed");
     assert!(
-        titles(&read).contains(&"own") && titles(&read).contains(&"card"),
-        "nothing changed: {:?}",
+        !titles(&read).contains(&"made"),
+        "no card made: {:?}",
         titles(&read)
     );
+    th.teardown().await;
 }
 
-/// The commenter's role changes the text of the commenter's own comment, its body; moving
-/// it to another card (`parentId`) is for editors, refused as any change the role may not
-/// make on
-/// patchBlock and patchBlocks; patchContainersAndBlocks refuses a commenter before, by the
-/// board's permission. A `parentId` that stays as it was moves nothing. An editor
-/// moves their own comment and not somebody else's; an admin moves anybody's.
+/// The commenter's role changes the text of the commenter's own comment, its body. A
+/// comment stays on its card: a patch of it takes no `parentId` (400), whoever sends it.
 #[tokio::test]
 async fn a_commenter_changes_the_text_of_their_comment_but_does_not_move_it() {
     let th = Setup::native().start().await.init_basic().await;
@@ -595,155 +438,26 @@ async fn a_commenter_changes_the_text_of_their_comment_but_does_not_move_it() {
     let board_id = &boards.board.id;
     let second = insert_one(&th.client, &new_block(board_id, BlockType::Card, "second")).await;
     let own = &content.comment;
-    let path = block_path(board_id, &own.id);
-    let doc = |text: &str| {
-        json!({"type": "doc", "content": [
-            {"type": "paragraph", "content": [{"type": "text", "text": text}]},
-        ]})
-    };
+    let path = comment_path(own);
 
-    boards
+    let changed: Block = boards
         .commenter
         .patch(
             &path,
-            &json!({"body": doc("changed"), "readAt": own.updated_at, "parentId": own.parent_id}),
+            &json!({"body": doc("changed"), "readAt": own.updated_at}),
         )
         .await
-        .check_no_content();
-    let refused = "access denied to make board changes";
-    boards
-        .commenter
-        .patch(&path, &json!({"parentId": second.id}))
-        .await
-        .check_error(StatusCode::FORBIDDEN, refused);
-    boards
-        .commenter
-        .patch(
-            &blocks_path(board_id),
-            &json!({"blockIds": [own.id], "blockPatches": [{"parentId": second.id}]}),
-        )
-        .await
-        .check_error(StatusCode::FORBIDDEN, refused);
-    let moved_together = json!({
-        "containerIds": [board_id], "containerPatches": [{}],
-        "blockIds": [own.id], "blockPatches": [{"parentId": second.id}],
-    });
-    boards
-        .commenter
-        .patch(&format!("{TEST_WS}/containers-and-blocks"), &moved_together)
-        .await
-        .check_error(
-            StatusCode::FORBIDDEN,
-            "access denied to modifying board properties",
-        );
+        .ok_json();
+    // A comment names no card to be on: its author and the board's admins, who may
+    // change it, are told so; an editor may not change it at all.
+    let moved = json!({"parentId": second.id, "readAt": changed.updated_at});
+    for client in [&boards.commenter, &th.client] {
+        client.patch(&path, &moved).await.check_bad_request();
+    }
+    boards.editor.patch(&path, &moved).await.check_forbidden();
     let read = blocks_of(&th.client, board_id).await;
     let comment = find(&read, &own.id);
     assert_eq!(comment.parent_id, content.card.id, "not moved");
-    assert_eq!(
-        comment.body.as_ref().map(|body| body.document().clone()),
-        Some(doc("changed")),
-        "its text changed"
-    );
-}
-
-/// An editor moves their own comment to another card, alone or with the board, but not
-/// somebody else's; an admin moves anybody's.
-#[tokio::test]
-async fn an_editor_moves_their_own_comment_and_an_admin_anybodys() {
-    let th = Setup::native().start().await.init_basic().await;
-    let boards = boards_with_roles(&th).await;
-    let content = card_with_content(&th, &boards).await;
-    let board_id = &boards.board.id;
-    let second = insert_one(&th.client, &new_block(board_id, BlockType::Card, "second")).await;
-    let own = &content.comment;
-    let path = block_path(board_id, &own.id);
-
-    // An editor moves their own comment, alone or with the board.
-    let editors = insert_one(
-        &boards.editor,
-        &child_of(&content.card, BlockType::Comment, "the editor's"),
-    )
-    .await;
-    boards
-        .editor
-        .patch(
-            &block_path(board_id, &editors.id),
-            &json!({"parentId": second.id}),
-        )
-        .await
-        .check_no_content();
-    boards
-        .editor
-        .patch(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containerIds": [board_id], "containerPatches": [{}],
-                "blockIds": [editors.id], "blockPatches": [{"parentId": content.card.id}],
-            }),
-        )
-        .await
-        .check_ok();
-    // Naming the card a comment is on moves nothing: the commenter may.
-    boards
-        .commenter
-        .patch(
-            &path,
-            &json!({"parentId": content.card.id, "title": "still on the card"}),
-        )
-        .await
-        .check_no_content();
-
-    // Somebody else's comment: not the editor, but the admin.
-    boards
-        .editor
-        .patch(&path, &json!({"parentId": second.id}))
-        .await
-        .check_error(
-            StatusCode::FORBIDDEN,
-            "access denied to change other users' comments",
-        );
-    th.client
-        .patch(&path, &json!({"parentId": second.id}))
-        .await
-        .check_no_content();
-    let read = blocks_of(&th.client, board_id).await;
-    assert_eq!(find(&read, &editors.id).parent_id, content.card.id);
-    assert_eq!(
-        find(&read, &own.id).parent_id,
-        second.id,
-        "moved by the admin"
-    );
-}
-
-/// Block types are fixed at creation: neither an editor nor an admin can mutate an
-/// existing attachment or card into a comment via `patchBlock` or `patchBlocks`.
-#[tokio::test]
-async fn a_block_type_cannot_be_mutated_to_comment_even_by_an_admin() {
-    let th = Setup::native().start().await.init_basic().await;
-    let boards = boards_with_roles(&th).await;
-    let content = card_with_content(&th, &boards).await;
-    let board_id = &boards.board.id;
-    let into_comment = json!({"type": "comment", "title": "I approve"});
-
-    for client in [&boards.editor, &th.client] {
-        let single = client
-            .patch(&block_path(board_id, &content.text.id), &into_comment)
-            .await;
-        single.check_bad_request();
-        assert_eq!(single.refused_at(), "/type", "single patch refuses /type");
-
-        let batch = client
-            .patch(
-                &format!("{TEST_WS}/boards/{board_id}/blocks"),
-                &json!({"blockIds": [content.text.id], "blockPatches": [into_comment]}),
-            )
-            .await;
-        batch.check_bad_request();
-        assert_eq!(
-            batch.refused_at(),
-            "/blockPatches/0/type",
-            "batch patch refuses /blockPatches/0/type"
-        );
-    }
+    assert_eq!(said(comment), Some(doc("changed")), "its text changed");
     th.teardown().await;
 }

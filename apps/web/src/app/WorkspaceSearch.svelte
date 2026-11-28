@@ -16,10 +16,13 @@
   (`places.ts`). The name of the board or wiki of a hit is the one the
   sidebar knows, or else the title the search returned.
 
-  Above what was found, the boards, wikis, diaries and courses to go to at
-  once (`SearchJumps`): the first of the sidebar's before anything is typed,
-  then those whose title holds it. In the reader's own space the entries of
-  diaries are a kind to find, each named by its day.
+  Above what was found, the reader's stars (`WorkspaceFavorites`) and, before
+  anything is typed, what they opened last on this browser
+  (`recent-places.ts`, at most eight, never of a diary); then the boards,
+  wikis, diaries and courses to go to at once (`SearchJumps`): the first of
+  the sidebar's before anything is typed, then those whose title holds it.
+  In the reader's own space the entries of diaries are a kind to find, each
+  named by its day.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -36,19 +39,26 @@
   import { SearchSession } from '$lib/features/search/search-session.svelte.ts';
   import { SearchSwitch } from '$lib/features/search/search-switch.svelte.ts';
   import SearchDialog from '$lib/features/search/SearchDialog.svelte';
-  import { shownTitle } from '$lib/features/shell/shown-title.ts';
+  import { favoriteTitle, shownTitle } from '$lib/features/shell/shown-title.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import { overlayOpen } from '$lib/layout/back.svelte.ts';
   import { Opener } from '$lib/focus.ts';
-  import { searchJumps } from '$lib/logic/search-jumps.ts';
+  import { favoriteJumps, searchJumps } from '$lib/logic/search-jumps.ts';
   import type { Container } from '$lib/logic/wire.ts';
-  import { isOwnSpace, type Workspace } from '$lib/state/index.ts';
+  import {
+    isOwnSpace,
+    workspaceFavorites,
+    type Favorite,
+    type Workspace,
+  } from '$lib/state/index.ts';
   import type { SearchHit } from '$lib/state/content-search.ts';
 
-  import { focusThePlace, goToPlace, routeOfPlace, type Place } from './places.ts';
+  import { focusThePlace, goToPlace, placeOfFavorite, routeOfPlace, type Place } from './places.ts';
+  import { shownRecents } from './recent-places.ts';
   import { placeRoute } from './route-path.ts';
   import type { Router } from './router.svelte.ts';
   import SearchJumps from './SearchJumps.svelte';
+  import SearchPlaces from './SearchPlaces.svelte';
 
   let { workspace, router }: { workspace: Workspace; router: Router } = $props();
 
@@ -61,6 +71,12 @@
   const enabled = $derived(new SearchSwitch(workspace.backend.search));
 
   const keys = searchKeysLabel();
+
+  const favorites = $derived(workspaceFavorites(workspace));
+  /** What the reader opened last here, read each time the search opens. */
+  let recents = $state.raw<readonly Favorite[]>([]);
+  /** Which opening of the search the places read last are of: an earlier one's are not shown. */
+  let recentsTurn = 0;
 
   /** Where the focus goes back to: where it was, or the page where that is gone. */
   function returnTo(): HTMLElement | undefined {
@@ -93,6 +109,13 @@
       },
     });
     open = true;
+    void favorites.read();
+    recents = [];
+    const turn = ++recentsTurn;
+    void shownRecents(workspace).then((shown) => {
+      // Not those of an opening before, nor of the workspace left meanwhile.
+      if (open && turn === recentsTurn && workspace.info?.id === workspaceId) recents = shown;
+    });
     return true;
   }
 
@@ -172,6 +195,21 @@
     settleFocus();
   }
 
+  function favoriteHref(place: Favorite): string {
+    return router.href(routeOfPlace(router, placeOfFavorite(place, workspace.info?.id)));
+  }
+
+  /** Closes the search, then goes to a star or to what was opened last, as to a hit. */
+  async function goToFavorite(place: Favorite): Promise<void> {
+    dialog?.leaving();
+    session?.close();
+    open = false;
+    await tick();
+    goToPlace(router, placeOfFavorite(place, workspace.info?.id));
+    await tick();
+    settleFocus();
+  }
+
   function containerOf(hit: SearchHit): string {
     const container = workspace.containers.find((one) => one.id === hit.containerId);
     if (container) return shownTitle(container);
@@ -185,7 +223,28 @@
 <svelte:window {onkeydown} />
 
 {#snippet jumps(query: string)}
+  {@const starred = favoriteJumps(favorites.list, query, favoriteTitle)}
   {@const found = searchJumps(workspace.containers, query, shownTitle)}
+  {#if starred.length > 0}
+    <SearchPlaces
+      heading={m.favorites_search()}
+      testId="search-favorites"
+      places={starred}
+      locale={workspace.locale}
+      hrefOf={favoriteHref}
+      onGo={(place: Favorite) => void goToFavorite(place)}
+    />
+  {/if}
+  {#if query.trim() === '' && recents.length > 0}
+    <SearchPlaces
+      heading={m.favorites_recent()}
+      testId="search-recent"
+      places={recents}
+      locale={workspace.locale}
+      hrefOf={favoriteHref}
+      onGo={(place: Favorite) => void goToFavorite(place)}
+    />
+  {/if}
   {#if found.length > 0}
     <SearchJumps
       containers={found}

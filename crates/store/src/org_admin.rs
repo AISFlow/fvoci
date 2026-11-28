@@ -13,7 +13,7 @@ use fvoci_model::{
 };
 
 use crate::audit::{self, AuditActor, AuditEntry};
-use crate::db::{Dialect, Id, LockRank, OptId, OrganizationHeld, Row, Scope};
+use crate::db::{Id, LockRank, OptId, OrganizationHeld, Row, RowLock, Scope};
 use crate::error::{StoreError, Taken};
 use crate::trash::{self, Purged, Trashed};
 use crate::{Paging, Store, directory, joinings, person_names, users, workspaces};
@@ -447,16 +447,13 @@ impl Store {
             // alone: an organization no longer in use still has its trash emptied.
             let held_org = hold_organization_row(scope).await?;
             // Held against a restoration under way, which then finds nothing to restore.
-            scope.record_lock(LockRank::Workspace, workspace_id);
             let mut sql = scope.sql("SELECT id FROM workspaces WHERE id = ");
             sql.bind(Id(workspace_id))
                 .push_bind(" AND org_id = ", scope.org()?)
                 .push(" AND deleted_at IS NOT NULL")
                 .push_bind(" AND deleted_at < ", deleted_before);
-            if scope.dialect() == Dialect::Postgres {
-                sql.push(" FOR UPDATE");
-            }
-            if scope.fetch_optional(sql).await?.is_none() {
+            sql.push_lock(scope.row_lock(LockRank::Workspace, workspace_id, RowLock::Update));
+            if !scope.exists(sql).await? {
                 return Ok(Purged::default());
             }
             remove_workspace(scope, held_org, workspace_id).await
@@ -488,7 +485,7 @@ impl Store {
                 .push_bind(" AND org_id = ", scope.org()?)
                 .push(" AND deleted_at IS NULL")
                 .push_bind(" AND is_system = ", false);
-            if scope.fetch_optional(sql).await?.is_none() {
+            if !scope.exists(sql).await? {
                 return Ok(Joining::NotFound);
             }
             let membership = membership(scope, workspace_id, user_id).await?;
@@ -625,12 +622,14 @@ pub(crate) async fn remove_workspace<'c>(
 ) -> Result<Purged, StoreError> {
     let mut sql = scope.sql("SELECT id FROM containers WHERE workspace_id = ");
     sql.bind(Id(workspace_id)).push(" ORDER BY id");
-    let containers: Vec<String> = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<_, _>>()?;
+    let containers: Vec<String> = scope.all(sql).await?;
+    // Every board, then every block of them, before the first goes: each then holds
+    // what it holds.
+    for container_id in &containers {
+        crate::containers::lock_container_for_deletion(scope, container_id).await?;
+    }
+    let ids: Vec<&str> = containers.iter().map(String::as_str).collect();
+    trash::hold_blocks_of_containers(scope, &ids).await?;
     for container_id in &containers {
         trash::delete_container(scope, container_id, "").await?;
     }
@@ -667,14 +666,11 @@ pub(crate) async fn hold_organization_row<'c>(
     scope: &mut Scope<'c>,
 ) -> Result<OrganizationHeld<'c>, StoreError> {
     let org_key = scope.org_id().unwrap_or_default();
-    scope.record_lock(LockRank::Organization, &org_key);
     let mut sql = scope.sql("SELECT id FROM organizations WHERE id = ");
     sql.bind(scope.org()?);
     // Not FOR UPDATE: what refers to the organization (a member, a workspace, a record)
     // is still added meanwhile; only another holder of this lock waits.
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR NO KEY UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Organization, &org_key, RowLock::NoKeyUpdate));
     scope.fetch_optional(sql).await?;
     Ok(OrganizationHeld::new())
 }
@@ -744,7 +740,7 @@ async fn another_admin(scope: &mut Scope<'_>, user_id: &str) -> Result<bool, Sto
         .push_bind(" AND om.role = ", OrgRole::Admin.as_str())
         .push_bind(" AND om.user_id <> ", Id(user_id))
         .push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// How a user who joined a workspace as the organization's administrator was in it
@@ -894,6 +890,7 @@ async fn end_joining(
         .push_bind(" AND user_id = ", Id(user_id));
     scope.execute(sql).await?;
     if joined.prior.is_none() {
+        crate::favorites::forget_user_in_workspace(scope, workspace_id, user_id).await?;
         crate::unit_progress::forget_user_in_workspace(scope, workspace_id, user_id).await?;
         crate::course_exams::forget_user_in_workspace(scope, workspace_id, user_id).await?;
         crate::unit_reviews::forget_user_in_workspace(scope, workspace_id, user_id).await?;

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::common::ROOT_WORKSPACE_ID;
-use crate::fixtures::{PNG, block, has_extension, id_of, new_blocks, new_board, new_card};
+use crate::fixtures::{PNG, has_extension, id_of, new_board, new_card};
 use crate::harness::ROOT_API;
 use crate::harness::{API, OCTET_STREAM, Payload, Session, multipart, string_member};
 
@@ -49,21 +49,13 @@ pub(crate) async fn templates(s: &mut Session) {
         .find(|board| board["properties"]["onboarding"] == json!(true))
         .map(id_of)
         .expect("the welcome template exists");
-    let welcome_blocks = s
-        .get(
-            "welcome blocks",
-            &format!("{ROOT_API}/boards/{welcome}/blocks"),
-        )
-        .user(&alice)
-        .unrecorded()
-        .await;
-    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-    for item in welcome_blocks
-        .json()
-        .as_array()
-        .expect("the blocks are a list")
-    {
-        *counts.entry(string_member(item, "type")).or_default() += 1;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for (kind, rest) in [("card", "cards"), ("view", "views")] {
+        let path = format!("{ROOT_API}/boards/{welcome}/{rest}");
+        counts.insert(
+            kind,
+            listed(s, &alice, &format!("welcome {rest}"), &path).await,
+        );
     }
     s.note("welcome template block counts", &json!(counts));
     s.get("templates: anonymous", &format!("{ROOT_API}/templates"))
@@ -94,15 +86,11 @@ pub(crate) async fn templates(s: &mut Session) {
     )
     .user(&alice)
     .await;
-    let copied = s
-        .get(
-            "welcome board blocks",
-            &format!("{ROOT_API}/boards/{welcome_board}/blocks"),
-        )
-        .user(&alice)
-        .unrecorded()
-        .await;
-    let copied_blocks = copied.json().as_array().map_or(0, Vec::len);
+    let mut copied_blocks = 0;
+    for rest in ["cards", "views"] {
+        let path = format!("{ROOT_API}/boards/{welcome_board}/{rest}");
+        copied_blocks += listed(s, &alice, &format!("welcome board {rest}"), &path).await;
+    }
     s.note("welcome board block count", &json!(copied_blocks));
     s.post("onboard again", &format!("{ROOT_API}/onboard"))
         .user(&alice)
@@ -267,40 +255,19 @@ pub(crate) async fn files(s: &mut Session) {
         "create card for attachment",
     )
     .await;
-    let created = new_blocks(
-        s,
-        &alice,
-        &board,
-        json!([block(
-            "img1",
-            &board,
-            "attachment",
-            "",
-            &card1,
-            json!({"fileId": file_id})
-        )]),
-        "insert an attachment block",
-    )
-    .await;
-    let image = created
-        .as_array()
-        .expect("the created blocks are a list")
-        .iter()
-        .find(|block| block["type"] == "attachment")
-        .map(id_of)
-        .expect("the attachment block was created");
-    s.delete(
-        "delete the image block",
-        &format!("{ROOT_API}/boards/{board}/blocks/{image}"),
-    )
-    .user(&alice)
-    .await;
-    s.get(
-        "blocks after deleting the image",
-        &format!("{ROOT_API}/boards/{board}/blocks"),
-    )
-    .user(&alice)
-    .await;
+    let attachments = format!("{ROOT_API}/boards/{board}/cards/{card1}/attachments");
+    let image = s
+        .post("insert an attachment block", &attachments)
+        .json(json!({"fileId": file_id}))
+        .user(&alice)
+        .await
+        .string("id");
+    s.delete("delete the image block", &format!("{attachments}/{image}"))
+        .user(&alice)
+        .await;
+    s.get("attachments after deleting the image", &attachments)
+        .user(&alice)
+        .await;
     s.post(
         "duplicate the board with files",
         &format!("{ROOT_API}/containers/{board}/duplicate"),
@@ -384,39 +351,21 @@ pub(crate) async fn archive(s: &mut Session) {
         "create exported card",
     )
     .await;
-    new_blocks(
-        s,
-        &alice,
-        &board,
-        json!([
-            block(
-                "text1",
-                &board,
-                "comment",
-                "Exported text",
-                &card1,
-                json!({})
-            ),
-            block(
-                "img1",
-                &board,
-                "attachment",
-                "",
-                &card1,
-                json!({"fileId": file_id})
-            ),
-            block(
-                "view1",
-                &board,
-                "view",
-                "Exported view",
-                "",
-                json!({"viewType": "table"})
-            ),
-        ]),
-        "insert content",
-    )
-    .await;
+    let below = format!("{ROOT_API}/boards/{board}/cards/{card1}");
+    s.post("insert a comment", &format!("{below}/comments"))
+        .json(json!({"body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Exported text"}]},
+        ]}}))
+        .user(&alice)
+        .await;
+    s.post("insert an attachment", &format!("{below}/attachments"))
+        .json(json!({"fileId": file_id}))
+        .user(&alice)
+        .await;
+    s.post("insert a view", &format!("{ROOT_API}/boards/{board}/views"))
+        .json(json!({"title": "Exported view", "viewType": "table"}))
+        .user(&alice)
+        .await;
 
     let export = format!("{ROOT_API}/containers/{board}/archive/export");
     let exported = s.get("export", &export).user(&alice).unrecorded().await;
@@ -483,12 +432,18 @@ pub(crate) async fn archive(s: &mut Session) {
         .find(|board| board["title"] == "Exported board")
         .map(id_of)
         .expect("the imported board is listed");
-    s.get(
-        "imported blocks",
-        &format!("{ROOT_API}/boards/{copy}/blocks"),
-    )
-    .user(&bob)
-    .await;
+    let imported_cards = s
+        .get("imported cards", &format!("{ROOT_API}/boards/{copy}/cards"))
+        .user(&bob)
+        .await;
+    let imported_card = string_member(&imported_cards.json()[0], "id");
+    let imported_below = format!("{ROOT_API}/boards/{copy}/cards/{imported_card}");
+    s.get("imported views", &format!("{ROOT_API}/boards/{copy}/views"))
+        .user(&bob)
+        .await;
+    s.get("imported comments", &format!("{imported_below}/comments"))
+        .user(&bob)
+        .await;
     s.get(
         "imported members",
         &format!("{ROOT_API}/containers/{copy}/members"),
@@ -498,7 +453,7 @@ pub(crate) async fn archive(s: &mut Session) {
     let images = s
         .get(
             "imported attachment block",
-            &format!("{ROOT_API}/boards/{copy}/blocks?type=attachment"),
+            &format!("{imported_below}/attachments"),
         )
         .user(&bob)
         .unrecorded()
@@ -586,4 +541,15 @@ async fn upload_archive(s: &mut Session, user: &str, bytes: &[u8]) -> String {
         assert_eq!(sent.status, 204, "the part is received");
     }
     upload
+}
+
+/// How many things the list at `path` answers `user`, unrecorded.
+async fn listed(s: &mut Session, user: &str, name: &str, path: &str) -> usize {
+    s.get(name, path)
+        .user(user)
+        .unrecorded()
+        .await
+        .json()
+        .as_array()
+        .map_or(0, Vec::len)
 }

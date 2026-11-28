@@ -218,15 +218,12 @@ async fn session(e: &Editing, client: u64, each: u64) -> (Editor, i64) {
 
 /// The comment blocks of a card, as a client reads them.
 async fn comments(th: &TestServer, board_id: &str, card_id: &str) -> Vec<Value> {
-    let blocks: Vec<Value> = th
-        .client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks"))
+    th.client
+        .get(&format!(
+            "{TEST_WS}/boards/{board_id}/cards/{card_id}/comments"
+        ))
         .await
-        .ok_json();
-    blocks
-        .into_iter()
-        .filter(|block| block["type"] == "comment" && block["parentId"] == card_id)
-        .collect()
+        .ok_json()
 }
 
 /// Sessions that open a card's document one after the other, each writing `each`
@@ -239,10 +236,11 @@ async fn comments(th: &TestServer, board_id: &str, card_id: &str) -> Vec<Value> 
 async fn sessions_until_made_again(th: &TestServer, e: &Editing, written: u64, each: u64) -> u64 {
     let collab = e.app.collab();
     let board_id = card(&th.client, &e.card_id).await.board_id;
-    let comment = json!([{"containerId": board_id, "parentId": e.card_id, "type": "comment",
-                          "createdAt": 1, "updatedAt": 1, "body": paragraphs(&["a comment"])}]);
     th.client
-        .post(&format!("{TEST_WS}/boards/{board_id}/blocks"), &comment)
+        .post(
+            &format!("{TEST_WS}/boards/{board_id}/cards/{}/comments", e.card_id),
+            &json!({"body": paragraphs(&["a comment"])}),
+        )
         .await
         .created_json::<Value>();
     let commented = comments(th, &board_id, &e.card_id).await;

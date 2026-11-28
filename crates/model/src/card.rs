@@ -11,6 +11,7 @@ use crate::body::{Body, BodyChange, BodySummary};
 use crate::body_markdown::ComplexBlock;
 use crate::card_property::{PersonProperties, check_card_property_values};
 use crate::id::new_id;
+use crate::recurrence::{RECURRED_TO_FIELD, RECURRENCE_FIELD, Recurrence};
 use crate::refusal::{RefusalReason, Refusals};
 
 /// The member of a card's fields that holds its icon.
@@ -141,6 +142,19 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub complex_blocks: Option<Vec<ComplexBlock>>,
+    /// How the card repeats: when it is completed, the server makes the next card
+    /// (`recurredTo`). Only on a board with a rule of done (`doneWhen`) and a due date
+    /// property, else 400 `recurrence_needs_board_rules`; a template does not repeat.
+    /// Left out for a card that does not repeat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub recurrence: Option<Recurrence>,
+    /// Of a card that repeated when it was completed, the identifier of the card the
+    /// server made after it, which repeats in its place; left out otherwise. The server
+    /// writes it: what a request sends here is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub recurred_to: Option<String>,
 }
 
 /// A card in short, as a list gives it with `compact=true` (`getCards`): enough to tell
@@ -349,7 +363,7 @@ impl Card {
             }
         };
 
-        let summary = block.body.as_ref().map(Body::summary).unwrap_or_default();
+        let summary = block.body.as_ref().map_or_default(Body::summary);
         let mut card = Self {
             id: block.id.clone(),
             board_id: block.container_id.clone(),
@@ -374,6 +388,12 @@ impl Card {
             body_markdown: None,
             has_complex_blocks: None,
             complex_blocks: None,
+            recurrence: Recurrence::of_fields(&block.fields),
+            recurred_to: block
+                .fields
+                .get(RECURRED_TO_FIELD)
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         };
         card.populate(now);
         Ok(card)
@@ -388,6 +408,12 @@ impl From<Card> for Block {
         fields.insert(CARD_ICON_FIELD.to_owned(), Value::from(card.icon));
         fields.insert("isTemplate".to_owned(), Value::from(card.is_template));
         fields.insert("properties".to_owned(), Value::Object(card.properties));
+        if let Some(recurrence) = card.recurrence {
+            fields.insert(RECURRENCE_FIELD.to_owned(), recurrence.to_value());
+        }
+        if let Some(next) = card.recurred_to {
+            fields.insert(RECURRED_TO_FIELD.to_owned(), Value::from(next));
+        }
 
         Self {
             id: card.id,
@@ -452,6 +478,15 @@ pub struct CardPatch {
     /// as they are (`Card.hasComplexBlocks`): `appendCardMarkdown` adds to it instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_markdown: Option<String>,
+    /// How the card is to repeat, as `Card.recurrence` says; `null` makes it stop. Left
+    /// out, it stays as it is.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::nullable_patch"
+    )]
+    #[schema(value_type = Option<Recurrence>)]
+    pub recurrence: Option<Option<Recurrence>>,
 }
 
 impl CardPatch {
@@ -499,6 +534,9 @@ impl CardPatch {
         }
         self.property_changes().apply_to(&mut card.properties);
         self.body.apply_to(&mut card.body);
+        if let Some(recurrence) = self.recurrence {
+            card.recurrence = recurrence;
+        }
     }
 
     /// The changes of the patch to the card's property values.
@@ -539,15 +577,23 @@ impl CardPatch {
         if let Some(icon) = &self.icon {
             updated_fields.insert(CARD_ICON_FIELD.to_owned(), Value::from(icon.clone()));
         }
+        let mut deleted_fields = Vec::new();
+        match self.recurrence {
+            Some(Some(recurrence)) => {
+                updated_fields.insert(RECURRENCE_FIELD.to_owned(), recurrence.to_value());
+            }
+            Some(None) => deleted_fields.push(RECURRENCE_FIELD.to_owned()),
+            None => {}
+        }
 
         Ok(BlockPatch {
             parent_id: self.parent_id.clone(),
             title: self.title.clone(),
             updated_fields,
+            deleted_fields,
             property_changes: self.property_changes(),
             body: self.body.clone(),
             read_at: self.read_at,
-            ..BlockPatch::default()
         })
     }
 }

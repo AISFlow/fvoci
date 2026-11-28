@@ -133,8 +133,10 @@
                     {#if kind}
                       <span
                         class="shrink-0 rounded-sm border px-1 text-xs text-muted-foreground"
-                        data-testid="trash-kind">{kind.named()}</span
+                        data-testid="trash-kind"
                       >
+                        {kind.named()}
+                      </span>
                     {/if}
                   </span>
                   <span class="text-xs text-pretty text-muted-foreground">

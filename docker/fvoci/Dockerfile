@@ -31,16 +31,35 @@
 # least 32 characters, such as `openssl rand -hex 32`): the listener is plain HTTP.
 
 ARG RUST_VERSION=1
-ARG NODE_VERSION=24
+ARG NODE_VERSION=26
 
-# The web app: pnpm as package.json's packageManager pins it (corepack checks its
-# hash), the dependencies exactly as the lockfile has them. The fonts it builds are
-# downloads pinned by their SHA-256 (apps/web/tools/fonts/sources.json).
+# The web app: pnpm as package.json's packageManager pins it, the dependencies exactly
+# as the lockfile has them. The fonts it builds are downloads pinned by their SHA-256
+# (apps/web/tools/fonts/sources.json).
 FROM node:${NODE_VERSION}-trixie-slim AS web
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-RUN corepack enable
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Node 26 comes without corepack. The package of the pinned pnpm is checked against the
+# hash packageManager gives before npm installs it. That package is a wrapper: what runs
+# is the native binary of the platform, which npm installs from the package that names
+# it (@pnpm/exe.linux-<arch>). Before it first runs, that package is checked against the
+# integrity the lockfile gives it, and the installed binary against the one it holds.
+RUN set -eu; \
+    pin=$(node -p 'require("./package.json").packageManager'); \
+    version=${pin#pnpm@}; version=${version%%+*}; \
+    cd /tmp; \
+    npm pack --silent "pnpm@$version" >/dev/null; \
+    echo "${pin##*+sha512.}  pnpm-$version.tgz" | sha512sum --check --strict --quiet -; \
+    npm install --global --no-audit --no-fund "./pnpm-$version.tgz"; \
+    rm "pnpm-$version.tgz"; \
+    exe="@pnpm/exe.linux-$(node -p process.arch)"; \
+    tgz="pnpm-exe.linux-$(node -p process.arch)-$version.tgz"; \
+    npm pack --silent "$exe@$version" >/dev/null; \
+    sum=$(node -p 'require("node:crypto").createHash("sha512").update(require("node:fs").readFileSync(process.argv[1])).digest("base64")' "$tgz"); \
+    grep -A1 -F "'$exe@$version':" /src/pnpm-lock.yaml | grep -qF "{integrity: sha512-$sum}"; \
+    tar -xzOf "$tgz" package/pnpm | cmp - "$(npm root --global)/pnpm/pnpm"; \
+    rm "$tgz"; \
+    test "$(pnpm --version)" = "$version"
 COPY apps/web/package.json apps/web/
 COPY vendor/rhwp-studio/package.json vendor/rhwp-studio/
 RUN --mount=type=cache,id=fvoci-pnpm-store,target=/root/.cache/pnpm-store \

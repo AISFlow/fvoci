@@ -200,7 +200,7 @@ async fn a_wiki_of_another_organization_is_reached_through_its_workspace_only() 
         )
         .await
         .expect("their page is stored")
-        .page;
+        .first;
     let (wiki, page) = (wiki.id, page.id);
     let (our_wiki, our_page) = wiki_of(&th.client, "open").await;
 

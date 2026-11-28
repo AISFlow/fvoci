@@ -297,9 +297,9 @@
             >
               <option value="">{m.course_meetings_field_none()}</option>
               {#if preservedPresenter}
-                <option value={preservedPresenter}
-                  >{memberDisplayLabel(course, preservedPresenter)}</option
-                >
+                <option value={preservedPresenter}>
+                  {memberDisplayLabel(course, preservedPresenter)}
+                </option>
               {/if}
               {#each course.orderedMembers as member (member.userId)}
                 <option value={member.userId}>{memberDisplayLabel(course, member.userId)}</option>

@@ -16,7 +16,7 @@
 <script lang="ts">
   import { parseDate, type DateValue as PickedDay } from '@internationalized/date';
   import type { DateRange as PickedRange } from 'bits-ui';
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, untrack, type Snippet } from 'svelte';
 
   import { isComposing } from '$lib/keys.ts';
   import PickerSurface from '$lib/components/picker-surface/PickerSurface.svelte';
@@ -71,7 +71,21 @@
     now?: number;
     presentation?: Presentation;
     startOpen?: boolean;
+    /**
+     * Draws what opens the picker, in place of the value: a button of the bar
+     * of a selection. `props` are spread on it, before its own attributes.
+     */
+    opener?: Snippet<[{ props: Record<string, unknown> }]>;
+    /** Where the focus goes once the picker closes, for an `opener` not to be seen. */
+    returnFocus?: () => HTMLElement | null | undefined;
+    /**
+     * The value stands for several cards whose values differ: none is shown
+     * as chosen, and clearing is offered all the same (it clears them all).
+     */
+    mixed?: boolean;
     onChange?: (value: StoredDateValue | undefined) => void;
+    /** More of the picker, under its switches (how a card repeats). */
+    extra?: Snippet | undefined;
   }
 
   let {
@@ -84,7 +98,11 @@
     now,
     presentation = 'popover',
     startOpen = false,
+    opener,
+    returnFocus,
+    mixed = false,
     onChange,
+    extra,
   }: Props = $props();
 
   const zone = $derived(regional.timeZone);
@@ -126,6 +144,8 @@
    * change that removes it, and closing the picker can be that change.
    */
   let picking = false;
+  /** "Clear" was pressed over values that differ (`mixed`). */
+  let clearedAll = false;
 
   // Removed while open (the card closed under it): keep what was picked.
   onDestroy(() => {
@@ -144,6 +164,7 @@
   });
 
   function begin(): void {
+    clearedAll = false;
     draft = stored;
     rangeOn = stored.to !== undefined;
     timeOn = hasTime(stored);
@@ -154,7 +175,9 @@
   function commit(): void {
     const next = formatDateValue(draft);
     const before = formatDateValue(stored);
-    if (next?.from !== before?.from || next?.to !== before?.to) onChange?.(next);
+    // Cleared over values that differ: nothing shown changed, but every card's value goes.
+    const cleared = mixed && clearedAll && next === undefined;
+    if (cleared || next?.from !== before?.from || next?.to !== before?.to) onChange?.(next);
   }
 
   function setOpen(next: boolean): void {
@@ -270,6 +293,7 @@
   }
 
   function clear(): void {
+    clearedAll = mixed;
     draft = {};
     rangeOn = false;
     timeOn = false;
@@ -290,21 +314,25 @@
 </script>
 
 {#if editable}
-  <PickerSurface bind:open={() => open, setOpen} {presentation} title={name}>
+  <PickerSurface bind:open={() => open, setOpen} {presentation} title={name} {returnFocus}>
     {#snippet trigger({ props }: { props: Record<string, unknown> })}
-      <button
-        {...props}
-        type="button"
-        data-slot="property-date"
-        class="flex min-h-8 w-full min-w-0 items-center rounded-md px-2 py-1 text-left hover:bg-muted aria-expanded:bg-muted roomy:min-h-touch"
-      >
-        <span class="sr-only">{name}</span>
-        {#if text !== ''}
-          <span class="min-w-0 truncate">{text}</span>
-        {:else if placeholder !== ''}
-          <span data-slot="property-empty" class="text-muted-foreground">{placeholder}</span>
-        {/if}
-      </button>
+      {#if opener}
+        {@render opener({ props })}
+      {:else}
+        <button
+          {...props}
+          type="button"
+          data-slot="property-date"
+          class="flex min-h-8 w-full min-w-0 items-center rounded-md px-2 py-1 text-left hover:bg-muted aria-expanded:bg-muted roomy:min-h-touch"
+        >
+          <span class="sr-only">{name}</span>
+          {#if text !== ''}
+            <span class="min-w-0 truncate">{text}</span>
+          {:else if placeholder !== ''}
+            <span data-slot="property-empty" class="text-muted-foreground">{placeholder}</span>
+          {/if}
+        </button>
+      {/if}
     {/snippet}
 
     <div class="flex flex-col gap-1.5 p-1" data-slot="date-picker">
@@ -436,6 +464,10 @@
           bind:checked={() => timeOn, toggleTime}
         />
       </label>
+      {#if extra}
+        <hr class="border-border" />
+        {@render extra()}
+      {/if}
       <hr class="border-border" />
       <div class="flex justify-between gap-1">
         <Button
@@ -448,7 +480,7 @@
         <Button
           variant="ghost"
           class="group-data-[presentation=sheet]/surface:min-h-touch"
-          disabled={!draft.from}
+          disabled={!draft.from && !mixed}
           onclick={clear}
         >
           {m['DateRange.clear']()}
@@ -457,11 +489,11 @@
     </div>
   </PickerSurface>
 {:else if text !== ''}
-  <span data-slot="property-date" class="block min-w-0 truncate px-2 py-1.5" title={text}
-    >{text}</span
-  >
+  <span data-slot="property-date" class="block min-w-0 truncate px-2 py-1.5" title={text}>
+    {text}
+  </span>
 {:else if placeholder !== ''}
-  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground"
-    >{placeholder}</span
-  >
+  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground">
+    {placeholder}
+  </span>
 {/if}

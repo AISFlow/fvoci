@@ -12,17 +12,16 @@ use thiserror::Error;
 use crate::JsonMap;
 use crate::body::{Body, BodyChange};
 use crate::card_property::{CardPropertyError, PersonProperties, validate_block_properties};
-use crate::course_schedule::{
-    UNIT_AMOUNT_FIELD, UNIT_AMOUNT_UNIT_FIELD, UNIT_SCHEDULED_DATE_FIELD, is_amount_unit_value,
-    is_unit_amount_value,
-};
-use crate::diary::{
-    ENTRY_BODY_UPDATED_AT_FIELD, ENTRY_DATE_FIELD, ENTRY_MOOD_FIELD, ENTRY_PLACE_FIELD,
-    ENTRY_WEATHER_FIELD, is_body_updated_at_value, is_date_value, is_mood_value, is_note_value,
-};
-use crate::page::{PAGE_ICON_FIELD, PAGE_ORDER_FIELD, is_order_value};
+use crate::diary::ENTRY_DATE_FIELD;
 use crate::relation::RelationError;
 use crate::view_fields::{ViewFieldsError, drop_malformed_view_fields, validate_view_fields};
+
+mod field_kinds;
+
+use field_kinds::{
+    CARD_FIELD_KINDS, CHAPTER_FIELD_KINDS, ENTRY_FIELD_KINDS, FieldKind, PAGE_FIELD_KINDS,
+    UNIT_FIELD_KINDS, is_card_field_of_its_kind,
+};
 
 /// Maximum number of Unicode scalar values allowed in a block title (`16_383`).
 pub const BLOCK_TITLE_MAX_CHARS: usize = 16_383;
@@ -116,13 +115,15 @@ impl BlockType {
     }
 
     /// Checks that a block of this type may have `body`: only a type that has a body
-    /// ([`BlockType::has_body`]) has one, and a comment's has no file block.
+    /// ([`BlockType::has_body`]) has one, a comment's has no file block, and only a
+    /// card's, a page's and a unit's shows a board view ([`Self::shows_board_views`]).
     ///
     /// # Errors
     ///
     /// Returns [`BlockError::BodyNotAllowed`] for a body of a type without one,
-    /// [`BlockError::FileBlockInComment`] for a comment's body with a file block, and
-    /// [`BlockError::BodyTooLarge`] if the serialized body exceeds
+    /// [`BlockError::FileBlockInComment`] for a comment's body with a file block,
+    /// [`BlockError::BoardViewNotAllowed`] for a board view in the body of a comment or
+    /// an entry, and [`BlockError::BodyTooLarge`] if the serialized body exceeds
     /// [`crate::BODY_MAX_BYTES`].
     pub fn check_body(self, body: Option<&Body>) -> Result<(), BlockError> {
         let Some(body) = body else {
@@ -134,7 +135,18 @@ impl BlockType {
         if self == Self::Comment && body.has_file_blocks() {
             return Err(BlockError::FileBlockInComment);
         }
+        if !self.shows_board_views() && body.has_board_views() {
+            return Err(BlockError::BoardViewNotAllowed);
+        }
         body.check_size().map_err(|_| BlockError::BodyTooLarge)
+    }
+
+    /// Returns `true` for the types whose body may show a board view: a card, a page and
+    /// a unit. A comment is a line said beside one of them, and a diary is its writer's
+    /// own, whose entries show no board of the workspace.
+    #[must_use]
+    pub const fn shows_board_views(self) -> bool {
+        matches!(self, Self::Card | Self::Page | Self::Unit)
     }
 
     /// Returns `true` for the types a comment may be on: a card of a board, a page of
@@ -287,6 +299,10 @@ pub enum BlockError {
     /// A comment's body has a file block: files go in the body of a card or a page.
     #[error("a comment's body has no file block")]
     FileBlockInComment,
+    /// The body of a comment or a diary entry has a board view: a board view goes in the
+    /// body of a card, a page or a unit ([`BlockType::shows_board_views`]).
+    #[error("only the body of a card, a page or a unit shows a board view")]
+    BoardViewNotAllowed,
     /// The serialized body exceeds [`crate::BODY_MAX_BYTES`].
     #[error("{}", crate::BodyError::TooLarge)]
     BodyTooLarge,
@@ -311,10 +327,6 @@ pub enum BlockError {
         /// What its value must be.
         expected: &'static str,
     },
-    /// A write of blocks gives the type of a card on `/boards/{boardId}/blocks`: cards
-    /// are created through `createCard`.
-    #[error("a card is made by createCard")]
-    CardByBlocks,
     /// A write of blocks gives the type of a page, as the type of a new block or of a
     /// patch: see [`BlockError::type_not_current`].
     #[error("a page is made and changed by the operations of pages")]
@@ -431,6 +443,9 @@ pub enum BlockError {
     /// A card that has sub-cards is turned into a template card.
     #[error("a card with sub-cards cannot become a template")]
     TemplateCardHasChildren,
+    /// A card is to repeat on a board without a rule of done or a named due date property.
+    #[error("a card repeats on a board with a rule of done and a named due date property")]
+    RecurrenceNeedsBoardRules,
     /// A card, or a sub-card below it, would be deeper on its board than the limit.
     #[error("the card would be deeper on its board than {limit}")]
     CardTooDeep {
@@ -458,84 +473,6 @@ pub enum BlockError {
     /// Another block is placed below an attachment block.
     #[error("an attachment is the parent of no block")]
     ParentIsAttachment,
-}
-
-/// The fields of a unit whose value has one kind.
-const UNIT_FIELD_KINDS: [FieldKind; 4] = [
-    (PAGE_ORDER_FIELD, "an order the server made", is_order_value),
-    (
-        UNIT_AMOUNT_FIELD,
-        "an integer from 1 to 100000",
-        is_unit_amount_value,
-    ),
-    (
-        UNIT_AMOUNT_UNIT_FIELD,
-        "one of minutes, pages, or problems",
-        is_amount_unit_value,
-    ),
-    (
-        UNIT_SCHEDULED_DATE_FIELD,
-        "a calendar date as YYYY-MM-DD",
-        is_date_value,
-    ),
-];
-
-/// The fields of a chapter: `order` only; study amount and scheduled date are forbidden.
-const CHAPTER_FIELD_KINDS: [FieldKind; 4] = [
-    (PAGE_ORDER_FIELD, "an order the server made", is_order_value),
-    (UNIT_AMOUNT_FIELD, "absent on a chapter", |_| false),
-    (UNIT_AMOUNT_UNIT_FIELD, "absent on a chapter", |_| false),
-    (UNIT_SCHEDULED_DATE_FIELD, "absent on a chapter", |_| false),
-];
-
-/// The fields of an entry whose value has one kind, as [`CARD_FIELD_KINDS`] has a
-/// card's. Its `date` is there besides, which [`Block::validate`] asks for by itself: an
-/// entry is not without it.
-const ENTRY_FIELD_KINDS: [FieldKind; 5] = [
-    (ENTRY_DATE_FIELD, "a day, as `2026-11-21`", is_date_value),
-    (ENTRY_MOOD_FIELD, "a mood", is_mood_value),
-    (
-        ENTRY_WEATHER_FIELD,
-        "a text of at most 100 characters",
-        is_note_value,
-    ),
-    (
-        ENTRY_PLACE_FIELD,
-        "a text of at most 100 characters",
-        is_note_value,
-    ),
-    (
-        ENTRY_BODY_UPDATED_AT_FIELD,
-        "a time in milliseconds",
-        is_body_updated_at_value,
-    ),
-];
-
-/// The fields of a page whose value has one kind, as [`CARD_FIELD_KINDS`] has a card's.
-const PAGE_FIELD_KINDS: [FieldKind; 2] = [
-    (PAGE_ICON_FIELD, "a string", Value::is_string),
-    (PAGE_ORDER_FIELD, "an order the server made", is_order_value),
-];
-
-/// One rule of [`CARD_FIELD_KINDS`] or [`PAGE_FIELD_KINDS`]: the field, its kind as a
-/// message names it, and whether a value is of that kind.
-type FieldKind = (&'static str, &'static str, fn(&Value) -> bool);
-
-/// The fields of a card whose value has one kind. Anything else breaks the reading of
-/// the card ([`crate::Card::from_block`]). `null` is taken as absent and is of every
-/// kind.
-const CARD_FIELD_KINDS: [FieldKind; 2] = [
-    ("icon", "a string", Value::is_string),
-    ("isTemplate", "a boolean", Value::is_boolean),
-];
-
-/// Whether `value` may be the value of the card field `field` ([`CARD_FIELD_KINDS`]).
-fn is_card_field_of_its_kind(field: &str, value: &Value) -> bool {
-    value.is_null()
-        || CARD_FIELD_KINDS
-            .iter()
-            .find(|(name, _, _)| *name == field)
-            .is_none_or(|(_, _, is_of_kind)| is_of_kind(value))
 }
 
 impl BlockError {
@@ -626,7 +563,7 @@ pub struct Block {
     /// For a comment whose body was changed: when that last happened, in milliseconds
     /// since the Unix epoch. Absent for a comment never changed and for every other
     /// block. The server sets it, and ignores a client's. What the body said before is
-    /// `getCommentVersions`'.
+    /// `getCardCommentVersions`'.
     #[serde(default, skip_serializing_if = "crate::serde_util::is_zero")]
     pub edited_at: i64,
 }
@@ -678,13 +615,16 @@ impl Block {
         self.takes_number().then_some(self.number).flatten()
     }
 
-    /// Clears `number` when this block does not currently take one
-    /// ([`Self::takes_number`]), so responses and broadcasts never expose a preserved
-    /// card number on a template.
-    pub fn hide_inactive_number(&mut self) {
+    /// The block as it leaves the server: without a number it does not take now
+    /// ([`Self::takes_number`]). A card template keeps its number in storage, to have it
+    /// again once it is a card again; no response, broadcast, webhook or archive shows
+    /// it until then. Asked where a block leaves, not where it is read.
+    #[must_use]
+    pub fn outward(mut self) -> Self {
         if !self.takes_number() {
             self.number = None;
         }
+        self
     }
 
     /// Checks that the block may be stored.
@@ -855,8 +795,7 @@ impl Block {
         }
         self.body
             .as_ref()
-            .map(|body| body.file_ids().into_iter().map(str::to_owned).collect())
-            .unwrap_or_default()
+            .map_or_default(|body| body.file_ids().into_iter().map(str::to_owned).collect())
     }
 
     /// The stored name of the file of an attachment block: its `fileId`, or failing that

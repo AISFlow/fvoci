@@ -433,6 +433,20 @@ pub mod testing {
             self.doc.transact().encode_diff_v1(&before)
         }
 
+        /// Appends a board view of the view `view_id` and gives the update of it.
+        #[must_use]
+        pub fn append_board_view(&self, view_id: &str) -> Vec<u8> {
+            use yrs::{ReadTxn as _, Xml as _, XmlElementPrelim, XmlFragment as _};
+            let before = self.doc.transact().state_vector();
+            let root = self.doc.get_or_insert_xml_fragment(crate::FIELD);
+            {
+                let mut txn = self.doc.transact_mut();
+                let view = root.push_back(&mut txn, XmlElementPrelim::empty("boardView"));
+                view.insert_attribute(&mut txn, "viewId", view_id);
+            }
+            self.doc.transact().encode_diff_v1(&before)
+        }
+
         /// Appends an empty element `name` and gives the update of it: of a node no body
         /// has, an update the server repairs.
         #[must_use]

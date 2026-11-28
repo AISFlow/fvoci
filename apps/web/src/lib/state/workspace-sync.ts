@@ -126,6 +126,24 @@ export function exportContainerArchive(
   );
 }
 
+/**
+ * The container as a ZIP of Markdown files (`Backend.markdown`), as a
+ * transfer of its own beside its archive's; none where there is no Markdown.
+ */
+export function exportContainerMarkdown(
+  transfers: Transfers,
+  backend: Backend,
+  containers: readonly Container[],
+  containerId: string,
+): Promise<DownloadedFile | undefined> {
+  const markdown = backend.markdown;
+  if (!markdown) return Promise.resolve(undefined);
+  const container = containers.find((one) => one.id === containerId);
+  return transfers.run('export', `markdown ${containerId}`, container?.title ?? '', (options) =>
+    markdown.exportContainer(containerId, options),
+  );
+}
+
 export function exportWorkspaceArchive(
   transfers: Transfers,
   backend: Backend,

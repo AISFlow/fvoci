@@ -19,7 +19,7 @@ use fvoci_model::{
 use serde_json::Value;
 
 use crate::containers;
-use crate::db::{Dialect, Id, Scope};
+use crate::db::{Id, Scope, SqlFragment};
 use crate::error::StoreError;
 
 /// How many identifiers one query of [`types_on_board`] asks for, twice (live and in the
@@ -148,8 +148,7 @@ fn collect_written_relations(
         let had: HashSet<&str> = before
             .and_then(|before| before.get(property))
             .and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(relation_link_card).collect())
-            .unwrap_or_default();
+            .map_or_default(|items| items.iter().filter_map(relation_link_card).collect());
         let Some(links) = check_relation_value(&block.id, property, value, &had)
             .map_err(|error| invalid(&block.id, error.into()))?
         else {
@@ -338,23 +337,19 @@ async fn types_on_board(
     board_id: &str,
     ids: &[&str],
 ) -> Result<HashMap<String, BlockType>, StoreError> {
-    let trashed_type = match scope.dialect() {
-        Dialect::Sqlite => {
-            "CASE WHEN block_type <> '' THEN block_type ELSE json_extract(block, '$.type') END"
-        }
-        Dialect::Postgres => "CASE WHEN block_type <> '' THEN block_type ELSE block->>'type' END",
-    };
+    let mut trashed_type = SqlFragment::of(&["CASE WHEN block_type <> '' THEN block_type ELSE "]);
+    trashed_type
+        .push_fragment(&scope.json_text("block", "type"))
+        .push(" END");
     let mut types = HashMap::with_capacity(ids.len());
     for chunk in ids.chunks(LOOKUP_CHUNK) {
         let mut sql = scope.sql("SELECT id, type FROM blocks WHERE container_id = ");
         sql.bind(Id(board_id))
             .push(" AND id IN (")
             .bind_list(chunk.iter().map(|id| Id(id)))
-            .push([
-                ") UNION ALL SELECT id, ",
-                trashed_type,
-                " FROM deleted_blocks WHERE container_id = ",
-            ])
+            .push(") UNION ALL SELECT id, ")
+            .push(&trashed_type)
+            .push(" FROM deleted_blocks WHERE container_id = ")
             .bind(Id(board_id))
             .push(" AND id IN (")
             .bind_list(chunk.iter().map(|id| Id(id)))
@@ -385,9 +380,11 @@ pub(crate) fn clear_copied_values(blocks: &mut [Block], definitions: &[CardPrope
 }
 
 /// Leaves out of the relation values of copied blocks of a board what names no card of
-/// the board, in the trash or out of it, and of the rest what is past
-/// [`fvoci_model::RELATION_LIMIT`]: copies of cards stored before the rules may name
-/// cards that are gone for good, or blocks that are no cards.
+/// the board, in the trash or out of it, nor a card among `blocks`, and of the rest what
+/// is past [`fvoci_model::RELATION_LIMIT`]: copies of cards stored before the rules may
+/// name cards that are gone for good, or blocks that are no cards. A copy that names
+/// another copy (a sub-card of the card copied with it) keeps it, before the copies are
+/// stored as after.
 pub(crate) async fn keep_cards_of_board(
     scope: &mut Scope<'_>,
     blocks: &mut [Block],
@@ -413,6 +410,11 @@ pub(crate) async fn keep_cards_of_board(
     }
     let named: Vec<&str> = named.iter().map(String::as_str).collect();
     let types = types_on_board(scope, board_id, &named).await?;
+    let copied: HashSet<String> = blocks
+        .iter()
+        .filter(|block| block.block_type == BlockType::Card)
+        .map(|block| block.id.clone())
+        .collect();
     for block in blocks.iter_mut() {
         let Some(Value::Object(values)) = block.fields.get_mut("properties") else {
             continue;
@@ -420,8 +422,9 @@ pub(crate) async fn keep_cards_of_board(
         for property in &relations {
             if let Some(Value::Array(items)) = values.get_mut(*property) {
                 items.retain(|item| {
-                    relation_link_card(item)
-                        .is_some_and(|id| types.get(id) == Some(&BlockType::Card))
+                    relation_link_card(item).is_some_and(|id| {
+                        types.get(id) == Some(&BlockType::Card) || copied.contains(id)
+                    })
                 });
                 items.truncate(RELATION_LIMIT);
             }

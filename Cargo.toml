@@ -5,7 +5,7 @@ members = ["crates/model", "crates/store", "crates/collab", "crates/server", "xt
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 license = "MIT"
 publish = false
 
@@ -51,7 +51,6 @@ libc = "0.2"
 # The `openidconnect` crate is not used: its 4.x line depends on `rsa` 0.9, which has an
 # advisory (RUSTSEC-2023-0071) with no fixed 0.9 release, and on reqwest 0.12. License: MIT.
 jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs"] }
-mime_guess = "2"
 clap = { version = "4", features = ["derive"] }
 # Ctrl-C, SIGTERM and SIGHUP in xtask, so that a test run stops the containers it
 # started. License: MIT OR Apache-2.0.

@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::Store;
 // Re-exported through `containers` so newer modules avoid naming the legacy table module.
 pub(crate) use crate::container_team_access::inherited_members_source;
-use crate::db::{Dialect, Id, LockRank, OptId, Param, Row, Scope, Sql};
+use crate::db::{FromRow, Id, LockRank, OptId, Param, Row, RowLock, Scope, Sql};
 use crate::error::StoreError;
 use crate::{block_derived, container_kinds, members, subscriptions};
 
@@ -54,6 +54,7 @@ pub enum Joined {
 
 impl Joined {
     /// The membership as it is after joining.
+    #[cfg(any(test, feature = "test-util"))]
     pub fn into_member(self) -> ContainerMember {
         match self {
             Self::New(member) | Self::Raised(member) | Self::Already(member) => member,
@@ -402,16 +403,13 @@ pub(crate) async fn fetch_containers(
     scope: &mut Scope<'_>,
     sql: Sql,
 ) -> Result<Vec<Container>, StoreError> {
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(container_from_row)
-        .collect()
+    scope.all(sql).await
 }
 
-fn container_from_row(row: &Row) -> Result<Container, StoreError> {
-    container_from_row_at(row, 0)
+impl FromRow for Container {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        container_from_row_at(row, 0)
+    }
 }
 
 pub(crate) fn container_from_row_at(row: &Row, base: usize) -> Result<Container, StoreError> {
@@ -819,18 +817,13 @@ pub(crate) async fn lock_container_of_kind(
     scope: &mut Scope<'_>,
     container_id: &str,
 ) -> Result<Option<ContainerKind>, StoreError> {
-    let mut sql = scope.sql("SELECT kind FROM containers WHERE id = ");
+    let mut sql = scope.sql("SELECT id, kind FROM containers WHERE id = ");
     sql.bind(Id(container_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR NO KEY UPDATE");
-    }
-    match scope.fetch_optional(sql).await? {
-        Some(row) => {
-            scope.record_lock(LockRank::Container, container_id);
-            Ok(Some(container_kinds::kind_from_text(&row.text(0)?)?))
-        }
-        None => Ok(None),
-    }
+    scope
+        .first_held::<(String, String)>(LockRank::Container, sql, RowLock::NoKeyUpdate)
+        .await?
+        .map(|(_, kind)| container_kinds::kind_from_text(&kind))
+        .transpose()
 }
 
 /// Locks a board as [`lock_container`] does; one that is not there is not found.
@@ -860,14 +853,25 @@ pub(crate) async fn lock_container_for_deletion(
 ) -> Result<bool, StoreError> {
     let mut sql = scope.sql("SELECT id FROM containers WHERE id = ");
     sql.bind(Id(container_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
+    let held: Option<String> = scope
+        .first_held(LockRank::Container, sql, RowLock::Update)
+        .await?;
+    Ok(held.is_some())
+}
+
+/// Takes the lock of [`lock_container_for_deletion`] on the boards `container_ids`, in
+/// the order of their identifiers, as [`lock_containers`] does. For a write that
+/// deletes more than one board, before it holds anything under them: a board's lock
+/// made stronger once its blocks are held, or a later board, waits for those who hold
+/// it more weakly while they may wait for what this write holds.
+pub(crate) async fn lock_containers_for_deletion(
+    scope: &mut Scope<'_>,
+    container_ids: &BTreeSet<&str>,
+) -> Result<(), StoreError> {
+    for container_id in container_ids {
+        lock_container_for_deletion(scope, container_id).await?;
     }
-    let found = scope.fetch_optional(sql).await?.is_some();
-    if found {
-        scope.record_lock(LockRank::Container, container_id);
-    }
-    Ok(found)
+    Ok(())
 }
 
 /// Takes the lock of [`lock_container`] on several boards, in the order of their

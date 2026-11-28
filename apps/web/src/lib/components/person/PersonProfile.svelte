@@ -68,9 +68,9 @@
     >
       <span class="min-w-0 truncate" translate="no">{titled}</span>
       {#if displayName}
-        <span class="max-w-[50%] min-w-0 shrink-0 truncate text-muted-foreground" translate="no"
-          >@{username}</span
-        >
+        <span class="max-w-[50%] min-w-0 shrink-0 truncate text-muted-foreground" translate="no">
+          @{username}
+        </span>
       {/if}
     </Popover.Trigger>
     <Popover.Content

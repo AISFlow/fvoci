@@ -5,7 +5,7 @@ use fvoci_model::User;
 
 use crate::db::{Id, Scope, Sql};
 use crate::error::StoreError;
-use crate::users::{fetch_users, user_not_found};
+use crate::users::fetch_users;
 
 /// The columns of [`crate::users::USER_COLUMNS`], in its order, with the times of an erased
 /// account read as zero (and its `deleted_at` as `NULL`).
@@ -24,6 +24,7 @@ const ERASED_AS_NOBODY: &str = concat!(
 ///
 /// Returns [`StoreError::NotFound`] if none of the users is found and
 /// [`StoreError::NotAllFound`] unless exactly one user is found per identifier.
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) async fn users_by_ids(
     scope: &mut Scope<'_>,
     user_ids: &[String],
@@ -31,7 +32,7 @@ pub(crate) async fn users_by_ids(
 ) -> Result<Vec<User>, StoreError> {
     let users = found_users_by_ids(scope, user_ids, narrow).await?;
     if users.is_empty() {
-        return Err(user_not_found());
+        return Err(crate::users::user_not_found());
     }
     // Comparing counts ensures duplicate requested IDs fail rather than silently collapsing.
     if users.len() != user_ids.len() {
@@ -79,7 +80,7 @@ pub(crate) async fn found_users_by_ids(
 mod tests {
     use super::*;
 
-    /// The row is read by position (`users::user_from_row`): the columns are those of
+    /// The row is read by position (`User::from_row`): the columns are those of
     /// a user, in the same order.
     #[test]
     fn an_erased_account_is_read_from_the_columns_of_a_user_in_their_order() {

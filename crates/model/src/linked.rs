@@ -1,9 +1,9 @@
-//! A card, a page or a unit as a reference shows it.
+//! A card, a page or a unit as a reference shows it, and a view as a board view does.
 //!
-//! A body names a block by its identifier alone (the node `reference`), and what the
-//! block is called is read when the body is shown, for whoever reads: [`LinkedBlock`]
-//! is that answer, for what a reference names, for what names a block, and for what
-//! is found to be named.
+//! A body names a block by its identifier alone (the node `reference`, and the view a
+//! `boardView` shows), and what the block is called is read when the body is shown, for
+//! whoever reads: [`LinkedBlock`] is that answer, for what a reference names, for what
+//! names a block, for what is found to be named, and for the view a board view shows.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +11,10 @@ use crate::block::{Block, BlockType};
 use crate::card::CARD_ICON_FIELD;
 use crate::container::{Container, ContainerKind};
 use crate::page::PAGE_ICON_FIELD;
+use crate::view_fields::ViewType;
 
-/// What a reference may name: a card of a board, a page of a wiki or a unit of a course.
+/// What a reference may name: a card of a board, a page of a wiki or a unit of a course;
+/// and the view of a board a board view shows, which no reference names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkedKind {
@@ -22,6 +24,10 @@ pub enum LinkedKind {
     Page,
     /// A unit of a course.
     Unit,
+    /// A view of a board, as a board view of a body shows it
+    /// ([`LinkedBlock::view_of`]). A reference names none: [`LinkedKind::of`] is never
+    /// this.
+    View,
 }
 
 impl LinkedKind {
@@ -58,6 +64,14 @@ pub struct LinkedBlock {
     pub container_id: String,
     /// Whether that is a board, a wiki or a course.
     pub container_kind: ContainerKind,
+    /// The title of its board: told of a view alone, whose board a board view names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub container_title: Option<String>,
+    /// How a view shows its cards: told of a view alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub view_type: Option<ViewType>,
 }
 
 impl LinkedBlock {
@@ -69,7 +83,7 @@ impl LinkedBlock {
         let icon_field = match kind {
             LinkedKind::Card => Some(CARD_ICON_FIELD),
             LinkedKind::Page => Some(PAGE_ICON_FIELD),
-            LinkedKind::Unit => None,
+            LinkedKind::Unit | LinkedKind::View => None,
         };
         let icon = icon_field
             .and_then(|field| block.fields.get(field))
@@ -84,6 +98,38 @@ impl LinkedBlock {
             icon,
             container_id: container.id.clone(),
             container_kind: container.kind,
+            container_title: None,
+            view_type: None,
+        })
+    }
+
+    /// A view of a board as a board view shows it, with its board's title and how it
+    /// shows its cards; `None` for a block that is no view, or a container that is no
+    /// board.
+    #[must_use]
+    pub fn view_of(view: &Block, board: &Container) -> Option<Self> {
+        if view.block_type != BlockType::View
+            || board.kind != ContainerKind::Board
+            || view.container_id != board.id
+        {
+            return None;
+        }
+        let view_type = view
+            .fields
+            .get("viewType")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|written| written.parse::<ViewType>().ok())
+            .unwrap_or_default();
+        Some(Self {
+            id: view.id.clone(),
+            kind: LinkedKind::View,
+            title: view.title.clone(),
+            number: None,
+            icon: String::new(),
+            container_id: board.id.clone(),
+            container_kind: board.kind,
+            container_title: Some(board.title.clone()),
+            view_type: Some(view_type),
         })
     }
 }
@@ -158,5 +204,53 @@ mod tests {
                 "{other:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_view_is_shown_with_its_board_and_only_on_its_board() {
+        let board = Container {
+            id: "0197a5a0-0000-7000-8000-000000000002".to_owned(),
+            kind: ContainerKind::Board,
+            title: "Roadmap".to_owned(),
+            ..Container::default()
+        };
+        let mut view = block(BlockType::View);
+        view.fields.insert("viewType".to_owned(), json!("calendar"));
+        let shown = LinkedBlock::view_of(&view, &board).expect("a view is shown");
+        assert_eq!(
+            serde_json::to_value(&shown).expect("serialized"),
+            json!({"id": "0197a5a0-0000-7000-8000-000000000001", "kind": "view",
+                "title": "Plan", "icon": "",
+                "containerId": "0197a5a0-0000-7000-8000-000000000002", "containerKind": "board",
+                "containerTitle": "Roadmap", "viewType": "calendar"}),
+        );
+        assert_eq!(
+            LinkedBlock::of(&view, &board),
+            None,
+            "no reference names a view"
+        );
+        assert_eq!(
+            LinkedBlock::view_of(&block(BlockType::Card), &board),
+            None,
+            "a card is no view"
+        );
+        let wiki = Container {
+            kind: ContainerKind::Wiki,
+            ..board.clone()
+        };
+        assert_eq!(
+            LinkedBlock::view_of(&view, &wiki),
+            None,
+            "a view is of a board"
+        );
+        let other = Container {
+            id: "0197a5a0-0000-7000-8000-000000000009".to_owned(),
+            ..board
+        };
+        assert_eq!(
+            LinkedBlock::view_of(&view, &other),
+            None,
+            "of its own board"
+        );
     }
 }

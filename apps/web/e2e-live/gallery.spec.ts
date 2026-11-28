@@ -65,26 +65,21 @@ test('a gallery shows each card’s first picture and the start of its text, rea
     { type: 'image', attrs: { fileId } },
     paragraph('Second line'),
   ]);
-  const [gallery] = (await (
-    await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-      data: [
-        {
-          containerId: board.boardId,
-          type: 'view',
-          title: 'Gallery',
-          createdAt: 1,
-          updatedAt: 1,
-          fields: {
-            viewType: 'gallery',
-            sort: [],
-            shownProperties: [],
-            cardOrder: [],
-            filter: { operation: 'and', filters: [] },
-          },
+  const { view: gallery } = (await (
+    await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`, {
+      data: {
+        title: 'Gallery',
+        viewType: 'gallery',
+        fields: {
+          viewType: 'gallery',
+          sort: [],
+          shownProperties: [],
+          cardOrder: [],
+          filter: { operation: 'and', filters: [] },
         },
-      ],
+      },
     })
-  ).json()) as Schemas['Block'][];
+  ).json()) as Schemas['BoardViewWrite'];
 
   const errors = watchErrors(page);
   const asked: string[] = [];
@@ -98,7 +93,7 @@ test('a gallery shows each card’s first picture and the start of its text, rea
   await expect(page.locator(`[data-card="${sunset}"]`)).toBeVisible();
   expect(asked.some((url) => url.includes('preview=true'))).toBe(false);
 
-  await page.goto(boardPath(board, gallery?.id ?? ''));
+  await page.goto(boardPath(board, gallery.id));
   const card = page.getByTestId('gallery').locator(`[data-card="${sunset}"]`);
   const preview = card.locator('[data-slot="card-preview"]');
   await expect(preview).toContainText('Taken from the pier');

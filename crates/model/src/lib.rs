@@ -18,6 +18,7 @@ mod body;
 mod body_markdown;
 mod body_version;
 mod card;
+mod card_event;
 mod card_property;
 mod category;
 mod client_config;
@@ -31,6 +32,7 @@ mod course_schedule;
 mod date_value;
 mod deleted_item;
 mod diary;
+mod favorite;
 mod file_lease;
 mod file_version;
 mod files;
@@ -50,6 +52,8 @@ mod person_name;
 mod problem;
 mod public_containers;
 mod public_link;
+mod reaction;
+mod recurrence;
 mod refusal;
 mod relation;
 mod search;
@@ -96,15 +100,15 @@ pub use block_ids::{
     rewrite_block_ids,
 };
 pub use board_ops::{
-    BlankBoardScaffolding, BoardLocale, CardBatchIds, CardDuePoint, CardMovesRequest,
-    CardMovesResult, CategoryContainerUpdate, CategoryPatch, ContainerPermissions,
-    CopiedContainerResult, CopyContainerToWorkspaceRequest, DoneWhen, DuplicateAs, MAX_CARD_BATCH,
-    NewCardAttachment, RestoredCards, default_blank_board_scaffolding, extract_card_due_point,
-    is_card_done,
+    BlankBoardScaffolding, BoardLocale, BoardViewPatch, CardBatchIds, CardBatchPatch, CardDuePoint,
+    CardMovesRequest, CardMovesResult, CategoryContainerUpdate, CategoryPatch,
+    ContainerPermissions, CopiedContainerResult, CopyContainerToWorkspaceRequest, DoneWhen,
+    DuplicateAs, MAX_CARD_BATCH, NewCardAttachment, RestoredCards, default_blank_board_scaffolding,
+    extract_card_due_point, is_card_done,
 };
 pub use body::{
-    BODY_MAX_BYTES, BODY_MAX_DEPTH, BODY_MAX_NODES, BODY_VERSION, Body, BodyChange, BodyError,
-    BodySummary, TaskCount,
+    BODY_MAX_BOARD_VIEWS, BODY_MAX_BYTES, BODY_MAX_DEPTH, BODY_MAX_NODES, BODY_VERSION, Body,
+    BodyChange, BodyError, BodySummary, TaskCount,
 };
 pub use body_markdown::{ComplexBlock, ComplexBlockReason};
 pub use body_version::{
@@ -114,6 +118,7 @@ pub use body_version::{
 pub use card::{
     CARD_PREVIEW_TEXT_LENGTH, Card, CardError, CardPatch, CardPreview, CompactCard, MAX_CARD_DEPTH,
 };
+pub use card_event::{CardChange, CardEvent, CardEventKind, ParseCardEventKindError, card_changes};
 pub use card_property::{
     CardPropertyDefinition, CardPropertyError, DATE_PROPERTY_TYPE, ParsePropertyColorError,
     ParsePropertyTypeError, PersonProperties, PropertyColor, PropertyOption, PropertyType,
@@ -136,9 +141,9 @@ pub use container::{
 };
 pub use container_teams::{ContainerTeam, ContainerTeamRole};
 pub use containers_and_blocks::{
-    ContainersAndBlocks, ContainersAndBlocksError, DeleteContainersAndBlocks,
-    PatchContainersAndBlocks, Renewed, generate_containers_and_blocks_ids,
-    renew_containers_and_blocks_ids, renew_containers_and_blocks_ids_told,
+    ContainersAndBlocks, ContainersAndBlocksError, DeleteContainersAndBlocks, Renewed,
+    generate_containers_and_blocks_ids, renew_containers_and_blocks_ids,
+    renew_containers_and_blocks_ids_told,
 };
 pub use course_exam::{
     COURSE_EXAM_DESCRIPTION_MAX_CHARS, COURSE_EXAM_MAX_SCORE_LIMIT, COURSE_EXAM_TITLE_MAX_CHARS,
@@ -176,6 +181,7 @@ pub use diary::{
     ParseMonthDayError, ParseMoodError, entry_body_updated_at, entry_date, entry_mood,
     is_empty_entry,
 };
+pub use favorite::{Favorite, FavoriteKind, MAX_FAVORITES, UnknownFavoriteKind};
 pub use file_lease::{FileLease, FileLeaseRequest, HeldFileLease};
 pub use file_version::{FileVersion, FileVersionBase, NewFileVersion};
 pub use files::{FileKey, FileRecord, ListedFile, is_storage_path};
@@ -187,8 +193,8 @@ pub use invitation::{
 pub use linked::{LinkedBlock, LinkedKind};
 pub use name::{Named, required_name};
 pub use notification::{
-    Notification, NotificationKind, NotificationSubject, UnknownNotificationKind,
-    UnreadNotifications,
+    Notification, NotificationFilter, NotificationKind, NotificationSubject,
+    UnknownNotificationKind, UnreadNotifications,
 };
 pub use oidc::{
     LinkedIdentity, LoginOptions, LoginOrganization, OIDC_CLIENT_FIELD_MAX_BYTES,
@@ -218,6 +224,14 @@ pub use person_name::{
 pub use problem::{InvalidInput, PROBLEM_MEDIA_TYPE, Problem, json_pointer, pointer_token};
 pub use public_containers::PublicContainers;
 pub use public_link::{PublicLink, PublicLinkChange};
+pub use reaction::{
+    CardWithReactions, CommentWithReactions, EMOJI_MAX_SCALARS, Emoji, PageWithReactions,
+    ParseEmojiError, REACTION_KINDS_PER_BLOCK, Reaction, UnitWithReactions,
+};
+pub use recurrence::{
+    InvalidRecurrence, MOST_PERIODS, RECURRED_TO_FIELD, RECURRENCE_FIELD, Recurrence,
+    RecurrenceAnchor, RecurrenceUnit, not_done_value, with_tasks_unchecked,
+};
 pub use refusal::{NAME_SHOWN_CHARS, Refusal, RefusalReason, Refusals, shown_name};
 pub use relation::{
     ParseRelationKindError, RELATION_LAG_MAX, RELATION_LAG_MIN, RELATION_LIMIT, RelationError,

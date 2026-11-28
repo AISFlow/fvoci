@@ -7,17 +7,22 @@
 //!
 //! Blocks that go with one deletion share a `deletion_id` and come back together: a
 //! card with what is on it, a board with all its blocks. A block takes the subscriptions
-//! to it into the trash and brings them back (`watchers.rs`). A board takes its
+//! to it (`watchers.rs`) and the reactions to it (`reactions.rs`) into the trash and
+//! brings them back. A board takes its
 //! memberships, its file records and the places users filed it under into the trash and
 //! brings them back; its sharing ends with the deletion.
 //!
 //! What has been in the trash for longer than the retention period is removed for good
 //! by [`Store::purge_trash`], and what people were told of it with it (`told.rs`).
 
+mod holds;
+mod reactions;
 mod stored;
 mod told;
 mod watchers;
 
+pub(crate) use holds::{hold_blocks_of_containers, hold_trees_of};
+pub(crate) use reactions::{KeptReactions, forget_reactions_of_organization};
 pub(crate) use watchers::{
     forget_watcher_of_container, forget_watcher_of_organization, forget_watcher_of_workspace,
 };
@@ -38,7 +43,8 @@ use crate::card_hierarchy;
 use crate::category_containers::{self, ContainerPlace};
 use crate::containers;
 use crate::db::{
-    DeletedContainersHeld, Dialect, Id, LockRank, OptId, Param, Row, Scope, Sql, SqlFragment,
+    DeletedContainersHeld, Dialect, Id, LockRank, OptId, Param, Row, RowLock, Scope, Sql,
+    SqlFragment,
 };
 use crate::error::StoreError;
 use crate::file_refs::NewBodyFiles;
@@ -256,8 +262,13 @@ impl Store {
         block_id: &str,
         user_id: &str,
     ) -> Result<Vec<Block>, StoreError> {
-        self.transaction(async |scope| undelete_block(scope, block_id, user_id).await)
-            .await
+        self.transaction(async |scope| {
+            let mut reactions = KeptReactions::default();
+            let restored = undelete_block(scope, block_id, user_id, &mut reactions).await?;
+            reactions.make_again(scope).await?;
+            Ok(restored)
+        })
+        .await
     }
 
     /// Deletes a board with all its blocks: moves them to the trash, together with the
@@ -325,10 +336,7 @@ impl Store {
         kinds: ContainerKinds,
     ) -> Result<Vec<DeletedContainer>, StoreError> {
         self.with_conn(async |scope| {
-            let kind = match scope.dialect() {
-                Dialect::Sqlite => "json_extract(container, '$.kind')",
-                Dialect::Postgres => "container->>'kind'",
-            };
+            let kind = scope.json_text("container", "kind");
             // The memberships are the JSON array of the board's members when it went.
             let was_admin = match scope.dialect() {
                 Dialect::Sqlite => {
@@ -348,7 +356,7 @@ impl Store {
             if let Some(admin_id) = admin_id {
                 sql.push_bind(was_admin, admin_id).push(")");
             }
-            crate::container_kinds::push_kinds(&mut sql, kind, kinds);
+            crate::container_kinds::push_kinds(&mut sql, &kind, kinds);
             sql.push(" ORDER BY deleted_at DESC, id");
             sql.push_page(paging);
             let mut deleted = Vec::new();
@@ -550,13 +558,19 @@ pub(crate) fn block_from_json(row: &Row, index: usize) -> Result<Block, StoreErr
     block_from_value(row.json(index, "block")?)
 }
 
-/// Reads a block and the subscriptions it kept in the trash from one JSON parse.
-fn block_and_watchers_from_json(
-    row: &Row,
-    index: usize,
-) -> Result<(Block, Vec<watchers::StoredWatcher>), StoreError> {
+/// What a block of the trash keeps beside itself, to make again when it comes back.
+struct KeptWith {
+    watchers: Vec<watchers::StoredWatcher>,
+    reactions: Vec<reactions::StoredReaction>,
+}
+
+/// Reads a block and what it kept in the trash beside it from one JSON parse.
+fn block_and_kept_from_json(row: &Row, index: usize) -> Result<(Block, KeptWith), StoreError> {
     let mut value = row.json(index, "block")?;
-    let kept = watchers::take_kept(&mut value)?;
+    let kept = KeptWith {
+        watchers: watchers::take_kept(&mut value)?,
+        reactions: reactions::take_kept(&mut value)?,
+    };
     Ok((block_from_value(value)?, kept))
 }
 
@@ -593,13 +607,16 @@ pub(crate) async fn hold_deleted_containers<'c>(
     scope: &mut Scope<'c>,
     workspace_id: &str,
 ) -> Result<DeletedContainersHeld<'c>, StoreError> {
-    scope.record_lock(LockRank::DeletedContainers, workspace_id);
-    if scope.dialect() != Dialect::Postgres {
-        return Ok(DeletedContainersHeld::new());
-    }
     let mut sql = scope.sql("SELECT id FROM deleted_containers WHERE workspace_id = ");
-    sql.bind(Id(workspace_id)).push(" ORDER BY id FOR UPDATE");
-    scope.fetch_all(sql).await?;
+    sql.bind(Id(workspace_id)).push(" ORDER BY id");
+    scope
+        .hold(
+            LockRank::DeletedContainers,
+            workspace_id,
+            sql,
+            RowLock::Update,
+        )
+        .await?;
     Ok(DeletedContainersHeld::new())
 }
 
@@ -719,7 +736,9 @@ async fn put_blocks_in_trash(
         return Ok(());
     }
     let ids: Vec<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+    holds::hold_blocks(scope, &ids).await?;
     let mut watchers = watchers::watchers_of(scope, &ids).await?;
+    let mut reactions = reactions::reactions_of(scope, &ids).await?;
     for chunk in blocks.chunks(TRASH_INSERT_BATCH) {
         let mut sql = scope.sql(
             "INSERT INTO deleted_blocks \
@@ -731,7 +750,8 @@ async fn put_blocks_in_trash(
                 deleted_at: Some(deleted_at),
                 ..block.clone()
             };
-            let stored = watchers::with_watchers(&in_trash, watchers.remove(&block.id))?;
+            let mut stored = watchers::with_watchers(&in_trash, watchers.remove(&block.id))?;
+            reactions::keep(&mut stored, reactions.remove(&block.id))?;
             sql.push(if index == 0 { "(" } else { ", (" })
                 .bind(Id(&block.id))
                 .push_bind(", ", Id(&block.container_id))
@@ -750,13 +770,35 @@ async fn put_blocks_in_trash(
 
 /// Takes the blocks of one deletion out of the trash and puts them back among the
 /// blocks, marked as modified by `user_id` at `now`, each as `adjust` leaves it, with
-/// the subscriptions they kept. Returns them.
+/// the subscriptions and the reactions they kept. Returns them.
+///
+/// The reactions are made again last ([`KeptReactions::make_again`]): the transaction
+/// is to take no lock after it but of accounts further on.
 pub(crate) async fn take_blocks_out_of_trash(
     scope: &mut Scope<'_>,
     deletion_id: &str,
     user_id: &str,
     now: i64,
+    adjust: impl FnMut(&mut Block),
+) -> Result<Vec<Block>, StoreError> {
+    let mut reactions = KeptReactions::default();
+    let restored =
+        take_out_keeping_reactions(scope, deletion_id, user_id, now, adjust, &mut reactions)
+            .await?;
+    reactions.make_again(scope).await?;
+    Ok(restored)
+}
+
+/// Takes the blocks of one deletion out of the trash as [`take_blocks_out_of_trash`]
+/// does, but for the reactions they kept, which go to `reactions`: for a transaction
+/// that takes several deletions out, and makes the reactions of all again at its end.
+pub(crate) async fn take_out_keeping_reactions(
+    scope: &mut Scope<'_>,
+    deletion_id: &str,
+    user_id: &str,
+    now: i64,
     mut adjust: impl FnMut(&mut Block),
+    reactions: &mut KeptReactions,
 ) -> Result<Vec<Block>, StoreError> {
     let mut sql = scope.sql("SELECT block FROM deleted_blocks WHERE deletion_id = ");
     sql.bind(Id(deletion_id));
@@ -764,8 +806,8 @@ pub(crate) async fn take_blocks_out_of_trash(
     let mut restored: Vec<Block> = Vec::with_capacity(rows.len());
     let mut kept = Vec::with_capacity(rows.len());
     for row in &rows {
-        let (block, watchers) = block_and_watchers_from_json(row, 0)?;
-        kept.push((block.id.clone(), watchers));
+        let (block, kept_with) = block_and_kept_from_json(row, 0)?;
+        kept.push((block.id.clone(), kept_with));
         restored.push(block);
     }
     let mut known_users = KnownUsers::default();
@@ -784,8 +826,9 @@ pub(crate) async fn take_blocks_out_of_trash(
     for index in parents_first(&restored) {
         blocks::insert_block_row(scope, &restored[index], NewBodyFiles::Unchecked).await?;
     }
-    for (block_id, watchers) in &kept {
-        watchers::watch_again(scope, block_id, watchers).await?;
+    for (block_id, kept_with) in kept {
+        watchers::watch_again(scope, &block_id, &kept_with.watchers).await?;
+        reactions.keep(block_id, kept_with.reactions);
     }
     let mut sql = scope.sql("DELETE FROM deleted_blocks WHERE deletion_id = ");
     sql.bind(Id(deletion_id));
@@ -857,16 +900,13 @@ pub(crate) async fn undelete_container(
     container_id: &str,
     user_id: &str,
 ) -> Result<Container, StoreError> {
-    scope.record_lock(LockRank::DeletedContainers, container_id);
     let mut sql = scope.sql(
         "SELECT container, members, files, deletion_id, places FROM deleted_containers WHERE id = ",
     );
     sql.bind(Id(container_id));
     // Of two requests that restore the board at once, the second waits here and then
     // finds the trash without it.
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::DeletedContainers, container_id, RowLock::Update));
     let row = scope
         .fetch_optional(sql)
         .await?

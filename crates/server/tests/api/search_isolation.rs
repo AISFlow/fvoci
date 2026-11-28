@@ -68,8 +68,7 @@ async fn cards_that_went(th: &TestServer, board_id: &str) -> (String, String) {
     let trashed = new_card(&th.client, board_id, "지운 카드", WORD).await;
     let purged = new_card(&th.client, board_id, "사라진 카드", WORD).await;
     for card in [&trashed, &purged] {
-        th.client
-            .delete(&format!("{TEST_WS}/boards/{board_id}/blocks/{}", card.id))
+        crate::blocks::trash_card(&th.client, board_id, &card.id)
             .await
             .check_no_content();
     }
@@ -460,14 +459,9 @@ async fn numbered_world(th: &TestServer) -> NumberedWorld {
     let alpha_1 = new_card(&th.client, &alpha.id, "Alpha first", "body").await;
     let alpha_2 = new_card(&th.client, &alpha.id, "Alpha second", "body").await;
     let text_card = new_card(&th.client, &alpha.id, "Release note", "see #2abc details").await;
-    // Convert Alpha #1 into a template: DB preserves number 1, search must exclude it.
-    th.client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", alpha.id, alpha_1.id),
-            &json!({"updatedFields": {"isTemplate": true}}),
-        )
-        .await
-        .check_no_content();
+    // Alpha #1 made a template, as an older server did: the store keeps number 1,
+    // search must exclude it.
+    crate::blocks::make_template_unchecked(th, &alpha_1.id).await;
 
     // Board Beta: #1 (ordinary), #2 (ordinary)
     new_card(&th.client, &beta.id, "Beta first", "body").await;

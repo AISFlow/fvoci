@@ -261,19 +261,9 @@ async fn an_answer_without_a_result_has_no_body_and_no_content_type() {
     // others are sent with.
     let requests = [
         (
-            Method::PATCH,
-            format!("{TEST_WS}/boards/{board}/blocks/{card}"),
-            json!({"title": "patched"}),
-        ),
-        (
-            Method::PATCH,
-            format!("{TEST_WS}/boards/{board}/blocks"),
-            json!({"blockIds": [card], "blockPatches": [{"title": "patched in a batch"}]}),
-        ),
-        (
-            Method::DELETE,
-            format!("{TEST_WS}/boards/{board}/blocks/{card}"),
-            Value::Null,
+            Method::POST,
+            format!("{TEST_WS}/boards/{board}/cards/batch-delete"),
+            json!({"cardIds": [card]}),
         ),
         (
             Method::DELETE,

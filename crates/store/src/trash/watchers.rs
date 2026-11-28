@@ -84,13 +84,15 @@ pub(super) fn take_kept(block: &mut Value) -> Result<Vec<StoredWatcher>, StoreEr
     }
 }
 
-/// Removes `user_id` from the saved watchers of the trashed blocks selected by `sql`
-/// (`SELECT id, block FROM deleted_blocks WHERE ...`), pre-filtering in SQL with
-/// `instr`/`strpos` so trashed blocks without `watchedBy` or `user_id` never deserialize
-/// their full JSON payloads, and writing back only rows that actually named `user_id`.
-async fn forget_watcher(
+/// Removes `user_id` from the entries kept under `key` (each an object with its
+/// `userId`) of the trashed blocks selected by `sql` (`SELECT id, block FROM
+/// deleted_blocks WHERE ...`), pre-filtering in SQL with `instr`/`strpos` so trashed
+/// blocks without `key` or `user_id` never deserialize their full JSON payloads, and
+/// writing back only rows that actually named `user_id`.
+pub(super) async fn forget_kept(
     scope: &mut Scope<'_>,
     mut sql: Sql,
+    key: &'static str,
     user_id: &str,
 ) -> Result<(), StoreError> {
     if !fvoci_model::is_id(user_id) {
@@ -98,30 +100,32 @@ async fn forget_watcher(
     }
     match scope.dialect() {
         Dialect::Sqlite => {
-            sql.push(" AND instr(block, 'watchedBy') > 0 AND instr(block, ")
+            sql.push_bind(" AND instr(block, ", key)
+                .push(") > 0 AND instr(block, ")
                 .bind(user_id)
                 .push(") > 0");
         }
         Dialect::Postgres => {
-            sql.push(" AND strpos(block::text, 'watchedBy') > 0 AND strpos(block::text, ")
+            sql.push_bind(" AND strpos(block::text, ", key)
+                .push(") > 0 AND strpos(block::text, ")
                 .bind(user_id)
                 .push(") > 0");
         }
     }
     for row in scope.fetch_all(sql).await? {
         let mut block = row.json(1, "block")?;
-        let Some(watchers) = block.get_mut(KEY).and_then(Value::as_array_mut) else {
+        let Some(kept) = block.get_mut(key).and_then(Value::as_array_mut) else {
             continue;
         };
-        let before = watchers.len();
-        watchers.retain(|entry| entry.get("userId").and_then(Value::as_str) != Some(user_id));
-        if watchers.len() == before {
+        let before = kept.len();
+        kept.retain(|entry| entry.get("userId").and_then(Value::as_str) != Some(user_id));
+        if kept.len() == before {
             continue;
         }
-        if watchers.is_empty()
+        if kept.is_empty()
             && let Some(members) = block.as_object_mut()
         {
-            members.remove(KEY);
+            members.remove(key);
         }
         let mut update = scope.sql("UPDATE deleted_blocks SET block = ");
         update
@@ -142,7 +146,7 @@ pub(crate) async fn forget_watcher_of_container(
 ) -> Result<(), StoreError> {
     let mut sql = scope.sql("SELECT id, block FROM deleted_blocks WHERE container_id = ");
     sql.bind(Id(container_id));
-    forget_watcher(scope, sql, user_id).await
+    forget_kept(scope, sql, KEY, user_id).await
 }
 
 /// Forgets `user_id` among the saved watchers of blocks in the trash of `workspace_id`,
@@ -162,7 +166,7 @@ pub(crate) async fn forget_watcher_of_workspace(
             Id(workspace_id),
         )
         .push(")");
-    forget_watcher(scope, sql, user_id).await
+    forget_kept(scope, sql, KEY, user_id).await
 }
 
 /// Forgets `user_id` among the saved watchers of every trashed block of the scope's
@@ -171,6 +175,14 @@ pub(crate) async fn forget_watcher_of_organization(
     scope: &mut Scope<'_>,
     user_id: &str,
 ) -> Result<(), StoreError> {
+    let sql = trash_of_organization(scope)?;
+    forget_kept(scope, sql, KEY, user_id).await
+}
+
+/// `SELECT id, block FROM deleted_blocks` of every trashed block of the scope's
+/// organization (of its live and its trashed containers alike), for
+/// [`forget_kept`].
+pub(super) fn trash_of_organization(scope: &Scope<'_>) -> Result<Sql, StoreError> {
     let mut sql = scope.sql(
         "SELECT id, block FROM deleted_blocks WHERE container_id IN (\
          SELECT c.id FROM containers AS c JOIN workspaces AS w ON w.id = c.workspace_id \
@@ -183,7 +195,7 @@ pub(crate) async fn forget_watcher_of_organization(
             scope.org()?,
         )
         .push(")");
-    forget_watcher(scope, sql, user_id).await
+    Ok(sql)
 }
 
 /// Makes again the subscriptions `block_id` kept in the trash, of the subscribers that

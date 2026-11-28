@@ -403,57 +403,37 @@
   },
   {
     "name": "insert an attachment block",
-    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks as files-alice",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards/<id:5>/attachments as files-alice",
     "status": 201,
     "content_type": "application/json",
-    "body": [
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {
-          "fileId": "<secret:1>.png"
-        },
-        "id": "<id:6>",
-        "modifiedBy": "<id:2>",
-        "parentId": "<id:5>",
-        "title": "",
-        "type": "attachment",
-        "updatedAt": "<ts>"
-      }
-    ]
+    "body": {
+      "body": null,
+      "containerId": "<id:3>",
+      "createdAt": "<ts>",
+      "createdBy": "<id:2>",
+      "fields": {
+        "fileId": "<secret:1>.png",
+        "size": 67
+      },
+      "id": "<id:6>",
+      "modifiedBy": "<id:2>",
+      "parentId": "<id:5>",
+      "title": "pixel.png",
+      "type": "attachment",
+      "updatedAt": "<ts>"
+    }
   },
   {
     "name": "delete the image block",
-    "request": "DELETE /api/v1/w/<id:1>/boards/<id:3>/blocks/<id:6> as files-alice",
+    "request": "DELETE /api/v1/w/<id:1>/boards/<id:3>/cards/<id:5>/attachments/<id:6> as files-alice",
     "status": 204,
     "body": "<0 bytes>"
   },
   {
-    "name": "blocks after deleting the image",
-    "request": "GET /api/v1/w/<id:1>/boards/<id:3>/blocks as files-alice",
+    "name": "attachments after deleting the image",
+    "request": "GET /api/v1/w/<id:1>/boards/<id:3>/cards/<id:5>/attachments as files-alice",
     "status": 200,
     "content_type": "application/json",
-    "body": [
-      {
-        "body": null,
-        "containerId": "<id:3>",
-        "createdAt": "<ts>",
-        "createdBy": "<id:2>",
-        "fields": {
-          "icon": "",
-          "isTemplate": false,
-          "properties": {}
-        },
-        "id": "<id:5>",
-        "modifiedBy": "<id:2>",
-        "number": 1,
-        "parentId": "",
-        "title": "Card with image",
-        "type": "card",
-        "updatedAt": "<ts>"
-      }
-    ]
+    "body": []
   }
 ]

@@ -10,12 +10,12 @@ use std::time::Duration;
 use fvoci_model::AuditAction;
 
 use crate::audit::{self, AuditActor, AuditEntry};
-use crate::db::{OrganizationHeld, Row, Scope};
+use crate::db::{FromRow, OrganizationHeld, Row, Scope};
 use crate::error::StoreError;
 use crate::oidc::{StoredProvider, hold_provider_of_organization};
 use crate::{Store, Tenant};
 
-/// The columns of a former provider, in the order [`former_from_row`] reads them.
+/// The columns of a former provider, in the order [`FormerProvider::from_row`] reads them.
 const FORMER_COLUMNS: &str = "org_id, issuer, client_id, client_secret, created_at, expires_at";
 
 /// The provider an organization moved away from, as it is kept.
@@ -170,12 +170,7 @@ pub(crate) async fn read_former(
         " FROM oidc_former_providers WHERE org_id = ",
     ]);
     sql.bind(scope.org()?).push_bind(" AND expires_at > ", now);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .as_ref()
-        .map(former_from_row)
-        .transpose()
+    scope.first(sql).await
 }
 
 /// Follows a change of the issuer of the transaction's organization's provider, from
@@ -233,10 +228,9 @@ pub(crate) async fn give_way(
         " FROM oidc_former_providers WHERE org_id = ",
     ]);
     sql.bind(scope.org()?);
-    let Some(row) = scope.fetch_optional(sql).await? else {
+    let Some(former) = scope.first::<FormerProvider>(sql).await? else {
         return Ok(());
     };
-    let former = former_from_row(&row)?;
     let ended = if former.expires_at <= scope.now_millis() {
         Ended::Lapsed
     } else {
@@ -288,13 +282,15 @@ async fn end_former(
     audit::record_entry(scope, &entry.with_detail(&former.issuer)).await
 }
 
-fn former_from_row(row: &Row) -> Result<FormerProvider, StoreError> {
-    Ok(FormerProvider {
-        org_id: row.id(0)?,
-        issuer: row.text(1)?,
-        client_id: row.text(2)?,
-        sealed_client_secret: row.text(3)?,
-        created_at: row.int(4)?,
-        expires_at: row.int(5)?,
-    })
+impl FromRow for FormerProvider {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(FormerProvider {
+            org_id: row.id(0)?,
+            issuer: row.text(1)?,
+            client_id: row.text(2)?,
+            sealed_client_secret: row.text(3)?,
+            created_at: row.int(4)?,
+            expires_at: row.int(5)?,
+        })
+    }
 }

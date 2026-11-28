@@ -94,10 +94,7 @@ async fn board_with_attachment(ts: &TestServer) -> (Container, String) {
         block_type: BlockType::Attachment,
         ..Block::default()
     }];
-    ts.client
-        .insert_blocks(&board.id, &file_block)
-        .await
-        .check_created();
+    crate::blocks::insert(&ts.client, &board.id, &file_block).await;
     (board, file_id)
 }
 
@@ -669,11 +666,7 @@ async fn duplicating_a_board_copies_its_files() {
         let value = duplicate.created_json::<Value>();
         let new_board_id = value["containers"][0]["id"].as_str().expect("a new board");
         let at = format!("/w/{workspace}/containers/{new_board_id}");
-        let blocks = ts
-            .client
-            .get(&format!("/w/{workspace}/boards/{new_board_id}/blocks"))
-            .await
-            .ok_json::<Vec<Block>>();
+        let blocks = crate::blocks::blocks_of_in(&ts.client, workspace, new_board_id).await;
         let image = blocks
             .iter()
             .find(|block| block.block_type == BlockType::Attachment)
@@ -706,11 +699,7 @@ async fn duplicating_a_card_copies_its_files() {
 
 async fn duplicate_a_card_whose_attachment_names_its_file_as(ts: &TestServer, key: &str) {
     let (board, file_id) = board_with_attachment(ts).await;
-    let blocks = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
-        .await
-        .ok_json::<Vec<Block>>();
+    let blocks = crate::blocks::blocks_of(&ts.client, &board.id).await;
     let id_of = |block_type: BlockType| {
         blocks
             .iter()
@@ -720,28 +709,39 @@ async fn duplicate_a_card_whose_attachment_names_its_file_as(ts: &TestServer, ke
     };
     let card_id = id_of(BlockType::Card);
     if key == "attachmentId" {
+        // As an older server wrote it.
         let attachment_id = id_of(BlockType::Attachment);
-        ts.client
-            .patch(
-                &format!("{TEST_WS}/boards/{}/blocks/{attachment_id}", board.id),
-                &json!({"updatedFields": {"attachmentId": file_id}, "deletedFields": ["fileId"]}),
-            )
+        let store = ts.app.store();
+        let mut fields = store
+            .get_block(&attachment_id)
             .await
-            .check_no_content();
+            .expect("the attachment is stored")
+            .fields;
+        fields.remove("fileId");
+        fields.insert("attachmentId".to_owned(), Value::String(file_id.clone()));
+        store
+            .set_block_fields_unchecked(&attachment_id, &fields)
+            .await
+            .expect("the attachment names its file as attachmentId");
     }
 
-    let copies = ts
+    let copy = ts
         .client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks/{card_id}/duplicate", board.id),
+            &format!("{TEST_WS}/boards/{}/cards/{card_id}/duplicate", board.id),
             &json!({}),
         )
         .await
-        .created_json::<Vec<Block>>();
-    let attachment = copies
-        .iter()
-        .find(|block| block.block_type == BlockType::Attachment)
-        .expect("a copied attachment block");
+        .created_json::<fvoci_model::Card>();
+    let copies: Vec<Block> = ts
+        .client
+        .get(&format!(
+            "{TEST_WS}/boards/{}/cards/{}/attachments",
+            board.id, copy.id
+        ))
+        .await
+        .ok_json();
+    let attachment = copies.first().expect("a copied attachment block");
     let new_file_id = attachment
         .fields
         .get("fileId")
@@ -762,6 +762,43 @@ async fn duplicate_a_card_whose_attachment_names_its_file_as(ts: &TestServer, ke
 }
 
 // -- files are tied to their board --------------------------------------------------------
+
+/// A new card of `board_id` made by `client`, with an attachment of each of `fields`
+/// below it, written through the app as no route writes them.
+async fn attached_unchecked<const N: usize>(
+    ts: &TestServer,
+    client: &Client,
+    board_id: &str,
+    fields: [JsonMap; N],
+) {
+    let card = Block {
+        container_id: board_id.to_owned(),
+        block_type: BlockType::Card,
+        ..Block::default()
+    };
+    let card = crate::blocks::insert_one(client, &card).await;
+    let user_id = client.me().await.id;
+    for fields in fields {
+        let mut attachment = Block {
+            id: new_id(),
+            parent_id: card.id.clone(),
+            container_id: board_id.to_owned(),
+            block_type: BlockType::Attachment,
+            fields,
+            created_at: 1,
+            updated_at: 1,
+            ..Block::default()
+        };
+        ts.app
+            .insert_block_unchecked(
+                &mut attachment,
+                &user_id,
+                fvoci_server::app::ChangeNotification::Suppress,
+            )
+            .await
+            .expect("the attachment is stored");
+    }
+}
 
 /// The private board of the first user with an uploaded file, and a private board of
 /// the second user who knows that file's name and has put it into an attachment block of
@@ -786,33 +823,20 @@ async fn foreign_file(ts: &TestServer) -> ForeignFile {
         ..Container::default()
     };
     let intruder_board: Container = ts.client2.create_board(&board).await.created_json();
-    let card_id = new_id();
     let named = |key: &str| {
         let mut fields = JsonMap::new();
         fields.insert(key.to_owned(), Value::String(file_id.clone()));
         fields
     };
-    let block = |id: String, parent: &str, block_type: BlockType, fields: JsonMap| Block {
-        id,
-        parent_id: parent.to_owned(),
-        container_id: intruder_board.id.clone(),
-        block_type,
-        fields,
-        created_at: 1,
-        updated_at: 1,
-        ..Block::default()
-    };
-    let blocks = vec![
-        block(card_id.clone(), "", BlockType::Card, JsonMap::new()),
-        block(new_id(), &card_id, BlockType::Attachment, named("fileId")),
-        block(
-            new_id(),
-            &card_id,
-            BlockType::Attachment,
-            named("attachmentId"),
-        ),
-    ];
-    crate::blocks::insert(&ts.client2, &intruder_board.id, &blocks).await;
+    // `createCardAttachment` takes a file of the board only: the attachments are written
+    // as an older server let them be.
+    attached_unchecked(
+        ts,
+        &ts.client2,
+        &intruder_board.id,
+        [named("fileId"), named("attachmentId")],
+    )
+    .await;
     ForeignFile {
         owner_board,
         file_id,
@@ -913,11 +937,7 @@ async fn a_file_of_another_board_is_neither_copied_nor_exported() {
         .as_str()
         .expect("a copy")
         .to_owned();
-    let blocks: Vec<Block> = ts
-        .client2
-        .get(&format!("{TEST_WS}/boards/{copy_id}/blocks"))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&ts.client2, &copy_id).await;
     for block in blocks
         .iter()
         .filter(|block| block.block_type == BlockType::Attachment)
@@ -981,14 +1001,11 @@ async fn template_file(ts: &TestServer) -> TemplateFile {
         .created_json();
     let template: Container =
         serde_json::from_value(duplicated["containers"][0].clone()).expect("the template board");
-    let blocks: Vec<Block> = ts
-        .client
-        .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=attachment",
-            template.id
-        ))
+    let blocks: Vec<Block> = crate::blocks::blocks_of(&ts.client, &template.id)
         .await
-        .ok_json();
+        .into_iter()
+        .filter(|block| block.block_type == BlockType::Attachment)
+        .collect();
     let file_id = blocks[0].fields["fileId"]
         .as_str()
         .expect("the attachment block of the template names its file")
@@ -1093,25 +1110,11 @@ async fn duplicating_a_board_with_an_empty_file_reference_works() {
     let board = ts
         .create_board(TEST_WORKSPACE_ID, ContainerVisibility::Private)
         .await;
-    let card_id = new_id();
     let mut empty = JsonMap::new();
     empty.insert("fileId".to_owned(), Value::String(String::new()));
-    let block = |id: String, parent: &str, block_type: BlockType, fields: JsonMap| Block {
-        id,
-        parent_id: parent.to_owned(),
-        container_id: board.id.clone(),
-        block_type,
-        fields,
-        created_at: 1,
-        updated_at: 1,
-        ..Block::default()
-    };
-    let blocks = vec![
-        block(card_id.clone(), "", BlockType::Card, JsonMap::new()),
-        block(new_id(), &card_id, BlockType::Attachment, empty),
-        block(new_id(), &card_id, BlockType::Attachment, JsonMap::new()),
-    ];
-    crate::blocks::insert(&ts.client, &board.id, &blocks).await;
+    // `createCardAttachment` takes a file: the attachments that name none are written as
+    // an older server let them be.
+    attached_unchecked(&ts, &ts.client, &board.id, [empty, JsonMap::new()]).await;
 
     let duplicate = ts
         .client
@@ -1207,11 +1210,7 @@ async fn a_file_whose_name_begins_with_a_wide_character_is_served() {
         .as_str()
         .expect("a copy")
         .to_owned();
-    let copied: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{copy_id}/blocks"))
-        .await
-        .ok_json();
+    let copied = crate::blocks::blocks_of(&ts.client, &copy_id).await;
     let image = copied
         .iter()
         .find(|block| block.block_type == BlockType::Attachment)
@@ -1243,100 +1242,5 @@ async fn a_range_on_an_empty_file_is_ignored() {
         response.check_ok();
         assert!(response.body.is_empty(), "{range}: the empty file");
     }
-    ts.teardown().await;
-}
-
-/// Blocks posted with `sourceBoardId` get files of their own on the board they are
-/// posted to: the attachment block that is answered and stored names the copy, the copy is
-/// read through the target board, and the source keeps its file. (The blocks are not
-/// stored when their files are copied; pointing them at the copies must not look them
-/// up.)
-#[tokio::test]
-async fn blocks_posted_from_a_source_board_get_copies_of_their_files() {
-    let ts = Setup::native().start().await.init_basic().await;
-    let (source, file_id) = board_with_attachment(&ts).await;
-    let target = ts
-        .create_board(TEST_WORKSPACE_ID, ContainerVisibility::Private)
-        .await;
-    let mut image_fields = JsonMap::new();
-    image_fields.insert("fileId".to_owned(), Value::String(file_id.clone()));
-    let target_card = crate::blocks::insert_one(
-        &ts.client,
-        &Block {
-            id: new_id(),
-            container_id: target.id.clone(),
-            block_type: BlockType::Card,
-            created_at: 1,
-            updated_at: 1,
-            ..Block::default()
-        },
-    )
-    .await;
-    let blocks = vec![Block {
-        id: new_id(),
-        container_id: target.id.clone(),
-        parent_id: target_card.id,
-        block_type: BlockType::Attachment,
-        fields: image_fields,
-        created_at: 1,
-        updated_at: 1,
-        ..Block::default()
-    }];
-
-    let response = ts
-        .client
-        .post(
-            &format!(
-                "{TEST_WS}/boards/{}/blocks?sourceBoardId={}",
-                target.id, source.id
-            ),
-            &blocks,
-        )
-        .await;
-
-    let answered: Vec<Block> = response.created_json();
-    let image = answered
-        .iter()
-        .find(|block| block.block_type == BlockType::Attachment)
-        .expect("the attachment block is answered");
-    let copy_id = image.fields["fileId"]
-        .as_str()
-        .expect("the image names a file")
-        .to_owned();
-    assert_ne!(copy_id, file_id, "a file of its own");
-    assert!(!copy_id.is_empty(), "and it names one");
-    let stored = ts
-        .app
-        .block(&image.id)
-        .await
-        .expect("the attachment block is stored");
-    assert_eq!(
-        stored.fields["fileId"],
-        Value::String(copy_id.clone()),
-        "what is stored is what was answered"
-    );
-
-    let file_path =
-        |board: &Container, name: &str| format!("{TEST_WS}/containers/{}/files/{name}", board.id);
-    let copy = ts.client.get(&file_path(&target, &copy_id)).await;
-    copy.check_ok();
-    assert_eq!(
-        copy.body, b"hello world, a file\n",
-        "the copy has the bytes"
-    );
-    ts.client
-        .get(&file_path(&source, &file_id))
-        .await
-        .check_ok();
-    // Each board has its own: the copy is not the source board's, nor the other way.
-    ts.client
-        .get(&file_path(&source, &copy_id))
-        .await
-        .check_not_found();
-    ts.client
-        .get(&file_path(&target, &file_id))
-        .await
-        .check_not_found();
-
     ts.teardown().await;
 }

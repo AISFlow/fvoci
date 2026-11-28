@@ -42,8 +42,10 @@
     {#if guest}
       <span
         class="shrink-0 rounded-md border px-1.5 py-0.5 text-xs text-muted-foreground"
-        data-testid="guest-badge">{m.people_role_guest()}</span
+        data-testid="guest-badge"
       >
+        {m.people_role_guest()}
+      </span>
     {/if}
     <span aria-hidden="true" class="hidden text-muted-foreground/60 @columns/pane:inline">/</span>
   </span>

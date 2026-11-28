@@ -217,6 +217,72 @@ export const DIAGRAMS: DocNode = {
   ],
 };
 
+const toggle = (summary: string, ...content: DocNode[]): DocNode => ({
+  type: 'details',
+  content: [
+    summary === ''
+      ? { type: 'detailsSummary' }
+      : { type: 'detailsSummary', content: [text(summary)] },
+    { type: 'detailsContent', content },
+  ],
+});
+const callout = (tone: string, ...content: DocNode[]): DocNode => ({
+  type: 'callout',
+  attrs: { tone },
+  content,
+});
+const cell = (type: string, value: string): DocNode => ({
+  type,
+  content: [paragraph(text(value))],
+});
+
+/**
+ * Toggles and callouts: a question whose answer is folded away, one that
+ * hides a table, a callout and another toggle, one with no summary, and a
+ * callout of each tone.
+ */
+export const TOGGLES: DocNode = {
+  type: 'doc',
+  content: [
+    heading(2, '토글'),
+    toggle(
+      '분산은 왜 음수가 아닌가?',
+      paragraph(text('제곱의 평균이라서, 어느 제곱도 음수가 아니다.')),
+    ),
+    toggle(
+      'What this toggle hides',
+      paragraph(text('A table, a callout and another toggle:')),
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [cell('tableHeader', 'Kind'), cell('tableHeader', 'Where')],
+          },
+          {
+            type: 'tableRow',
+            content: [cell('tableCell', 'Toggle'), cell('tableCell', 'Anywhere')],
+          },
+        ],
+      },
+      callout('tip', paragraph(text('A callout inside a toggle.'))),
+      toggle('Deeper', paragraph(text('A toggle inside a toggle.'))),
+    ),
+    toggle('', paragraph(text('This toggle has no summary.'))),
+    heading(2, '콜아웃'),
+    callout('info', paragraph(text('참고: ', 'bold'), text('A note, set apart.'))),
+    callout('tip', paragraph(text('팁: 아이콘을 누르면 종류가 바뀝니다.'))),
+    callout('warn', paragraph(text('Warning: ')), {
+      type: 'bulletList',
+      content: [
+        item(paragraph(text('a list in a callout'))),
+        item(paragraph(text('and another line'))),
+      ],
+    }),
+    callout('danger', paragraph(text('위험: 되돌릴 수 없습니다.'))),
+  ],
+};
+
 const PLAN = '01930000-0000-7000-8000-00000000b001';
 const LONG = '01930000-0000-7000-8000-00000000b002';
 const PAGE = '01930000-0000-7000-8000-00000000b003';

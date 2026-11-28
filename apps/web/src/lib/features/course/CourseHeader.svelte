@@ -91,9 +91,9 @@
 <div class="flex shrink-0 flex-col gap-2 border-b px-3 py-3" data-testid="course-header">
   <div class="flex items-start gap-2">
     {#if course.course?.icon}
-      <span class="text-xl leading-7" aria-hidden="true" data-testid="course-header-icon"
-        >{course.course.icon}</span
-      >
+      <span class="text-xl leading-7" aria-hidden="true" data-testid="course-header-icon">
+        {course.course.icon}
+      </span>
     {/if}
     <div class="min-w-0 flex-1">
       <p class="truncate leading-7 font-semibold" data-testid="course-header-title">{title}</p>

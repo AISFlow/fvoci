@@ -1,19 +1,46 @@
 //! The diaries of a user's own space: making one, the entry of a day, the days that
 //! are written, and the trash of a diary's entries. An entry is a block, and is changed
-//! and deleted as one ([`App::patch_block`], [`App::delete_block`]); its day is not
+//! and deleted as one (`App::patch_block`, `App::delete_block`); its day is not
 //! changed at all.
 
 use fvoci_model::{
-    Block, BlockType, Container, DeletedDiaryEntry, DiaryDate, DiaryDay, DiaryEntry,
+    Block, BlockError, BlockType, Container, DeletedDiaryEntry, DiaryDate, DiaryDay, DiaryEntry,
     DiaryEntryPatch, DiaryMaking, DiaryRun, ENTRIES_PER_DIARY, MonthDay, NewDiaryEntry, new_id,
 };
 use fvoci_store::DiaryMade;
 
-use super::App;
 use super::blocks::{ChangeAction, ChangeNotification, log_notification};
 use super::list_page::ListPage;
+use super::{App, Changes, Reached};
 use crate::collab::Deletion;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
+use crate::permissions::ContainerPermission;
+
+/// What who may not write in the diary is refused making an entry with.
+pub const CREATE_ENTRY_DENIED: &str = "access denied to create entry";
+/// What who may not write in the diary is refused changing an entry with.
+pub const PATCH_ENTRY_DENIED: &str = "access denied to patch entry";
+/// What who may not write in the diary is refused deleting an entry with.
+pub const DELETE_ENTRY_DENIED: &str = "access denied to delete entry";
+/// What who may not write in the diary is refused its trash with.
+pub const ENTRY_TRASH_DENIED: &str = "access denied to the trash of the diary";
+/// What who may not write in the diary is refused bringing an entry back with.
+pub const UNDELETE_ENTRY_DENIED: &str = "access denied to undelete entry";
+
+/// Checks that the caller may write in the diary `on` reached, refusing in `denial`,
+/// and that `entry`, which the request found by its identifier, is an entry of it.
+fn writing_entry<'on>(
+    on: &'on Reached,
+    entry: &Block,
+    denial: &str,
+) -> Result<&'on Container, AppError> {
+    let diary = on.require(ContainerPermission::ManageCards, denial)?;
+    if on.holds(entry) && entry.block_type == BlockType::Entry {
+        Ok(diary)
+    } else {
+        Err(AppError::not_found("entry"))
+    }
+}
 
 impl App {
     /// Makes a diary in its workspace with `user_id` as its admin, as `making` says,
@@ -67,32 +94,32 @@ impl App {
     /// store's error if the block cannot be read.
     pub async fn diary_entry_of(&self, diary_id: &str, entry_id: &str) -> Result<Block, AppError> {
         const WHAT: &str = "entry";
-        match self.block(entry_id).await {
-            Ok(block) if block.container_id == diary_id && block.block_type == BlockType::Entry => {
-                Ok(block)
-            }
-            Ok(_) => Err(AppError::not_found(WHAT)),
-            Err(error) if error.is_not_found() => Err(AppError::not_found(WHAT)),
-            Err(error) => Err(error),
+        let block = self.block(entry_id).await.or_missing(WHAT)?;
+        if block.container_id == diary_id && block.block_type == BlockType::Entry {
+            Ok(block)
+        } else {
+            Err(AppError::not_found(WHAT))
         }
     }
 
-    /// Makes the entry of the day `date` of the diary as `new` says and tells websocket
-    /// listeners of it, as of any block that is written; where the day has an entry,
-    /// that one is answered as it is and nothing is told. Says whether it made one.
+    /// Makes the entry of the day `date` of the diary `on` reached as `new` says, for who
+    /// may write in it, and tells websocket listeners of it, as of any block that is
+    /// written; where the day has an entry, that one is answered as it is and nothing is
+    /// told. Says whether it made one.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if there is no such diary, and a bad request with the
-    /// reason `too_many_entries` if the diary has as many entries as one may.
+    /// Returns [`CREATE_ENTRY_DENIED`] as [`Reached::require`] does, a not-found error if
+    /// there is no such diary, and a bad request with the reason `too_many_entries` if
+    /// the diary has as many entries as one may.
     pub async fn create_diary_entry(
         &self,
-        diary_id: &str,
+        on: &Reached,
         date: DiaryDate,
         new: NewDiaryEntry,
-        user_id: &str,
     ) -> Result<(DiaryEntry, EntryAnswer), AppError> {
-        let diary = self.store().get_container(diary_id).await?;
+        let diary = on.require(ContainerPermission::ManageCards, CREATE_ENTRY_DENIED)?;
+        let (diary_id, user_id) = (on.container_id(), on.user_id());
         let written = {
             let _structure = self.collab().changing_structure(self, diary_id).await;
             self.store()
@@ -107,7 +134,7 @@ impl App {
             ChangeAction::Add,
             &written.entry.id,
         );
-        self.announce_entry(&diary.workspace_id, written.entry.clone());
+        self.tell_of_entry(&diary.workspace_id, written.entry.clone());
         Ok((DiaryEntry::from(written.entry), EntryAnswer::Made))
     }
 
@@ -152,26 +179,38 @@ impl App {
         Ok(self.store().get_diary_runs(diary_id).await?)
     }
 
-    /// Changes an entry of `diary_id`, coordinating with its collaborative room when
-    /// `patch` replaces, clears, or appends to the body, and announces the updated
-    /// entry to websocket listeners and webhooks in the background.
+    /// Changes an entry of the diary `on` reached, for who may write in it, coordinating
+    /// with its collaborative room when `patch` replaces, clears, or appends to the
+    /// body, and announces the updated entry to websocket listeners and webhooks in the
+    /// background.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the diary or entry does not exist, a bad request if
-    /// the patch or combined appended body fails validation or body limits, a conflict
-    /// if `readAt` predates the last body change, or `document_unavailable` if pending
-    /// room edits cannot be flushed first.
+    /// Returns [`PATCH_ENTRY_DENIED`] as [`Reached::require`] does, a not-found error if
+    /// the block is no entry of the diary, a bad request if the patch or combined
+    /// appended body fails validation or body limits or names a file the diary does not
+    /// have, a conflict if `readAt` predates the last body change, or
+    /// `document_unavailable` if pending room edits cannot be flushed first.
     pub async fn patch_diary_entry(
         &self,
-        diary_id: &str,
-        entry_id: &str,
+        on: &Reached,
+        entry: &Block,
         patch: &DiaryEntryPatch,
-        modified_by: &str,
         notification: ChangeNotification,
     ) -> Result<Block, AppError> {
-        let entry = self.diary_entry_of(diary_id, entry_id).await?;
-        let container = self.store().get_container(&entry.container_id).await?;
+        let container = writing_entry(on, entry, PATCH_ENTRY_DENIED)?;
+        patch.check_request()?;
+        let (diary_id, entry_id, modified_by) =
+            (on.container_id(), entry.id.as_str(), on.user_id());
+        if let Some(body) = patch.body.new_body() {
+            self.check_body_files(diary_id, Some(body)).await?;
+        } else if let Some(extra) = patch.append_body.as_ref()
+            && !self.has_body_files(diary_id, Some(extra)).await?
+        {
+            return Err(
+                AppError::bad_request(BlockError::BodyFileNotOfContainer).with_field("appendBody")
+            );
+        }
         let body_field = if patch.append_body.is_some() {
             "appendBody"
         } else {
@@ -200,32 +239,35 @@ impl App {
                 .await
                 .map_err(|error| map_entry_patch_error(error, body_field))?
         };
-        self.tell_of_update(&container.workspace_id, &patched, notification);
+        log_notification(notification, ChangeAction::Update, &patched.id);
+        self.tell(Changes::in_workspace(&container.workspace_id).changed([patched.clone()]));
         Ok(patched)
     }
 
-    /// Deletes an entry of `diary_id`: flushes any open collaborative room before
-    /// deciding whether the entry is completely empty (purged without entering the
-    /// trash) or carries content/notes (moved to the diary's trash), closes its room,
-    /// and notifies websocket listeners in the background.
+    /// Deletes an entry of the diary `on` reached, for who may write in it: flushes any
+    /// open collaborative room before deciding whether the entry is completely empty
+    /// (purged without entering the trash) or carries content/notes (moved to the
+    /// diary's trash), closes its room, and notifies websocket listeners in the
+    /// background.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the entry does not exist on `diary_id`, or the
-    /// store's error.
+    /// Returns [`DELETE_ENTRY_DENIED`] as [`Reached::require`] does, a not-found error if
+    /// the block is no entry of the diary, or the store's error.
     pub async fn delete_diary_entry(
         &self,
-        diary_id: &str,
-        entry_id: &str,
-        modified_by: &str,
+        on: &Reached,
+        entry: &Block,
         notification: ChangeNotification,
     ) -> Result<(), AppError> {
-        let entry = self.diary_entry_of(diary_id, entry_id).await?;
-        let container = self.store().get_container(&entry.container_id).await?;
+        let workspace_id = writing_entry(on, entry, DELETE_ENTRY_DENIED)?
+            .workspace_id
+            .clone();
+        let entry_id = entry.id.as_str();
         let (diary_id, removed, by) = (
-            diary_id.to_owned(),
+            on.container_id().to_owned(),
             entry_id.to_owned(),
-            modified_by.to_owned(),
+            on.user_id().to_owned(),
         );
         self.collab()
             .remove(self, Deletion::Block(removed.clone()), async move |app| {
@@ -236,79 +278,62 @@ impl App {
             })
             .await?;
         log_notification(notification, ChangeAction::Delete, entry_id);
-        let app = self.clone();
-        self.spawn_background(async move {
-            app.ws()
-                .broadcast_block_delete(
-                    &container.workspace_id,
-                    &entry.id,
-                    &entry.container_id,
-                    BlockType::Entry,
-                )
-                .await;
-        });
+        self.tell(Changes::in_workspace(&workspace_id).deleted([entry.clone()]));
         Ok(())
     }
 
-    /// The diary's entries in the trash, one page of the list ([`ListPage`]).
+    /// The entries in the trash of the diary `on` reached, for who may write in it, one
+    /// page of the list ([`ListPage`]).
     ///
     /// # Errors
     ///
-    /// Returns the store's error if the trash cannot be read.
+    /// Returns [`ENTRY_TRASH_DENIED`] as [`Reached::require`] does, and the store's error
+    /// if the trash cannot be read.
     pub async fn deleted_diary_entries(
         &self,
-        diary_id: &str,
+        on: &Reached,
         page: ListPage,
     ) -> Result<Vec<DeletedDiaryEntry>, AppError> {
+        on.require(ContainerPermission::ManageCards, ENTRY_TRASH_DENIED)?;
         Ok(self
             .store()
-            .get_deleted_diary_entries(diary_id, Some(page.paging()))
+            .get_deleted_diary_entries(on.container_id(), Some(page.paging()))
             .await?)
     }
 
-    /// Brings an entry of the diary back from the trash to its day, and tells websocket
-    /// listeners of it.
+    /// Brings an entry of the diary `on` reached back from the trash to its day, for who
+    /// may write in it, and tells websocket listeners of it.
     ///
     /// # Errors
     ///
-    /// Returns a not-found error if the diary's trash has no such entry, a conflict
-    /// with the reason `day_taken` if the day has an entry since, and a bad request
-    /// with the reason `too_many_entries` if the diary has as many entries as one may.
+    /// Returns [`UNDELETE_ENTRY_DENIED`] as [`Reached::require`] does, a not-found error
+    /// if the diary's trash has no such entry, a conflict with the reason `day_taken` if
+    /// the day has an entry since, and a bad request with the reason `too_many_entries`
+    /// if the diary has as many entries as one may.
     pub async fn undelete_diary_entry(
         &self,
-        diary_id: &str,
+        on: &Reached,
         entry_id: &str,
-        user_id: &str,
     ) -> Result<DiaryEntry, AppError> {
-        let diary = self.store().get_container(diary_id).await?;
+        let diary = on.require(ContainerPermission::ManageCards, UNDELETE_ENTRY_DENIED)?;
+        let (diary_id, user_id) = (on.container_id(), on.user_id());
         let restored = {
             let _structure = self.collab().changing_structure(self, diary_id).await;
             self.store()
                 .undelete_diary_entry(diary_id, entry_id, ENTRIES_PER_DIARY, user_id)
                 .await
         };
-        let entry = restored.map_err(|error| {
-            if error.is_not_found() {
-                AppError::not_found("entry")
-            } else {
-                AppError::from(error)
-            }
-        })?;
+        let entry = restored.or_missing("entry")?;
         log_notification(ChangeNotification::Send, ChangeAction::Add, entry_id);
-        self.announce_entry(&diary.workspace_id, entry.clone());
+        self.tell_of_entry(&diary.workspace_id, entry.clone());
         Ok(DiaryEntry::from(entry))
     }
 
     /// Tells websocket listeners in the background of the entry. Nothing of a user's own
-    /// space goes to the operator's webhooks ([`App::tell_webhooks`]), which is asked
-    /// all the same: it is the one door to them.
-    fn announce_entry(&self, workspace_id: &str, entry: Block) {
-        let app = self.clone();
-        let workspace_id = workspace_id.to_owned();
-        self.spawn_background(async move {
-            app.ws().broadcast_block_change(&workspace_id, &entry).await;
-            app.tell_webhooks(&entry);
-        });
+    /// space goes to the operator's webhooks ([`App::tell_webhooks`]), which are asked
+    /// all the same: they are told as of any block.
+    fn tell_of_entry(&self, workspace_id: &str, entry: Block) {
+        self.tell(Changes::in_workspace(workspace_id).changed([entry]));
     }
 }
 

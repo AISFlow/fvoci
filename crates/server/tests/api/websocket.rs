@@ -965,22 +965,6 @@ async fn a_read_token_that_no_longer_opens_its_board_no_longer_feeds_a_connectio
         "the board is gone"
     );
 
-    // The board deleted with others at once, as `deleteContainersAndBlocks` does.
-    let (board, block, token) = shared_board_with_a_card(&th, &user1.id).await;
-    let (mut reader, _) = follow_block(&th, &block, &token).await;
-    th.client
-        .delete_json(
-            &format!("{ROOT_WS}/containers-and-blocks"),
-            &json!({"containers": [board.id], "blocks": [block.id]}),
-        )
-        .await
-        .check_no_content();
-    assert_eq!(
-        reader.unsubscribed(PATIENCE).await.as_deref(),
-        Some("blocksUnsubscribed"),
-        "the board is gone with others"
-    );
-
     th.teardown().await;
 }
 
@@ -1266,6 +1250,13 @@ async fn messages_match_the_websocket_contract() {
     ws.broadcast_block_delete(ROOT_WORKSPACE_ID, &block.id, &board.id, block.block_type)
         .await;
     contract_check.hear(&mut socket, "blockChanged").await;
+    let reactions = [fvoci_model::Reaction {
+        emoji: "👍".parse().expect("an emoji"),
+        user_ids: vec![user1.id.clone()],
+    }];
+    ws.broadcast_reactions_change(ROOT_WORKSPACE_ID, &board.id, &block.id, &reactions)
+        .await;
+    contract_check.hear(&mut socket, "reactionsChanged").await;
     let admin = members
         .first()
         .expect("the board has its admin as a member");
@@ -1356,6 +1347,8 @@ async fn hear_the_account_changes(
         .expect("the test server's organization");
     ws.notifications_changed(user_id, &[&org_id]).await;
     contract_check.hear(socket, "notificationsChanged").await;
+    ws.favorites_changed(ROOT_WORKSPACE_ID, user_id).await;
+    contract_check.hear(socket, "favoritesChanged").await;
     ws.broadcast_person_change(ROOT_WORKSPACE_ID, user_id).await;
     contract_check.hear(socket, "userChanged").await;
 }

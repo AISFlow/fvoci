@@ -198,6 +198,7 @@ impl Store {
     ///
     /// Returns [`StoreError::Database`] if the query fails, and [`StoreError::Corrupt`]
     /// if a stored action is none.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn get_audit_log(&self, workspace_id: &str) -> Result<Vec<AuditEntry>, StoreError> {
         self.with_conn(async |scope| {
             let mut sql = scope.sql(

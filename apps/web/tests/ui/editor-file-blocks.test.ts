@@ -440,6 +440,8 @@ describe('the slash menu', () => {
       'Bulleted list',
       'Numbered list',
       'Quote',
+      'Toggle',
+      'Callout',
       'Code block',
       'Formula block',
       'Divider',

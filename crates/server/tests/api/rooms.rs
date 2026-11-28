@@ -495,13 +495,12 @@ impl Peer {
 /// The texts of the paragraphs of a body.
 pub(crate) fn lines_of(body: Option<&Value>) -> Vec<String> {
     body.and_then(|body| body["content"].as_array())
-        .map(|content| {
+        .map_or_default(|content| {
             content
                 .iter()
                 .map(|node| node["content"][0]["text"].as_str().unwrap_or("").to_owned())
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// A board for the invited only in the test workspace, made by the first client's
@@ -888,12 +887,7 @@ async fn who_may_not_read_is_refused_as_for_no_card() {
         updated_at: 1,
         ..fvoci_model::Block::default()
     };
-    let stored: Vec<fvoci_model::Block> = th
-        .client
-        .insert_blocks(&t.board_id, &[comment])
-        .await
-        .created_json();
-    let comment_id = stored[0].id.clone();
+    let comment_id = crate::blocks::insert_one(&th.client, &comment).await.id;
     let outsider = th.add_user("outsider").await;
     let mut outside = Peer::connect(&outsider, 105).await;
     let mut anonymous = Peer::on(th.anonymous().as_browser().connect_websocket().await, 106);

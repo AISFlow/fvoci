@@ -318,7 +318,7 @@ async fn insert_views_counting_reads(
 ) -> usize {
     let mut batch = make_views(board_id, count);
     reads.0.store(0, std::sync::atomic::Ordering::Relaxed);
-    app.insert_blocks(
+    app.insert_blocks_unchecked(
         &mut batch,
         user_id,
         fvoci_server::app::ChangeNotification::Suppress,

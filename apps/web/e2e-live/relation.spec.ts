@@ -206,17 +206,12 @@ test('a copy of a board names its own cards in the relation its Gantt chart read
     data: { updatedProperties: { after: [{ card: floor, kind: 'ss', lagDays: -2 }] } },
   });
   expect(named.ok(), await named.text()).toBe(true);
-  const gantt = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        type: 'view',
-        title: 'Plan',
-        createdAt: 1,
-        updatedAt: 1,
-        fields: { viewType: 'gantt', dateProperty: 'due', dependencyPropertyId: 'after' },
-      },
-    ],
+  const gantt = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`, {
+    data: {
+      title: 'Plan',
+      viewType: 'gantt',
+      fields: { viewType: 'gantt', dateProperty: 'due', dependencyPropertyId: 'after' },
+    },
   });
   expect(gantt.ok(), await gantt.text()).toBe(true);
 
@@ -226,18 +221,18 @@ test('a copy of a board names its own cards in the relation its Gantt chart read
   expect(copied.ok(), await copied.text()).toBe(true);
   const copy = (await copied.json()) as Schemas['ContainersAndBlocks'];
   const copyId = copy.containers[0]?.id ?? '';
-  const blocks = (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${copyId}/blocks`)
-  ).json()) as Schemas['Block'][];
-  const byTitle = (title: string) => blocks.find((block) => block.title === title);
+  const read = async <T>(path: string) =>
+    (await (await api.get(`/api/v1/w/${board.workspaceId}/boards/${copyId}/${path}`)).json()) as T;
+  const cards = await read<Schemas['Card'][]>('cards');
+  const byTitle = (title: string) => cards.find((card) => card.title === title);
   const copiedFloor = byTitle('Lay the floor')?.id ?? '';
   const copiedPaint = byTitle('Paint the walls')?.id ?? '';
   expect(copiedFloor).not.toBe('');
   expect(copiedFloor).not.toBe(floor);
-  expect((byTitle('Paint the walls')?.fields.properties as Record<string, unknown>).after).toEqual([
+  expect(byTitle('Paint the walls')?.properties.after).toEqual([
     { card: copiedFloor, kind: 'ss', lagDays: -2 },
   ]);
-  const plan = byTitle('Plan');
+  const plan = (await read<Schemas['Block'][]>('views')).find((view) => view.title === 'Plan');
   expect(plan?.fields.dependencyPropertyId).toBe('after');
 
   // On the page, the copy's card names the copy's card, and opens it.

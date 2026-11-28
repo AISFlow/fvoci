@@ -25,7 +25,7 @@ async fn append(client: &Client, card_id: &str, markdown: &str) -> crate::common
 /// Whether a body says each of `texts`.
 #[track_caller]
 fn check_says(body: Option<&Value>, texts: &[&str]) {
-    let said = body.map(Value::to_string).unwrap_or_default();
+    let said = body.map_or_default(Value::to_string);
     for text in texts {
         assert!(said.contains(text), "{text} in {said}");
     }

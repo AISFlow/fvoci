@@ -64,7 +64,7 @@ export { placeOf };
 /**
  * Whether `answer` is the server's 201 to making a board from "Add board": an empty
  * board is made by `POST /w/{workspaceId}/boards` with the board's first properties
- * and view (`scaffold`), not with the blocks of `/containers-and-blocks`.
+ * and view (`scaffold`).
  */
 export function madeABoard(answer: Response): boolean {
   return (
@@ -308,19 +308,9 @@ export async function makeBoard(api: APIRequestContext, plan: BoardPlan): Promis
           { id: 'note', name: 'Note', type: 'text', options: [] },
           { id: 'due', name: 'Due', type: 'date', options: [] },
         ],
-      },
-    }),
-    'create board',
-  );
-  const [view] = await json<Schemas['Block'][]>(
-    await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.id}/blocks`, {
-      data: [
-        {
-          containerId: board.id,
-          type: 'view',
+        firstView: {
           title: 'By status',
-          createdAt: 1,
-          updatedAt: 1,
+          viewType: 'board',
           fields: {
             viewType: 'board',
             groupBy: 'status',
@@ -333,9 +323,13 @@ export async function makeBoard(api: APIRequestContext, plan: BoardPlan): Promis
             filter: { operation: 'and', filters: [] },
           },
         },
-      ],
+      },
     }),
-    'create view',
+    'create board',
+  );
+  const [view] = await json<Schemas['Block'][]>(
+    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.id}/views`),
+    'read view',
   );
   const cards: Record<string, string> = {};
   for (const card of plan.cards ?? []) {

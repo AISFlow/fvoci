@@ -100,20 +100,20 @@ describe('card hierarchy in the memory backend', () => {
 
     const seen: Change[] = [];
     const stop = backend.watchContainer(boardId, (change) => seen.push(change));
-    await backend.deleteBlock(boardId, d1.id);
+    await backend.batchDeleteCards(boardId, [d1.id]);
     const deletedEvent = seen.find((c) => c.kind === 'blocksDeleted');
     expect(deletedEvent?.kind === 'blocksDeleted' ? deletedEvent.blockIds.sort() : []).toEqual(
       [d1.id, d2.id, d3.id].sort(),
     );
 
-    await backend.restoreBlock(boardId, d1.id);
+    await backend.batchRestoreCards(boardId, [d1.id]);
     expect((await backend.card(boardId, d2.id)).parentId).toBe(d1.id);
     expect((await backend.card(boardId, d3.id)).parentId).toBe(d2.id);
 
     // Delete d2 alone, then delete d1 -> restoring d2 re-roots d2 to '' and keeps d3 under d2.
-    await backend.deleteBlock(boardId, d2.id);
-    await backend.deleteBlock(boardId, d1.id);
-    await backend.restoreBlock(boardId, d2.id);
+    await backend.batchDeleteCards(boardId, [d2.id]);
+    await backend.batchDeleteCards(boardId, [d1.id]);
+    await backend.batchRestoreCards(boardId, [d2.id]);
     expect((await backend.card(boardId, d2.id)).parentId).toBe('');
     expect((await backend.card(boardId, d3.id)).parentId).toBe(d2.id);
     stop();

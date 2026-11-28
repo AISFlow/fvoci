@@ -94,7 +94,7 @@ test('creates a course from built-in template, duplicates, and exports/imports w
   await sidebar(page)
     .getByRole('button', { name: 'Menu of the course L6 Study Plan', exact: true })
     .click();
-  await page.getByRole('menuitem', { name: 'Export the course' }).click();
+  await page.getByRole('menuitem', { name: 'As a .fvoci archive' }).click();
   const archive = testInfo.outputPath('course-l6.fvoci');
   await (await saving).saveAs(archive);
 

@@ -6,6 +6,8 @@ use std::io::{Cursor, Write as _};
 use std::path::PathBuf;
 
 use fvoci_model::{Block, BlockType, ContainerVisibility, new_id};
+use fvoci_server::storage::FaultyOp;
+use fvoci_store::LooseState;
 use reqwest::StatusCode;
 use serde_json::json;
 
@@ -26,18 +28,16 @@ fn uploads_dir(ts: &TestServer) -> PathBuf {
 
 /// What is in a directory, by name; nothing if it is not there.
 fn entries(directory: &std::path::Path) -> Vec<String> {
-    std::fs::read_dir(directory)
-        .map(|read| {
-            read.map(|entry| {
-                entry
-                    .expect("an entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect()
+    std::fs::read_dir(directory).map_or_default(|read| {
+        read.map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
         })
-        .unwrap_or_default()
+        .collect()
+    })
 }
 
 /// Opens an upload of an archive of `size` bytes into `workspace_id`.
@@ -154,10 +154,7 @@ async fn an_archive_in_parts_is_imported_and_leaves_nothing() {
             ..Block::default()
         });
     }
-    ts.client
-        .insert_blocks(&board.id, &attachments)
-        .await
-        .check_created();
+    crate::blocks::insert(&ts.client, &board.id, &attachments).await;
     let archive = ts
         .client
         .get(&format!("{TEST_WS}/containers/{}/archive/export", board.id))
@@ -461,6 +458,74 @@ async fn an_archive_over_its_limits_stores_nothing() {
     ts.teardown().await;
 }
 
+/// What an import that gave up leaves: no board, no object marked as being written, and
+/// no staging directory.
+async fn assert_given_up(ts: &TestServer, boards_before: usize, why: &str) {
+    assert_eq!(boards_of(ts).await.len(), boards_before, "no board ({why})");
+    let writing: Vec<_> = ts
+        .app
+        .housekeeping()
+        .store()
+        .loose_objects()
+        .await
+        .expect("listed")
+        .into_iter()
+        .filter(|object| object.state == LooseState::Writing)
+        .collect();
+    assert_eq!(writing, [], "nothing is being written ({why})");
+    let staging: Vec<String> = entries(&ts.app.config().tmp_dir())
+        .into_iter()
+        .filter(|name| name.starts_with("import-stage-"))
+        .collect();
+    assert_eq!(
+        staging,
+        Vec::<String>::new(),
+        "no staging directory ({why})"
+    );
+}
+
+/// An import whose second file cannot be written, or would take the organization past
+/// its storage, gives up the first one too, and leaves nothing.
+#[tokio::test]
+async fn an_import_whose_second_file_fails_leaves_nothing() {
+    let ts = Setup::native()
+        .configure(|config| {
+            config.max_file_bytes = 1000;
+            config.max_org_storage_bytes = 1500;
+        })
+        .start()
+        .await
+        .init_basic()
+        .await;
+    let before = boards_of(&ts).await.len();
+
+    let small = incompressible(400);
+    let two = archive_with(
+        &[("b1/first.bin", &small), ("b1/second.bin", &small)],
+        zip::CompressionMethod::Stored,
+    );
+    let faults = ts
+        .app
+        .files()
+        .faults()
+        .expect("a test's storage takes faults");
+    faults.fail_after(FaultyOp::Write, 1, 1);
+    let response = import(&ts.client, TEST_WORKSPACE_ID, &two).await;
+    assert!(response.status.is_server_error(), "{}", response.text());
+    assert_given_up(&ts, before, "a write failed").await;
+
+    let large = incompressible(800);
+    let past_the_room = archive_with(
+        &[("b1/first.bin", &large), ("b1/second.bin", &large)],
+        zip::CompressionMethod::Stored,
+    );
+    let response = import(&ts.client, TEST_WORKSPACE_ID, &past_the_room).await;
+    response.check_status(StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.check_problem()["reason"], json!("storage_full"));
+    assert_given_up(&ts, before, "past the storage").await;
+    ts.teardown().await;
+}
+
 /// The open uploads of a user hold back at most twice the larger of the two limits, a
 /// file's and an archive's, and an archive counts toward it as a file does.
 #[tokio::test]
@@ -534,10 +599,7 @@ async fn with_s3_an_archive_is_received_on_the_disk() {
         updated_at: 1,
         ..Block::default()
     };
-    ts.client
-        .insert_blocks(&board.id, std::slice::from_ref(&attachment))
-        .await
-        .check_created();
+    crate::blocks::insert_one(&ts.client, &attachment).await;
     let archive = ts
         .client
         .get(&format!("{TEST_WS}/containers/{}/archive/export", board.id))

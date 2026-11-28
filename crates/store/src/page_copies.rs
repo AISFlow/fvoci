@@ -19,19 +19,9 @@ use crate::containers_and_blocks::duplicate_container;
 use crate::db::{Id, Scope};
 use crate::file_refs::NewBodyFiles;
 use crate::notification_noting::Telling;
-use crate::pages::{page_tree, write_place};
+use crate::pages::{Written, page_tree, write_place};
 use crate::{Store, StoreError, containers};
 use fvoci_model::DuplicateAs;
-
-/// What duplicating a page made: the copies, the copy of the page asked for first and
-/// a parent before what is below it; and the pages numbered anew to leave it room.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PageCopies {
-    /// The copies, as they are stored.
-    pub pages: Vec<Block>,
-    /// The siblings numbered anew, as they are stored.
-    pub renumbered: Vec<Block>,
-}
 
 impl Store {
     /// Copies a page of the wiki with every page below it, the copy right after the page
@@ -50,7 +40,7 @@ impl Store {
         title: Option<&str>,
         limits: PageLimits,
         user_id: &str,
-    ) -> Result<PageCopies, StoreError> {
+    ) -> Result<Written, StoreError> {
         let not_found = || StoreError::not_found(format_args!("page ID={page_id} of {wiki_id}"));
         let invalid = |source| StoreError::InvalidBlock {
             id: page_id.to_owned(),
@@ -77,9 +67,12 @@ impl Store {
             // A copy names whom its original named: nobody is told again.
             let nobody = Telling::Nobody;
             insert_blocks(scope, &mut copies, user_id, NewBodyFiles::Unchecked, nobody).await?;
-            Ok(PageCopies {
-                pages: copies,
+            let mut copies = copies.into_iter();
+            let first = copies.next().ok_or_else(not_found)?;
+            Ok(Written {
+                first,
                 renumbered,
+                below: copies.collect(),
             })
         })
         .await

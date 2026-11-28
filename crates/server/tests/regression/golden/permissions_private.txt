@@ -17,26 +17,25 @@ members: update                             401        404        403        403
 members: delete another                     401        404        403        403        403        204
 members: join                               401        404        403        403        403        403
 members: leave                              401        404        204        204        204        204
-blocks: list                                401        404        200        200        200        200
-blocks: list all                            401        404        200        200        200        200
-blocks: list by parent                      401        404        200        200        200        200
-blocks: insert card                         401        404        400        400        400        400
-blocks: insert view                         401        404        403        403        201        201
-blocks: insert comment                      401        404        403        201        201        201
-blocks: patch card                          401        404        403        403        204        204
-blocks: patch another's comment             401        404        403        403        403        204
-blocks: patch several                       401        404        403        403        204        204
-blocks: delete card                         401        404        403        403        204        204
-blocks: delete view                         401        404        403        403        204        204
-blocks: delete another's comment            401        404        403        403        403        204
-blocks: restore                             401        404        403        403        200        200
-blocks: duplicate                           401        404        403        403        201        201
-containers-and-blocks: patch                401        404        403        403        200        200
-containers-and-blocks: delete               401        404        403        403        403        204
+views: list                                 401        404        200        200        200        200
+views: get                                  401        404        200        200        200        200
+views: create                               401        404        403        403        201        201
+views: patch                                401        404        403        403        200        200
+views: delete                               401        404        403        403        204        204
+views: restore                              401        404        403        403        200        200
+comments: list                              401        404        200        200        200        200
+comments: create                            401        404        403        201        201        201
+comments: patch another's                   401        404        403        403        403        200
+comments: delete another's                  401        404        403        403        403        204
+attachments: list                           401        404        200        200        200        200
 cards: create                               401        404        403        403        201        201
 cards: list                                 401        404        200        200        200        200
 cards: get                                  401        404        200        200        200        200
 cards: patch                                401        404        403        403        200        200
+cards: batch patch                          401        404        403        403        200        200
+cards: batch delete                         401        404        403        403        204        204
+cards: batch restore                        401        404        403        403        200        200
+cards: duplicate                            401        404        403        403        201        201
 public-link: get                            401        404        403        403        403        200
 public-link: post                           401        404        403        403        403        200
 subscriptions: create                       401        404        201        201        201        201

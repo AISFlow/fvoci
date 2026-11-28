@@ -61,7 +61,7 @@ pub(crate) async fn page(
         .create_page(&wiki.id, &new, PageLimits::default(), &wiki.created_by)
         .await
         .expect("the page is made")
-        .page
+        .first
         .id
 }
 
@@ -337,7 +337,7 @@ async fn the_tree_has_every_page_that_is_not_in_the_trash_and_no_body() {
         .create_page(&wiki.id, &new, PageLimits::default(), &user_id)
         .await
         .expect("the page is made")
-        .page;
+        .first;
     let child = page(&test, &wiki, &made.id, None).await;
     let grandchild = page(&test, &wiki, &child, None).await;
     let kept = page(&test, &wiki, "", None).await;

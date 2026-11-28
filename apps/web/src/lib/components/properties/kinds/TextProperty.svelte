@@ -69,11 +69,11 @@
     onSave={onChange}
   />
 {:else if value !== ''}
-  <span data-slot="property-text" class="block min-w-0 truncate px-2 py-1.5" title={value}
-    >{value}</span
-  >
+  <span data-slot="property-text" class="block min-w-0 truncate px-2 py-1.5" title={value}>
+    {value}
+  </span>
 {:else if placeholder !== ''}
-  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground"
-    >{placeholder}</span
-  >
+  <span data-slot="property-empty" class="block px-2 py-1.5 text-muted-foreground">
+    {placeholder}
+  </span>
 {/if}

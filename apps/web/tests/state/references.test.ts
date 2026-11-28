@@ -148,7 +148,7 @@ describe('references, in memory', () => {
     // Only the body as it is now counts.
     await write(gamma.id, naming(beta.id));
     expect(await titles()).toEqual(['Beta']);
-    await backend.deleteBlock(boardId, beta.id);
+    await backend.batchDeleteCards(boardId, [beta.id]);
     expect(await titles()).toEqual([]);
   });
 

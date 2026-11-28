@@ -13,10 +13,10 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::common::ROOT_WORKSPACE_ID;
-use crate::fixtures::{PNG, block, id_of, merged, role_flags};
+use crate::fixtures::{PNG, id_of, merged, role_flags};
 use crate::golden;
 use crate::harness::ROOT_API;
-use crate::harness::{Caller, Http, Payload, id_by_title, multipart, start_server};
+use crate::harness::{Caller, Http, Payload, multipart, start_server};
 
 /// The kinds of caller, in the order of the table's columns.
 const ROLES: [&str; 6] = [
@@ -32,7 +32,7 @@ const ROLES: [&str; 6] = [
 const MEMBER_ROLES: [&str; 4] = ["viewer", "commenter", "editor", "admin"];
 
 /// The rows of the table, in order. [`request`] builds the request of each.
-const ROUTES: [&str; 53] = [
+const ROUTES: [&str; 52] = [
     "board: get",
     "board: patch title",
     "board: patch properties",
@@ -50,26 +50,25 @@ const ROUTES: [&str; 53] = [
     "members: delete another",
     "members: join",
     "members: leave",
-    "blocks: list",
-    "blocks: list all",
-    "blocks: list by parent",
-    "blocks: insert card",
-    "blocks: insert view",
-    "blocks: insert comment",
-    "blocks: patch card",
-    "blocks: patch another's comment",
-    "blocks: patch several",
-    "blocks: delete card",
-    "blocks: delete view",
-    "blocks: delete another's comment",
-    "blocks: restore",
-    "blocks: duplicate",
-    "containers-and-blocks: patch",
-    "containers-and-blocks: delete",
+    "views: list",
+    "views: get",
+    "views: create",
+    "views: patch",
+    "views: delete",
+    "views: restore",
+    "comments: list",
+    "comments: create",
+    "comments: patch another's",
+    "comments: delete another's",
+    "attachments: list",
     "cards: create",
     "cards: list",
     "cards: get",
     "cards: patch",
+    "cards: batch patch",
+    "cards: batch delete",
+    "cards: batch restore",
+    "cards: duplicate",
     "public-link: get",
     "public-link: post",
     "subscriptions: create",
@@ -125,7 +124,8 @@ impl Users {
     }
 }
 
-/// A board with one member per role, some blocks, and on demand a file.
+/// A board with one member per role, a card with a comment, a view, and on demand a
+/// file.
 #[derive(Debug)]
 struct Fixture<'a> {
     http: &'a Http,
@@ -135,6 +135,8 @@ struct Fixture<'a> {
     card: String,
     view: String,
     comment: String,
+    /// When the comment was written, for a change of it.
+    comment_at: Value,
 }
 
 impl<'a> Fixture<'a> {
@@ -176,44 +178,31 @@ impl<'a> Fixture<'a> {
             )
             .await
             .string("id");
-        let blocks = format!("{ROOT_API}/boards/{board}/blocks");
-        let created = http
+        let view = http
             .api(
                 Method::POST,
-                &blocks,
-                Payload::Json(json!([block(
-                    "view",
-                    &board,
-                    "view",
-                    "view",
-                    "",
-                    json!({"viewType": "board"})
-                )])),
+                &format!("{ROOT_API}/boards/{board}/views"),
+                Payload::Json(json!({"title": "view", "viewType": "board"})),
                 &owner,
             )
             .await;
-        let created = created.json();
+        let view = id_of(&view.json()["view"]);
         let comment = http
             .api(
                 Method::POST,
-                &blocks,
-                Payload::Json(json!([block(
-                    "comment",
-                    &board,
-                    "comment",
-                    "comment",
-                    &card,
-                    json!({})
-                )])),
+                &format!("{ROOT_API}/boards/{board}/cards/{card}/comments"),
+                Payload::Json(json!({"body": said("comment")})),
                 &owner,
             )
             .await;
+        let comment = comment.json();
         Self {
             http,
             users,
             visibility: board_type.to_owned(),
-            view: id_by_title(created, "view"),
-            comment: id_of(&comment.json()[0]),
+            view,
+            comment: id_of(comment),
+            comment_at: comment["updatedAt"].clone(),
             card,
             board,
         }
@@ -279,7 +268,7 @@ impl Request {
 async fn request(route: &str, fx: &Fixture<'_>, me: &str) -> Request {
     match route.split_once(": ").map(|(family, _)| family) {
         Some("board" | "members") => board_request(route, fx).await,
-        Some("blocks" | "containers-and-blocks" | "cards") => block_request(route, fx).await,
+        Some("views" | "comments" | "attachments" | "cards") => block_request(route, fx).await,
         _ => workspace_request(route, fx, me).await,
     }
 }
@@ -342,72 +331,63 @@ async fn board_request(route: &str, fx: &Fixture<'_>) -> Request {
     }
 }
 
-/// The request of a row of the blocks and the cards of the board.
+/// A document of one paragraph of `text`.
+fn said(text: &str) -> Value {
+    json!({"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": text}]},
+    ]})
+}
+
+/// The request of a row of the views, the comments and the cards of the board.
 async fn block_request(route: &str, fx: &Fixture<'_>) -> Request {
     let board = &fx.board;
-    let blocks = format!("{ROOT_API}/boards/{board}/blocks");
+    let at = format!("{ROOT_API}/boards/{board}");
+    let view = format!("{at}/views/{}", fx.view);
+    let below = format!("{at}/cards/{}", fx.card);
+    let comment = format!("{below}/comments/{}", fx.comment);
+    let the_card = json!({"cardIds": [fx.card]});
     match route {
-        "blocks: list" => Request::new(Method::GET, blocks),
-        "blocks: list all" => Request::new(Method::GET, format!("{blocks}?all=true")),
-        "blocks: list by parent" => {
-            Request::new(Method::GET, format!("{blocks}?parentId={}", fx.card))
-        }
-        "blocks: insert card" => Request::json(
+        "views: list" => Request::new(Method::GET, format!("{at}/views")),
+        "views: get" => Request::new(Method::GET, view),
+        "views: create" => Request::json(
             Method::POST,
-            blocks,
-            json!([block("n", board, "card", "n", "", json!({}))]),
+            format!("{at}/views"),
+            json!({"title": "n", "viewType": "board"}),
         ),
-        "blocks: insert view" => Request::json(
-            Method::POST,
-            blocks,
-            json!([block("n", board, "view", "n", "", json!({}))]),
-        ),
-        "blocks: insert comment" => Request::json(
-            Method::POST,
-            blocks,
-            json!([block("n", board, "comment", "n", &fx.card, json!({}))]),
-        ),
-        "blocks: patch card" => Request::json(
-            Method::PATCH,
-            format!("{blocks}/{}", fx.card),
-            json!({"title": "patched"}),
-        ),
-        "blocks: patch another's comment" => Request::json(
-            Method::PATCH,
-            format!("{blocks}/{}", fx.comment),
-            json!({"title": "patched"}),
-        ),
-        "blocks: patch several" => Request::json(
-            Method::PATCH,
-            blocks,
-            json!({"blockIds": [fx.card], "blockPatches": [{"title": "p"}]}),
-        ),
-        "blocks: delete card" => Request::new(Method::DELETE, format!("{blocks}/{}", fx.card)),
-        "blocks: delete view" => Request::new(Method::DELETE, format!("{blocks}/{}", fx.view)),
-        "blocks: delete another's comment" => {
-            Request::new(Method::DELETE, format!("{blocks}/{}", fx.comment))
-        }
-        "blocks: restore" => {
-            let view = format!("{blocks}/{}", fx.view);
+        "views: patch" => Request::json(Method::PATCH, view, json!({"title": "patched"})),
+        "views: delete" => Request::new(Method::DELETE, view),
+        "views: restore" => {
             fx.owner(Method::DELETE, &view, Payload::None).await;
             Request::new(Method::POST, format!("{view}/restore"))
         }
-        "blocks: duplicate" => {
-            Request::new(Method::POST, format!("{blocks}/{}/duplicate", fx.card))
-        }
-        "containers-and-blocks: patch" => Request::json(
+        "comments: list" => Request::new(Method::GET, format!("{below}/comments")),
+        "comments: create" => Request::json(
+            Method::POST,
+            format!("{below}/comments"),
+            json!({"body": said("n")}),
+        ),
+        "comments: patch another's" => Request::json(
             Method::PATCH,
-            format!("{ROOT_API}/containers-and-blocks"),
-            json!({
-                "containerIds": [board], "containerPatches": [{"title": "p"}],
-                "blockIds": [fx.card], "blockPatches": [{"title": "p"}],
-            }),
+            comment,
+            json!({"body": said("patched"), "readAt": fx.comment_at}),
         ),
-        "containers-and-blocks: delete" => Request::json(
-            Method::DELETE,
-            format!("{ROOT_API}/containers-and-blocks"),
-            json!({"containers": [board], "blocks": [fx.card]}),
+        "comments: delete another's" => Request::new(Method::DELETE, comment),
+        "attachments: list" => Request::new(Method::GET, format!("{below}/attachments")),
+        "cards: batch patch" => Request::json(
+            Method::POST,
+            format!("{at}/cards/batch-patch"),
+            json!({"cardIds": [fx.card], "updatedProperties": {}}),
         ),
+        "cards: batch delete" => {
+            Request::json(Method::POST, format!("{at}/cards/batch-delete"), the_card)
+        }
+        "cards: batch restore" => {
+            let delete = format!("{at}/cards/batch-delete");
+            fx.owner(Method::POST, &delete, Payload::Json(the_card.clone()))
+                .await;
+            Request::json(Method::POST, format!("{at}/cards/batch-restore"), the_card)
+        }
+        "cards: duplicate" => Request::new(Method::POST, format!("{below}/duplicate")),
         "cards: create" => Request::json(
             Method::POST,
             format!("{ROOT_API}/boards/{board}/cards"),

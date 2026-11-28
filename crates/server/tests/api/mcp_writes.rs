@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use crate::api_tokens::agent_writing;
 use crate::body_versions::versions;
-use crate::common::{Client, Setup, TEST_WORKSPACE_ID, TEST_WS, UNKNOWN_ID};
+use crate::card_recurrence::{DUE, STATUS, chores, weekly};
+use crate::common::{
+    Client, ROOT_WORKSPACE_ID, ROOT_WS, Setup, TEST_WORKSPACE_ID, TEST_WS, UNKNOWN_ID,
+};
 use crate::mcp::{agent_of, call, called, refused, request, send};
 use crate::rooms::{QUIET, paragraphs, two_in_a_room};
 
@@ -449,5 +452,126 @@ async fn a_comment_that_names_nobody_or_someone_unseen_is_kept_and_read_without_
         assert!(!listed.to_string().contains(name.as_str()), "{listed}");
     }
 
+    th.teardown().await;
+}
+
+#[tokio::test]
+async fn an_agent_makes_a_card_repeat_completes_cards_alike_and_reads_what_was_done() {
+    let th = Setup::native().start().await.init_basic().await;
+    let board_id = chores(&th.client).await;
+    let agent = agent_writing(&th, &th.client).await;
+    let made = called(
+        &agent,
+        "save_card",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "boardId": board_id, "title": "water",
+                "recurrence": weekly(), "properties": {DUE: {"from": "2099-01-15"}}}),
+    )
+    .await;
+    assert_eq!(made["recurrence"], weekly(), "{made}");
+    let id = made["id"].as_str().expect("an identifier").to_owned();
+    let other = called(
+        &agent,
+        "save_card",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "boardId": board_id, "title": "sweep"}),
+    )
+    .await;
+    let stopped = called(
+        &agent,
+        "save_card",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "cardId": other["id"], "recurrence": null}),
+    )
+    .await;
+    assert_eq!(stopped.get("recurrence"), None, "{stopped}");
+
+    let cards = |ids: Value| {
+        json!({"workspaceId": TEST_WORKSPACE_ID, "boardId": board_id, "cardIds": ids,
+               "properties": {STATUS: "done"}})
+    };
+    let done = called(&agent, "save_cards", &cards(json!([id, other["id"]]))).await;
+    assert_eq!(done["cards"].as_array().map(Vec::len), Some(2), "{done}");
+    let listed: Value = th
+        .client
+        .get(&format!("{TEST_WS}/boards/{board_id}/cards"))
+        .await
+        .ok_json();
+    assert_eq!(listed.as_array().map(Vec::len), Some(3), "one next card");
+    let problem = refused(&agent, "save_cards", &cards(json!([]))).await;
+    assert_eq!(problem["status"], 400, "{problem}");
+
+    let activity = called(
+        &agent,
+        "list_activity",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "cardId": id, "perPage": 1}),
+    )
+    .await;
+    let lines = activity["lines"].as_array().expect("lines");
+    assert_eq!(lines.len(), 1, "{activity}");
+    assert_eq!(
+        (
+            &lines[0]["kind"],
+            &lines[0]["after"],
+            &lines[0]["actorTokenName"]
+        ),
+        (&json!("property"), &json!("done"), &json!("agent")),
+        "{activity}"
+    );
+    let second = called(
+        &agent,
+        "list_activity",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "cardId": id, "page": 2, "perPage": 1}),
+    )
+    .await;
+    assert_eq!(second["lines"][0]["kind"], "created", "{second}");
+    th.teardown().await;
+}
+
+/// More cards than a batch takes are refused, and nothing of them is written; the
+/// activity of a card the agent's person may not read, or of another workspace, is
+/// not found, as that of no card is.
+#[tokio::test]
+async fn too_many_cards_and_a_card_out_of_reach_are_refused_to_an_agent() {
+    let th = Setup::native().start().await.init_basic().await;
+    let board_id = chores(&th.client).await;
+    let agent = agent_writing(&th, &th.client).await;
+    let ids: Vec<String> = (0..201).map(|_| fvoci_model::new_id()).collect();
+    let problem = refused(
+        &agent,
+        "save_cards",
+        &json!({"workspaceId": TEST_WORKSPACE_ID, "boardId": board_id, "cardIds": ids,
+                "properties": {STATUS: "done"}}),
+    )
+    .await;
+    assert_eq!(problem["status"], 400, "{problem}");
+
+    let theirs = chores(&th.client2).await;
+    let card = |client: &Client, path: String| {
+        let client = client.clone();
+        async move {
+            let made: Value = client
+                .post(&path, &json!({"title": "theirs"}))
+                .await
+                .created_json();
+            made["id"].as_str().expect("an identifier").to_owned()
+        }
+    };
+    let private = card(&th.client2, format!("{TEST_WS}/boards/{theirs}/cards")).await;
+    let elsewhere: Value = th
+        .client
+        .post(
+            &format!("{ROOT_WS}/boards"),
+            &json!({"workspaceId": ROOT_WORKSPACE_ID, "visibility": "open", "title": "root"}),
+        )
+        .await
+        .created_json();
+    let elsewhere_id = elsewhere["id"].as_str().expect("an identifier");
+    let root_card = card(&th.client, format!("{ROOT_WS}/boards/{elsewhere_id}/cards")).await;
+    let activity = |card_id: &str| json!({"workspaceId": TEST_WORKSPACE_ID, "cardId": card_id});
+    let unknown = refused(&agent, "list_activity", &activity(UNKNOWN_ID)).await;
+    assert_eq!(unknown["status"], 404, "{unknown}");
+    for card_id in [&private, &root_card] {
+        let problem = refused(&agent, "list_activity", &activity(card_id)).await;
+        assert_eq!(problem["status"], 404, "{card_id}: {problem}");
+        assert_eq!(problem["detail"], unknown["detail"], "{problem} {unknown}");
+    }
     th.teardown().await;
 }

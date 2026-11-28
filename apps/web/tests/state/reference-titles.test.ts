@@ -55,7 +55,7 @@ describe('the titles of what references name', () => {
     await settle();
     expect(titles.of(alpha.id)).toMatchObject({ title: 'Renamed', icon: '🚀' });
 
-    await other.deleteBlock(board.boardId, beta.id);
+    await other.batchDeleteCards(board.boardId, [beta.id]);
     await settle();
     expect(titles.of(beta.id)).toBeNull();
   });

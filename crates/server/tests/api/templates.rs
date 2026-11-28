@@ -56,11 +56,7 @@ async fn get_templates_returns_the_built_in_templates() {
     );
 
     let first = &boards[0];
-    let blocks = ts
-        .client
-        .get(&format!("{ROOT_WS}/boards/{}/blocks", first.id))
-        .await
-        .ok_json::<Vec<Block>>();
+    let blocks = crate::blocks::blocks_of_in(&ts.client, ROOT_WORKSPACE_ID, &first.id).await;
     assert!(!blocks.is_empty(), "the template has blocks");
 
     let duplicate = ts
@@ -339,18 +335,15 @@ async fn a_built_in_template_cannot_be_joined_or_changed() {
         .delete(&format!("{ROOT_WS}/containers/{}", welcome.id))
         .await
         .check_forbidden();
-    let blocks = ts
+    let cards = ts
         .client
-        .get(&format!("{ROOT_WS}/boards/{}/blocks", welcome.id))
+        .get(&format!("{ROOT_WS}/boards/{}/cards", welcome.id))
         .await
-        .ok_json::<Vec<fvoci_model::Block>>();
-    let card = blocks
-        .iter()
-        .find(|block| block.block_type == fvoci_model::BlockType::Card)
-        .expect("the template has cards");
+        .ok_json::<Vec<fvoci_model::Card>>();
+    let card = cards.first().expect("the template has cards");
     ts.client
         .patch(
-            &format!("{ROOT_WS}/boards/{}/blocks/{}", welcome.id, card.id),
+            &format!("{ROOT_WS}/cards/{}", card.id),
             &serde_json::json!({"title": "taken over"}),
         )
         .await
@@ -480,11 +473,12 @@ impl Seen {
             }
             return;
         }
-        let blocks = ts
-            .client
-            .get(&format!("{ROOT_WS}/boards/{}/blocks", board.id))
-            .await
-            .ok_json::<Vec<Value>>();
+        let blocks: Vec<Value> =
+            crate::blocks::blocks_of_in(&ts.client, ROOT_WORKSPACE_ID, &board.id)
+                .await
+                .iter()
+                .map(|block| serde_json::to_value(block).expect("a block as JSON"))
+                .collect();
         let cards: Vec<&Value> = blocks
             .iter()
             .filter(|block| block["type"] == json!("card"))
@@ -869,7 +863,7 @@ async fn a_guest_uses_templates_in_the_workspace_where_they_are_a_member() {
     let board = &templates[0].id;
     for path in [
         format!("{ROOT_WS}/containers/{board}"),
-        format!("{ROOT_WS}/boards/{board}/blocks"),
+        format!("{ROOT_WS}/boards/{board}/views"),
         format!("{ROOT_WS}/boards/{board}/cards"),
         format!("{ROOT_WS}/containers/{board}/members"),
     ] {
@@ -883,7 +877,7 @@ async fn a_guest_uses_templates_in_the_workspace_where_they_are_a_member() {
         .await
         .check_not_found();
     ts.client2
-        .get(&format!("{elsewhere}/boards/{board}/blocks"))
+        .get(&format!("{elsewhere}/boards/{board}/views"))
         .await
         .check_ok();
     ts.client2
@@ -916,23 +910,22 @@ async fn a_guest_uses_templates_in_the_workspace_where_they_are_a_member() {
         .await
         .check_ok();
     ts.client2
-        .get(&format!("{ROOT_WS}/boards/{}/blocks", invited_template.id))
+        .get(&format!("{ROOT_WS}/boards/{}/views", invited_template.id))
         .await
         .check_ok();
     ts.teardown().await;
 }
 
-/// The cards of a board, by title.
+/// The cards of a board, by title, with their bodies.
 async fn cards_by_title(
     client: &crate::common::Client,
-    workspace: &str,
+    workspace_id: &str,
     board_id: &str,
 ) -> std::collections::BTreeMap<String, Block> {
-    client
-        .get(&format!("{workspace}/boards/{board_id}/blocks?type=card"))
+    crate::blocks::blocks_of_in(client, workspace_id, board_id)
         .await
-        .ok_json::<Vec<Block>>()
         .into_iter()
+        .filter(|block| block.block_type == fvoci_model::BlockType::Card)
         .map(|card| (card.title.clone(), card))
         .collect()
 }
@@ -960,7 +953,8 @@ async fn a_board_made_from_a_template_has_its_own_files_and_names_its_own_cards(
         .iter()
         .find(|board| board.properties.get("onboarding") == Some(&json!(true)))
         .expect("the welcome template is built in");
-    let of_template = cards_by_title(&ts.client, TEST_WS, &welcome.id).await;
+    let of_template =
+        cards_by_title(&ts.client, crate::common::TEST_WORKSPACE_ID, &welcome.id).await;
 
     let made = ts
         .client
@@ -968,7 +962,7 @@ async fn a_board_made_from_a_template_has_its_own_files_and_names_its_own_cards(
         .await
         .ok_json::<Value>();
     let board_id = made["boardId"].as_str().expect("a board id");
-    let cards = cards_by_title(&ts.client, TEST_WS, board_id).await;
+    let cards = cards_by_title(&ts.client, crate::common::TEST_WORKSPACE_ID, board_id).await;
     assert_eq!(
         cards.keys().collect::<Vec<_>>(),
         of_template.keys().collect::<Vec<_>>(),

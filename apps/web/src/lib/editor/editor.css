@@ -154,6 +154,209 @@ img.ProseMirror-separator {
   color: var(--muted-foreground);
 }
 
+/*
+ * A toggle: its chevron in a column of its own before its summary, what it
+ * hides under the summary's text. In the editor the chevron is a button a
+ * finger's square (details-open.ts), turned down while the toggle is open;
+ * what a closed toggle hides is not drawn. Where a body is only shown the
+ * toggle is the page's own `<details>`, its chevron the summary's marker.
+ */
+.doc-body .doc-details {
+  --details-gutter: var(--spacing-touch);
+}
+.doc-body div.doc-details {
+  display: grid;
+  grid-template-columns: var(--details-gutter) minmax(0, 1fr);
+}
+.doc-body .doc-details-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--spacing-touch);
+  height: var(--spacing-touch);
+  /* As tall as a finger, and the line of the summary no taller for it. */
+  margin-block: calc((var(--line-body) * 1em - var(--spacing-touch)) / 2);
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.doc-body .doc-details-button:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.doc-body .doc-details-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.doc-body .doc-details-chevron {
+  width: 1.125rem;
+  height: 1.125rem;
+  transition: rotate 120ms ease-out;
+}
+.doc-body .doc-details[data-open] > .doc-details-button > .doc-details-chevron {
+  rotate: 90deg;
+}
+.doc-body div.doc-details:not([data-open]) > .doc-details-parts > .doc-details-content {
+  display: none;
+}
+.doc-body .doc-details-summary {
+  font-weight: 500;
+}
+.doc-body details.doc-details {
+  /*
+   * The page's own toggle, read: its whole summary is what a finger opens it
+   * by, the chevron's gutter with it, at least a finger's height.
+   */
+  --summary-pad: max(0px, calc((var(--spacing-touch) - var(--line-body) * 1em) / 2));
+}
+.doc-body details.doc-details > summary {
+  position: relative;
+  display: block;
+  min-height: var(--spacing-touch);
+  padding-block: var(--summary-pad);
+  padding-inline-start: var(--details-gutter);
+  list-style: none;
+  cursor: pointer;
+}
+.doc-body details.doc-details > .doc-details-content {
+  padding-inline-start: var(--details-gutter);
+}
+.doc-body details.doc-details > summary::-webkit-details-marker {
+  display: none;
+}
+.doc-body details.doc-details > summary::before {
+  /*
+   * The chevron, drawn of two sides of a square turned (an image would need
+   * an address the page's policy allows): pointing on while closed, down open.
+   */
+  --chevron: 0.45em;
+  content: '';
+  position: absolute;
+  inset-inline-start: calc(var(--details-gutter) / 2 - var(--chevron) / 2 - 0.08em);
+  inset-block-start: calc(var(--summary-pad) + (var(--line-body) * 1em - var(--chevron)) / 2);
+  width: var(--chevron);
+  height: var(--chevron);
+  border-block-start: 2px solid var(--muted-foreground);
+  border-right: 2px solid var(--muted-foreground);
+  rotate: 45deg;
+  transition: rotate 120ms ease-out;
+}
+.doc-body details.doc-details[open] > summary::before {
+  rotate: 135deg;
+}
+.doc-body details.doc-details > summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.doc-body :is(.doc-details-content, .doc-callout-content) > * + * {
+  margin-top: 0.75em;
+}
+.doc-body .doc-details-content {
+  margin-top: 0.25em;
+}
+
+/*
+ * A callout: its blocks beside the icon of its tone, on a tint of the
+ * tone's colour with a stripe of it at the start. The tones are the colours
+ * of options (app.css), the same in light and in dark. In the editor the
+ * icon is a button that shows the four tones (callout.ts).
+ */
+.doc-body .doc-callout {
+  --callout-tone: var(--option-blue);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+  padding: 0.5em 0.75em;
+  border-inline-start: 4px solid var(--callout-tone);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--callout-tone) 35%, var(--background));
+}
+.doc-body .doc-callout[data-tone='tip'] {
+  --callout-tone: var(--option-green);
+}
+.doc-body .doc-callout[data-tone='warn'] {
+  --callout-tone: var(--option-yellow);
+}
+.doc-body .doc-callout[data-tone='danger'] {
+  --callout-tone: var(--option-red);
+}
+.doc-body .doc-callout-content {
+  flex: 1;
+  min-width: 0;
+}
+.doc-body :is(.doc-callout-icon, .doc-callout-tone) {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in oklab, var(--callout-tone) 30%, var(--foreground));
+}
+.doc-body .doc-callout-icon {
+  height: calc(var(--line-body) * 1em);
+}
+.doc-body .doc-callout-glyph {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+.doc-body .doc-callout-controls {
+  position: relative;
+  flex: none;
+}
+.doc-body button.doc-callout-icon {
+  width: var(--spacing-touch);
+  height: var(--spacing-touch);
+  margin-block: calc((var(--line-body) * 1em - var(--spacing-touch)) / 2);
+  margin-inline-start: -0.5em;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.doc-body button.doc-callout-icon:hover {
+  background: color-mix(in oklab, var(--callout-tone) 60%, var(--background));
+}
+.doc-body :is(.doc-callout-icon, .doc-callout-tone):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.doc-body .doc-callout-tones {
+  position: absolute;
+  z-index: 10;
+  inset-block-start: 100%;
+  inset-inline-start: -0.5em;
+  display: flex;
+  gap: 0.25em;
+  padding: 0.25em;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  box-shadow: 0 4px 12px color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+.doc-body .doc-callout-tones[hidden] {
+  display: none;
+}
+.doc-body .doc-callout-tone {
+  width: var(--spacing-touch);
+  height: var(--spacing-touch);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.doc-body .doc-callout-tone[data-tone='info'] {
+  --callout-tone: var(--option-blue);
+}
+.doc-body .doc-callout-tone[data-tone='tip'] {
+  --callout-tone: var(--option-green);
+}
+.doc-body .doc-callout-tone[data-tone='warn'] {
+  --callout-tone: var(--option-yellow);
+}
+.doc-body .doc-callout-tone[data-tone='danger'] {
+  --callout-tone: var(--option-red);
+}
+.doc-body .doc-callout-tone:hover,
+.doc-body .doc-callout-tone[aria-pressed='true'] {
+  background: color-mix(in oklab, var(--callout-tone) 50%, var(--popover));
+}
+
 .doc-body code {
   font-family: var(--font-mono-stack);
   font-size: 0.9em;

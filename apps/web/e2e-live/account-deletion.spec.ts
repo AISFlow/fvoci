@@ -89,20 +89,12 @@ test('an account is asked to be deleted, taken back, asked again and erased; wha
     members: [{ who: reader, role: 'editor' }],
   });
   const cardId = board.cards['Written before leaving'] ?? '';
-  const posted = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        parentId: cardId,
-        type: 'comment',
-        title: '',
-        fields: {},
-        createdAt: 1,
-        updatedAt: 1,
-        body: body('Words that stay', quietId),
-      },
-    ],
-  });
+  const posted = await api.post(
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`,
+    {
+      data: { body: body('Words that stay', quietId) },
+    },
+  );
   expect(posted.ok(), await posted.text()).toBe(true);
 
   const errors = watchErrors(page);

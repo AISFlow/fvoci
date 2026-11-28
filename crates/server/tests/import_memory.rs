@@ -16,7 +16,7 @@ use std::time::Instant;
 use fvoci_model::{Block, BlockType, Container, PublicContainers, new_id};
 use fvoci_server::app::ImportFormat;
 use fvoci_server::error::ErrorKind;
-use fvoci_store::{NewBodyFiles, StreamBatch, StreamCreateError};
+use fvoci_store::{Creator, NewBodyFiles, NewContainers, StreamBatch, StreamCreateError};
 use serde_json::json;
 use zip::write::SimpleFileOptions;
 
@@ -614,7 +614,7 @@ async fn streaming_native_import_handles_empty_board_id_attachments_and_cross_bo
     ts.teardown().await;
 }
 
-/// Verifies `Store::create_containers_and_blocks_streamed` rolls back the entire DB
+/// Verifies `Store::create_containers` of streamed blocks rolls back the entire DB
 /// transaction when the producer channel closes without sending `StreamBatch::Done`.
 #[tokio::test]
 async fn streaming_create_rolls_back_when_done_marker_is_missing() {
@@ -641,11 +641,11 @@ async fn streaming_create_rolls_back_when_done_marker_is_missing() {
     let stream_outcome = ts
         .app
         .store()
-        .create_containers_and_blocks_streamed(
-            &mut containers,
+        .create_containers(
+            NewContainers::streamed(&mut containers, rx)
+                .body_files(NewBodyFiles::Unchecked)
+                .creator(Creator::Nobody),
             &importer_id,
-            NewBodyFiles::Unchecked,
-            rx,
         )
         .await;
     assert!(

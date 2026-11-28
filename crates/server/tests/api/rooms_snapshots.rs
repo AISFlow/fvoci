@@ -2,7 +2,7 @@
 
 use std::io::{Cursor, Read as _};
 
-use fvoci_model::{Block, BlockType, ContainersAndBlocks};
+use fvoci_model::{Block, BlockType, Card, ContainersAndBlocks};
 use serde_json::Value;
 
 use crate::collab::{body_of, card};
@@ -43,6 +43,33 @@ async fn copies_templates_and_archives_include_the_last_acknowledged_update() {
     th.teardown().await;
 }
 
+/// A copy of the table's card, by `duplicateCard` with `query`.
+async fn duplicate(th: &TestServer, table: &Table, query: &str) -> Card {
+    th.client
+        .post_empty(&format!(
+            "/w/{TEST_WORKSPACE_ID}/boards/{}/cards/{}/duplicate{query}",
+            table.board_id, table.card_id
+        ))
+        .await
+        .created_json()
+}
+
+/// The cards of the table's board right below `parent_id`.
+async fn cards_below(th: &TestServer, table: &Table, parent_id: &str) -> Vec<Card> {
+    let cards: Vec<Card> = th
+        .client
+        .get(&format!(
+            "/w/{TEST_WORKSPACE_ID}/boards/{}/cards",
+            table.board_id
+        ))
+        .await
+        .ok_json();
+    cards
+        .into_iter()
+        .filter(|card| card.parent_id == parent_id)
+        .collect()
+}
+
 async fn snapshot(th: &TestServer, table: &Table, operation: &str) -> Option<Value> {
     let base = format!("/w/{TEST_WORKSPACE_ID}/containers/{}", table.board_id);
     let template = if operation.ends_with("template") {
@@ -51,13 +78,15 @@ async fn snapshot(th: &TestServer, table: &Table, operation: &str) -> Option<Val
         ""
     };
     let blocks: Vec<Block> = if operation.starts_with("card") {
-        th.client
+        let copy: Card = th
+            .client
             .post_empty(&format!(
-                "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}/duplicate{template}",
+                "/w/{TEST_WORKSPACE_ID}/boards/{}/cards/{}/duplicate{template}",
                 table.board_id, table.card_id
             ))
             .await
-            .created_json()
+            .created_json();
+        vec![Block::from(card(&th.client, &copy.id).await)]
     } else if operation.starts_with("board") {
         let copy: ContainersAndBlocks = th
             .client
@@ -168,42 +197,26 @@ async fn copying_a_card_or_template_includes_pending_bodies_of_child_cards() {
         wanted_child,
         "the child has a pending update"
     );
-    let copies: Vec<Block> = th
-        .client
-        .post_empty(&format!(
-            "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}/duplicate?asTemplate=false",
-            table.board_id, table.card_id
-        ))
+    let copy = duplicate(&th, &table, "?asTemplate=false").await;
+    let child_copy = cards_below(&th, &table, &copy.id)
         .await
-        .created_json();
-    let child_copy = copies
-        .iter()
-        .find(|block| block.title == "Child")
+        .into_iter()
+        .find(|below| below.title == "Child")
         .expect("the copied child");
     assert_eq!(
-        child_copy.body.as_ref().map(|body| body.document().clone()),
+        body_of(&card(&th.client, &child_copy.id).await),
         wanted_child
     );
 
     parent_writer.write_acked("true").await;
     let wanted_parent = parent_writer.body();
-    let template_copies: Vec<Block> = th
-        .client
-        .post_empty(&format!(
-            "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}/duplicate?asTemplate=true",
-            table.board_id, table.card_id
-        ))
-        .await
-        .created_json();
+    let template = duplicate(&th, &table, "?asTemplate=true").await;
     assert!(
-        template_copies.iter().all(|block| block.title != "Child"),
+        cards_below(&th, &table, &template.id).await.is_empty(),
         "a template copy omits child cards"
     );
     assert_eq!(
-        template_copies[0]
-            .body
-            .as_ref()
-            .map(|body| body.document().clone()),
+        body_of(&card(&th.client, &template.id).await),
         wanted_parent
     );
     th.teardown().await;

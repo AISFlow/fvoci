@@ -51,7 +51,11 @@ export async function joinOpenBoard(
   return host.status === 'ready';
 }
 
-/** Handles a failed board load or refresh, clearing sensitive cached state on 403/404. */
+/**
+ * Handles a failed board load or refresh, clearing sensitive cached state on
+ * 403/404. A 403 is explained by reading the board again; what that finds is
+ * not taken once another reading was asked.
+ */
 export async function handleBoardLoadFailure(
   host: BoardFailureHost,
   error: unknown,
@@ -73,13 +77,19 @@ export async function handleBoardLoadFailure(
       return;
     }
     const explained = await explainBoardRefusal(host.workspace, host.boardId);
-    if (host.isClosed()) return;
+    // A reading asked meanwhile, read or under way, says for itself what the board is.
+    if (host.isClosed() || !stillFailed(host)) return;
     if (explained.kind === 'missing') {
       host.missing = true;
       return;
     }
   }
   host.workspace.report('load', error);
+}
+
+/** Whether the host's reading failed still, asked after a wait in which another may have been asked. */
+function stillFailed(host: BoardFailureHost): boolean {
+  return host.status === 'failed';
 }
 
 /** Handles a failed board refresh: reports 401, evicts on 403/404, and updates active state. */

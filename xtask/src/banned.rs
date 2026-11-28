@@ -425,8 +425,7 @@ fn check_file(file: &str, text: &str, reading: &mut Reading<'_>, phrases: &[&str
         saids
             .get(start..start + count)
             .and_then(joined)
-            .map(|sentence| sentence.to_lowercase())
-            .unwrap_or_default()
+            .map_or_default(|sentence| sentence.to_lowercase())
     };
     for (index, line) in lines.iter().enumerate() {
         // A phrase that the lines from here say, and the same number of lines but this

@@ -87,7 +87,7 @@ pub(crate) async fn managing(
     sql.bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(by))
         .push(" AND role = 'admin'");
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         return Err(StoreError::not_found("workspace"));
     }
     Ok(())
@@ -102,7 +102,7 @@ pub(crate) async fn require_team(
     sql.bind(Id(team_id))
         .push_bind(" AND workspace_id = ", Id(workspace_id))
         .push_bind(" AND org_id = ", scope.org()?);
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         return Err(StoreError::not_found("team"));
     }
     Ok(())
@@ -207,10 +207,7 @@ pub(crate) async fn require_addition(
     let mut sql = scope.sql("SELECT role FROM workspace_members WHERE workspace_id = ");
     sql.bind(Id(workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("workspace member"));
-    };
-    let role = row.text(0)?;
+    let role: String = scope.one(sql, "workspace member").await?;
     if role == fvoci_model::WorkspaceRole::Guest.as_str() {
         return Err(StoreError::GuestCannotJoinTeam);
     }
@@ -237,7 +234,7 @@ pub(crate) async fn has_member(
     sql.bind(Id(team_id))
         .push_bind(" AND user_id = ", Id(user_id))
         .push_bind(" AND org_id = ", scope.org()?);
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 pub(crate) async fn add_member(

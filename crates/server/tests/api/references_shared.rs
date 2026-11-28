@@ -81,8 +81,7 @@ async fn shared_board(th: &TestServer) -> Shared {
     let targets: Vec<&str> = named.iter().map(String::as_str).collect();
     card_names(owner, TEST_WS, &source, &targets).await;
     let comment = comment_naming(owner, board, &source, &[&elsewhere.card, &beside]).await;
-    owner
-        .delete(&format!("{TEST_WS}/boards/{board}/blocks/{gone}"))
+    crate::blocks::trash_card(owner, board, &gone)
         .await
         .check_no_content();
     let mut kept = vec![beside.clone()];
@@ -158,10 +157,10 @@ async fn a_reader_by_a_link_is_told_of_the_cards_of_the_board_and_of_nothing_els
     }
     // A member on the board's own routes is told every identifier, as it was written.
     let own = owner
-        .get(&format!("{TEST_WS}/boards/{board}/blocks?all=true"))
+        .get(&format!("{TEST_WS}/cards/{source}"))
         .await
         .value();
-    assert_eq!(references_in(&block_of(&own, source)["body"]), shared.named);
+    assert_eq!(references_in(&own["body"]), shared.named);
     th.teardown().await;
 }
 

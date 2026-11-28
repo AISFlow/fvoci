@@ -9,16 +9,34 @@
  * does one that answers while a read is being written, which is read again
  * once it is.
  *
+ * The list is of one tab (`tab`): every one of the inbox, the unread, the
+ * mentions, the cards given, or what was put away (the archive). What the
+ * reader does to one (read it, mark it unread, put it away or back) or to
+ * all shows at once, and goes back where the server refuses it; one that
+ * leaves the tab by it (put away from the inbox, back out of the archive)
+ * leaves the list at once.
+ *
  * Who did each is named as the workspace of its card or page names them
  * (`usersById`), asked once a visit; whom it leaves out stays unnamed.
  */
 import { SvelteMap } from 'svelte/reactivity';
 
 import type { Backend, User } from './backend.ts';
-import type { Notification, Notifications } from './notification-types.ts';
+import type { Notification, NotificationFilter, Notifications } from './notification-types.ts';
 
 /** How many the list shows: the newest. */
 export const LISTED = 50;
+
+/** The tabs of the list, and which of the reader's notifications each lists. */
+export const INBOX_TABS = {
+  all: {},
+  unread: { unread: true },
+  mention: { kind: 'mention' },
+  assignment: { kind: 'assignment' },
+  archived: { archived: true },
+} as const satisfies Record<string, NotificationFilter>;
+
+export type InboxTab = keyof typeof INBOX_TABS;
 
 type InboxBackend = Pick<Backend, 'watchSelf' | 'usersById'>;
 
@@ -29,6 +47,8 @@ export class NotificationInbox {
   items = $state.raw<readonly Notification[]>([]);
   /** Whether the list was read since it was opened. */
   listed = $state(false);
+  /** Which of them the list shows. */
+  tab = $state<InboxTab>('all');
   /** The people named so far, by identifier. */
   readonly people = new SvelteMap<string, User>();
 
@@ -81,6 +101,56 @@ export class NotificationInbox {
     this.listed = false;
   }
 
+  /** Shows another tab: read before it shows. */
+  async show(tab: InboxTab): Promise<void> {
+    if (tab === this.tab) return;
+    this.tab = tab;
+    this.items = [];
+    this.listed = false;
+    if (this.#open) await this.#readList();
+  }
+
+  /** Marks one read, or unread again where it was read. */
+  async toggleRead(notification: Notification): Promise<void> {
+    if (notification.readAt === 0) await this.read(notification);
+    else await this.markUnread(notification);
+  }
+
+  /** Marks one unread again, back in the inbox: it leaves the archive's list. */
+  async markUnread(notification: Notification): Promise<void> {
+    if (notification.readAt === 0) return;
+    await this.#change(
+      notification,
+      this.tab === 'archived' ? undefined : { ...notification, readAt: 0, archivedAt: 0 },
+      1,
+      () => this.#notifications.markUnread(notification.id),
+    );
+  }
+
+  /** Puts one away, read: it leaves every list but the archive's. */
+  async archive(notification: Notification): Promise<void> {
+    if (notification.archivedAt !== 0) return;
+    await this.#change(notification, undefined, notification.readAt === 0 ? -1 : 0, () =>
+      this.#notifications.archive(notification.id),
+    );
+  }
+
+  /** Brings one back into the inbox: it leaves the archive's list. */
+  async unarchive(notification: Notification): Promise<void> {
+    if (notification.archivedAt === 0) return;
+    await this.#change(notification, undefined, 0, () =>
+      this.#notifications.unarchive(notification.id),
+    );
+  }
+
+  /** Puts away all that were read: they leave the list, but in the archive. */
+  async archiveRead(): Promise<void> {
+    this.#forgetReadings();
+    if (this.tab !== 'archived') this.items = this.items.filter((one) => one.readAt === 0);
+    await this.#write(() => this.#notifications.archiveRead());
+    await this.refresh();
+  }
+
   /** Marks one as read, on the screen at once. */
   async read(notification: Notification): Promise<void> {
     if (notification.readAt !== 0) return;
@@ -110,6 +180,26 @@ export class NotificationInbox {
     this.unread = 0;
     await this.#write(() => this.#notifications.readAll(through));
     await this.refresh();
+  }
+
+  /**
+   * Shows `notification` as `next` (gone from the list where that is undefined)
+   * and the count moved by `counted`, and writes it; read again where it was
+   * refused, or asked for meanwhile.
+   */
+  async #change(
+    notification: Notification,
+    next: Notification | undefined,
+    counted: number,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    const asked = this.#forgetReadings();
+    this.items = next
+      ? this.items.map((one) => (one.id === notification.id ? next : one))
+      : this.items.filter((one) => one.id !== notification.id);
+    this.unread = Math.max(0, this.unread + counted);
+    const written = await this.#write(write);
+    if (!written || this.#askedSince(asked)) await this.refresh();
   }
 
   /** Writes a read; whether it was written. What is read meanwhile does not count. */
@@ -156,8 +246,10 @@ export class NotificationInbox {
     this.#listReading += 1;
     const reading = this.#listReading;
     try {
-      const items = await this.#notifications.list({ page: 0, perPage: LISTED });
+      const tab = this.tab;
+      const items = await this.#notifications.list({ page: 0, perPage: LISTED }, INBOX_TABS[tab]);
       if (reading !== this.#listReading || !this.#open || this.#writing > 0) return;
+      if (tab !== this.tab) return;
       this.items = items;
       this.listed = true;
       void this.#name(items);

@@ -26,9 +26,7 @@ async function views(
   api: APIRequestContext,
   { workspaceId, boardId }: { workspaceId: string; boardId: string },
 ): Promise<Schemas['Block'][]> {
-  const answer = await api.get(`/api/v1/w/${workspaceId}/boards/${boardId}/blocks`, {
-    params: { type: 'view' },
-  });
+  const answer = await api.get(`/api/v1/w/${workspaceId}/boards/${boardId}/views`);
   expect(answer.ok()).toBe(true);
   return (await answer.json()) as Schemas['Block'][];
 }

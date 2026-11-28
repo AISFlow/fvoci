@@ -326,7 +326,7 @@ async fn a_copy_is_held_to_the_limits_lowered_since_the_wiki_grew() {
                 .create_page(&wiki, &new, roomy, &me)
                 .await
                 .expect("a page past the limits of the server")
-                .page
+                .first
                 .id
         }
     };

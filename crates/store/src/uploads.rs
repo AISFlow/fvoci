@@ -6,7 +6,7 @@
 use fvoci_model::{Upload, UploadPart, UploadPurpose};
 
 use crate::Store;
-use crate::db::{Id, Row};
+use crate::db::{FromRow, Id, Row};
 use crate::error::StoreError;
 use crate::files::check_new_path;
 
@@ -72,12 +72,7 @@ impl Store {
             sql.bind(now)
                 .push_bind(") OR (closed_at <> 0 AND closed_at < ", closed_before)
                 .push(") ORDER BY expires_at");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(upload_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -90,12 +85,7 @@ impl Store {
     pub async fn upload_ids(&self) -> Result<Vec<String>, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql("SELECT id FROM uploads");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.text(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -166,7 +156,7 @@ impl Store {
                     error => Err(error),
                 })?
                 .ok_or_else(|| StoreError::not_found("upload"))?;
-            upload_from_row(&row)
+            Upload::from_row(&row)
         })
         .await
     }
@@ -312,31 +302,33 @@ impl Store {
     }
 }
 
-fn upload_from_row(row: &Row) -> Result<Upload, StoreError> {
-    let purpose = row.text(12)?;
-    let purpose = UploadPurpose::from_name(&purpose).ok_or_else(|| StoreError::Corrupt {
-        column: "purpose",
-        reason: format!("{purpose:?} is no purpose of an upload"),
-    })?;
-    let target = row.id(2)?;
-    let (container_id, workspace_id) = match purpose {
-        UploadPurpose::File => (target, String::new()),
-        UploadPurpose::Import => (String::new(), target),
-    };
-    Ok(Upload {
-        id: row.text(0)?,
-        user_id: row.id(1)?,
-        purpose,
-        container_id,
-        workspace_id,
-        name: row.text(3)?,
-        size: row.int(4)?,
-        content_type: row.text(5)?,
-        part_size: row.int(6)?,
-        created_at: row.int(7)?,
-        expires_at: row.int(8)?,
-        closed_at: row.int(9)?,
-        multipart_id: row.text(10)?,
-        path: row.text(11)?,
-    })
+impl FromRow for Upload {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let purpose = row.text(12)?;
+        let purpose = UploadPurpose::from_name(&purpose).ok_or_else(|| StoreError::Corrupt {
+            column: "purpose",
+            reason: format!("{purpose:?} is no purpose of an upload"),
+        })?;
+        let target = row.id(2)?;
+        let (container_id, workspace_id) = match purpose {
+            UploadPurpose::File => (target, String::new()),
+            UploadPurpose::Import => (String::new(), target),
+        };
+        Ok(Upload {
+            id: row.text(0)?,
+            user_id: row.id(1)?,
+            purpose,
+            container_id,
+            workspace_id,
+            name: row.text(3)?,
+            size: row.int(4)?,
+            content_type: row.text(5)?,
+            part_size: row.int(6)?,
+            created_at: row.int(7)?,
+            expires_at: row.int(8)?,
+            closed_at: row.int(9)?,
+            multipart_id: row.text(10)?,
+            path: row.text(11)?,
+        })
+    }
 }

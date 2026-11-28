@@ -26,7 +26,7 @@ interface DevBackend {
   patchCard(boardId: string, cardId: string, patch: object): Promise<unknown>;
   writeCardBody(boardId: string, cardId: string, write: object): Promise<unknown>;
   createComment(boardId: string, cardId: string, body: object): Promise<unknown>;
-  deleteBlock(boardId: string, blockId: string): Promise<void>;
+  batchDeleteCards(boardId: string, cardIds: string[]): Promise<void>;
 }
 interface Dev {
   backend: DevBackend;
@@ -226,7 +226,7 @@ test('a chip shows the title as it is now, and no title for what is gone or was 
     async ({ boardId, target, spare }) => {
       const other = (window as unknown as { fvociDev: Dev }).fvociDev.someoneElse();
       await other.patchCard(boardId, target, { title: 'Renamed elsewhere' });
-      await other.deleteBlock(boardId, spare);
+      await other.batchDeleteCards(boardId, [spare]);
     },
     { boardId: place.boardId, target: place.target.id, spare: place.spare.id },
   );

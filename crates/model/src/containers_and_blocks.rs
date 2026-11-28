@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::block::{Block, BlockPatch};
+use crate::block::Block;
 use crate::block_ids::{UnmatchedRelation, renew_block_ids_told};
-use crate::container::{Container, ContainerPatch};
+use crate::container::Container;
 use crate::id::new_id;
 use crate::relation::RelationProperties;
 
@@ -20,9 +20,6 @@ pub enum ContainersAndBlocksError {
     /// The request lists no block.
     #[error("at least one block is required")]
     NoBlocks,
-    /// The number of board identifiers and board patches differ.
-    #[error("board ids and patches need to match")]
-    ContainerIdsAndPatchesMismatch,
     /// The number of block identifiers and block patches differ.
     #[error("block ids and patches need to match")]
     BlockIdsAndPatchesMismatch,
@@ -115,47 +112,6 @@ impl From<&ContainersAndBlocks> for DeleteContainersAndBlocks {
                 .map(|block| block.id.clone())
                 .collect(),
         }
-    }
-}
-
-/// Patches for several boards and blocks, applied together.
-///
-/// Identifiers and patches are matched by position.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(default)]
-pub struct PatchContainersAndBlocks {
-    /// The identifiers of the boards to patch.
-    #[serde(rename = "containerIds")]
-    pub container_ids: Vec<String>,
-    /// The board patches, one per board identifier.
-    #[serde(rename = "containerPatches")]
-    pub container_patches: Vec<ContainerPatch>,
-    /// The identifiers of the blocks to patch.
-    #[serde(rename = "blockIds")]
-    pub block_ids: Vec<String>,
-    /// The block patches, one per block identifier.
-    #[serde(rename = "blockPatches")]
-    pub block_patches: Vec<BlockPatch>,
-}
-
-impl PatchContainersAndBlocks {
-    /// Checks that at least one board is patched and that identifiers and patches pair up.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ContainersAndBlocksError`] if there is no board identifier, or the board or
-    /// block identifiers and patches differ in number.
-    pub fn validate(&self) -> Result<(), ContainersAndBlocksError> {
-        if self.container_ids.is_empty() {
-            return Err(ContainersAndBlocksError::NoContainers);
-        }
-        if self.container_ids.len() != self.container_patches.len() {
-            return Err(ContainersAndBlocksError::ContainerIdsAndPatchesMismatch);
-        }
-        if self.block_ids.len() != self.block_patches.len() {
-            return Err(ContainersAndBlocksError::BlockIdsAndPatchesMismatch);
-        }
-        Ok(())
     }
 }
 

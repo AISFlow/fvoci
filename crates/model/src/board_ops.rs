@@ -2,16 +2,19 @@
 //! (`ContainerPermissions`), atomic multi-card operations, sidebar mutations, and
 //! cross-workspace container copy payloads.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::JsonMap;
-use crate::block::Block;
-use crate::card::Card;
+use crate::block::{Block, BlockPatch};
+use crate::card::{Card, CardPatch};
 use crate::card_property::{CardPropertyDefinition, PropertyColor, PropertyOption, PropertyType};
 use crate::container::Container;
 use crate::date_value::{check_date_value, is_calendar_date, utc_date};
 use crate::id::new_id;
+use crate::refusal::{RefusalReason, Refusals};
 
 /// Maximum number of card identifiers accepted in one multi-card move, delete, or restore.
 pub const MAX_CARD_BATCH: usize = 200;
@@ -250,6 +253,137 @@ pub struct CardMovesResult {
 pub struct CardBatchIds {
     /// Card identifiers (`1..=200`, no duplicates).
     pub card_ids: Vec<String>,
+}
+
+/// One change of property values for `1..=200` cards of a board, all or none
+/// (`POST /w/{ws}/boards/{boardId}/cards/batch-patch`). Each card is changed as
+/// `patchCard` with only these members would change it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct CardBatchPatch {
+    /// The cards: `1..=200` distinct identifiers of cards of the board that are no
+    /// templates.
+    pub card_ids: Vec<String>,
+    /// Property values to set, by property identifier, as `patchCard` sets them: each
+    /// replaces the card's value for that property, and the card's other values stay.
+    #[schema(value_type = Object)]
+    pub updated_properties: JsonMap,
+    /// Identifiers of properties whose value the cards are to lose. A property named
+    /// here and in `updatedProperties` loses its value.
+    pub deleted_properties: Vec<String>,
+}
+
+impl CardBatchPatch {
+    /// The patch each card of the batch gets.
+    #[must_use]
+    pub fn card_patch(&self) -> CardPatch {
+        CardPatch {
+            updated_properties: self.updated_properties.clone(),
+            deleted_properties: self.deleted_properties.clone(),
+            ..CardPatch::default()
+        }
+    }
+
+    /// Checks the shape of the batch as a request sends it, but for how many cards it
+    /// names, which the caller holds against [`MAX_CARD_BATCH`] with the limit in its
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns every member that is refused: no card at all, a card named twice, and
+    /// each value of `updatedProperties` that has not the shape of one
+    /// ([`CardPatch::check_request`]). Text that is no identifier names no card of the
+    /// board, as one nobody has does not: that is for whoever looks for the cards.
+    pub fn check_request(&self) -> Result<(), Refusals> {
+        let mut refused = Refusals::new();
+        if self.card_ids.is_empty() {
+            refused.refuse(
+                "cardIds",
+                RefusalReason::Required,
+                "at least one card is patched",
+            );
+        }
+        let mut seen = HashSet::with_capacity(self.card_ids.len());
+        for (index, card_id) in self.card_ids.iter().enumerate() {
+            if !seen.insert(card_id.as_str()) {
+                refused.refuse_at(
+                    format!("/cardIds/{index}"),
+                    RefusalReason::Invalid,
+                    "names a card named before",
+                );
+            }
+        }
+        if let Err(values) = self.card_patch().check_request() {
+            refused.extend(values);
+        }
+        refused.into_result()
+    }
+}
+
+/// A board view as a request changes it (`PATCH /w/{ws}/boards/{boardId}/views/{viewId}`):
+/// its title and its fields, and nothing else a block has.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoardViewPatch {
+    /// The new title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Fields to set (`viewType`, `filter`, `sortOptions`, `cardOrder`, ...), each
+    /// replacing the view's value under the same key.
+    #[schema(value_type = Object)]
+    pub updated_fields: JsonMap,
+    /// Keys of fields to remove.
+    pub deleted_fields: Vec<String>,
+    /// The `updatedAt` of the view as the client read it: if the view has changed since,
+    /// the patch is refused with 409 and changes nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<i64>,
+}
+
+impl BoardViewPatch {
+    /// Checks the shape of the patch as a request sends it: a view keeps its
+    /// `viewType`, which it is made with, whatever else is taken from it or set on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns every member of `deletedFields` that names `viewType`, and the
+    /// `viewType` of `updatedFields` when it is null or no text.
+    pub fn check_request(&self) -> Result<(), Refusals> {
+        let mut refused = Refusals::new();
+        if self
+            .updated_fields
+            .get("viewType")
+            .is_some_and(|value| !value.is_string())
+        {
+            refused.refuse_at(
+                "/updatedFields/viewType",
+                RefusalReason::Invalid,
+                "a view keeps its viewType",
+            );
+        }
+        for (index, field) in self.deleted_fields.iter().enumerate() {
+            if field == "viewType" {
+                refused.refuse_at(
+                    format!("/deletedFields/{index}"),
+                    RefusalReason::Invalid,
+                    "a view keeps its viewType",
+                );
+            }
+        }
+        refused.into_result()
+    }
+}
+
+impl From<BoardViewPatch> for BlockPatch {
+    fn from(patch: BoardViewPatch) -> Self {
+        Self {
+            title: patch.title,
+            updated_fields: patch.updated_fields,
+            deleted_fields: patch.deleted_fields,
+            read_at: patch.read_at,
+            ..Self::default()
+        }
+    }
 }
 
 /// Response returned by `POST /w/{ws}/boards/{boardId}/cards/batch-restore`.

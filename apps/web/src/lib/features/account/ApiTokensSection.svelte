@@ -186,8 +186,10 @@
       <code
         class="block overflow-x-auto rounded bg-muted p-2 font-mono text-xs break-all whitespace-pre-wrap"
         translate="no"
-        data-testid="api-token-command">{command}</code
+        data-testid="api-token-command"
       >
+        {command}
+      </code>
       <p class="text-xs text-muted-foreground">{m.account_api_tokens_history()}</p>
       <Button
         class="justify-self-start roomy:min-h-touch"
@@ -205,8 +207,10 @@
         <code
           class="min-w-0 flex-1 overflow-x-auto rounded bg-muted p-2 font-mono text-xs break-all"
           translate="no"
-          data-testid="api-token-raw">{issued.token}</code
+          data-testid="api-token-raw"
         >
+          {issued.token}
+        </code>
         <Button
           variant="outline"
           class="roomy:min-h-touch"

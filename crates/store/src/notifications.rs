@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fvoci_model::{BlockType, ContainerKind, NotificationKind, SearchKind};
+use fvoci_model::{BlockType, ContainerKind, NotificationFilter, NotificationKind, SearchKind};
 
 use crate::Store;
 use crate::blocks::Paging;
-use crate::db::{Dialect, Id, Row, Scope, Sql};
+use crate::db::{Dialect, FromRow, Id, Row, Scope, Sql};
 use crate::directory::{HAS_PASSWORD, Making, org_kind, taken};
 use crate::error::StoreError;
 use crate::search_docs::select_documents;
@@ -37,7 +37,10 @@ impl NotificationReader<'_> {
     /// open, by the one rule of it ([`crate::directory::SessionTaken::opened_by`]):
     /// organizations that people work in that require their SSO provider, and personal
     /// spaces whose account has a password that this session has not confirmed.
-    async fn closed_organizations(self, scope: &mut Scope<'_>) -> Result<Vec<String>, StoreError> {
+    pub(crate) async fn closed_organizations(
+        self,
+        scope: &mut Scope<'_>,
+    ) -> Result<Vec<String>, StoreError> {
         let mut sql = scope.sql([
             "SELECT DISTINCT n.org_id, o.kind, p.id, ",
             HAS_PASSWORD,
@@ -63,7 +66,7 @@ impl NotificationReader<'_> {
     /// ([`NotificationReader::closed_organizations`]): for a statement on
     /// `notifications`, with no other name for the table, whose text ends at
     /// `recipient_id = `.
-    fn push_theirs(self, closed: &[String], sql: &mut Sql) {
+    pub(crate) fn push_theirs(self, closed: &[String], sql: &mut Sql) {
         sql.bind(Id(self.user_id));
         if !closed.is_empty() {
             sql.push(" AND org_id NOT IN (")
@@ -103,6 +106,9 @@ pub struct StoredNotification {
     pub people: i64,
     /// When its reader read it; 0 until then, and since the latest of it.
     pub read_at: i64,
+    /// When its reader put it away (`notification_triage.rs`); 0 while it is in the
+    /// inbox, and since the latest of it.
+    pub archived_at: i64,
 }
 
 /// Where a card or a page a notification is about is now, and what it is called.
@@ -135,13 +141,15 @@ pub struct ContainerNotificationPlace {
     pub workspace_id: String,
 }
 
-const NOTIFICATION_COLUMNS: &str = "id, org_id, kind, source_id, block_id, container_id, \
-     actor_id, created_at, updated_at, times, doers, read_at, actor_token_name";
+pub(crate) const NOTIFICATION_COLUMNS: &str = "id, org_id, kind, source_id, block_id, \
+     container_id, actor_id, created_at, updated_at, times, doers, read_at, actor_token_name, \
+     archived_at";
 
 impl Store {
-    /// A page of the notifications of a reader, of every organization their session
-    /// opens, the newest first. What each is about is named and no more: whether the
-    /// user reads it is for the caller to ask, of each.
+    /// A page of the notifications of a reader's inbox (those not put away), of every
+    /// organization their session opens, the newest first. What each is about is named
+    /// and no more: whether the user reads it is for the caller to ask, of each.
+    /// [`Store::notifications_found`] lists them otherwise.
     ///
     /// # Errors
     ///
@@ -151,24 +159,7 @@ impl Store {
         reader: NotificationReader<'_>,
         paging: Paging,
     ) -> Result<Vec<StoredNotification>, StoreError> {
-        self.system()
-            .with_conn(async |scope| {
-                let closed = reader.closed_organizations(scope).await?;
-                let mut sql = scope.sql([
-                    "SELECT ",
-                    NOTIFICATION_COLUMNS,
-                    " FROM notifications WHERE recipient_id = ",
-                ]);
-                reader.push_theirs(&closed, &mut sql);
-                sql.push(" ORDER BY updated_at DESC, id DESC")
-                    .push_page(paging);
-                scope
-                    .fetch_all(sql)
-                    .await?
-                    .iter()
-                    .map(notification_from_row)
-                    .collect()
-            })
+        self.notifications_found(reader, NotificationFilter::INBOX, paging)
             .await
     }
 
@@ -189,10 +180,7 @@ impl Store {
                     "SELECT COUNT(*) FROM notifications WHERE read_at = 0 AND recipient_id = ",
                 );
                 reader.push_theirs(&closed, &mut sql);
-                match scope.fetch_optional(sql).await? {
-                    Some(row) => row.int(0),
-                    None => Ok(0),
-                }
+                Ok(scope.first(sql).await?.unwrap_or(0))
             })
             .await
     }
@@ -353,7 +341,7 @@ impl Store {
                     .bind_list(batch.iter().map(|id| Id(id)))
                     .push(")");
                 for row in scope.fetch_all(sql).await? {
-                    places.push(place_from_row(&row)?);
+                    places.push(NotificationPlace::from_row(&row)?);
                 }
             }
             Ok(places)
@@ -447,22 +435,25 @@ pub(crate) fn kind_from_row(row: &Row, index: usize) -> Result<NotificationKind,
         )
 }
 
-fn notification_from_row(row: &Row) -> Result<StoredNotification, StoreError> {
-    Ok(StoredNotification {
-        id: row.id(0)?,
-        org_id: row.id(1)?,
-        kind: kind_from_row(row, 2)?,
-        source_id: row.id(3)?,
-        block_id: row.id(4)?,
-        container_id: row.id(5)?,
-        actor_id: row.id(6)?,
-        created_at: row.int(7)?,
-        updated_at: row.int(8)?,
-        times: row.int(9)?,
-        people: people_of(&row.text(10)?),
-        read_at: row.int(11)?,
-        actor_token_name: row.opt_text(12)?,
-    })
+impl FromRow for StoredNotification {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(StoredNotification {
+            id: row.id(0)?,
+            org_id: row.id(1)?,
+            kind: kind_from_row(row, 2)?,
+            source_id: row.id(3)?,
+            block_id: row.id(4)?,
+            container_id: row.id(5)?,
+            actor_id: row.id(6)?,
+            created_at: row.int(7)?,
+            updated_at: row.int(8)?,
+            times: row.int(9)?,
+            people: people_of(&row.text(10)?),
+            read_at: row.int(11)?,
+            actor_token_name: row.opt_text(12)?,
+            archived_at: row.int(13)?,
+        })
+    }
 }
 
 /// How many people a line's doers name (`doers`, a JSON list); none for a list that
@@ -472,19 +463,21 @@ fn people_of(doers: &str) -> i64 {
         .map_or(0, |doers| i64::try_from(doers.len()).unwrap_or(i64::MAX))
 }
 
-fn place_from_row(row: &Row) -> Result<NotificationPlace, StoreError> {
-    let block_type = crate::blocks::block_type_column(row, 1, "type")?;
-    let block_kind = SearchKind::of_block(&block_type).ok_or_else(|| StoreError::Corrupt {
-        column: "type",
-        reason: format!("a block of type {block_type} is no card, page or unit"),
-    })?;
-    let container_kind = crate::container_kinds::kind_from_text(&row.text(4)?)?;
-    Ok(NotificationPlace {
-        block_id: row.id(0)?,
-        block_kind,
-        title: row.text(2)?,
-        container_id: row.id(3)?,
-        container_kind,
-        workspace_id: row.id(5)?,
-    })
+impl FromRow for NotificationPlace {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let block_type = crate::blocks::block_type_column(row, 1, "type")?;
+        let block_kind = SearchKind::of_block(&block_type).ok_or_else(|| StoreError::Corrupt {
+            column: "type",
+            reason: format!("a block of type {block_type} is no card, page or unit"),
+        })?;
+        let container_kind = crate::container_kinds::kind_from_text(&row.text(4)?)?;
+        Ok(NotificationPlace {
+            block_id: row.id(0)?,
+            block_kind,
+            title: row.text(2)?,
+            container_id: row.id(3)?,
+            container_kind,
+            workspace_id: row.id(5)?,
+        })
+    }
 }

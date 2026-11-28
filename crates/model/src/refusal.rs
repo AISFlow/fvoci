@@ -164,6 +164,12 @@ impl<'r> IntoIterator for &'r Refusals {
     }
 }
 
+impl Extend<Refusal> for Refusals {
+    fn extend<T: IntoIterator<Item = Refusal>>(&mut self, refusals: T) {
+        self.0.extend(refusals);
+    }
+}
+
 impl From<Refusal> for Refusals {
     fn from(refusal: Refusal) -> Self {
         Self(vec![refusal])

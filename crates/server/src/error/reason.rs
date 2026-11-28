@@ -263,6 +263,8 @@ reasons! {
     PageTooDeep => "page_too_deep", "Page too deep";
     /// A card, or a sub-card below it, would be deeper on its board than the limit.
     CardTooDeep => "card_too_deep", "Card too deep";
+    /// A card is to repeat on a board without a rule of done or a due date property.
+    RecurrenceNeedsBoardRules => "recurrence_needs_board_rules", "The board does not let cards repeat";
     /// The wiki would have more pages than the organization's limit.
     TooManyPages => "too_many_pages", "Too many pages in the wiki";
     /// The day of the diary has an entry: one that would come back from the trash finds
@@ -278,6 +280,10 @@ reasons! {
     TooManyChapters => "too_many_chapters", "Too many chapters in the course";
     /// The account made as many organizations, which are in use, as one account may.
     TooManyOrganizations => "too_many_organizations", "Too many organizations made";
+    /// The user has as many stars in the workspace as a user may.
+    TooManyFavorites => "too_many_favorites", "Too many favorites in the workspace";
+    /// The block is answered with as many different emoji as a block may.
+    TooManyReactions => "too_many_reactions", "Too many emoji on the block";
 }
 
 impl Reason {

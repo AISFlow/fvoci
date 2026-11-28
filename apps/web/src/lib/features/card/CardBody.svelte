@@ -43,6 +43,7 @@
   import { isSaveKey } from '$lib/keys.ts';
   import { searchedNames } from '$lib/logic/person-names.ts';
   import type { BodyReferences } from '$lib/editor/body-editor.ts';
+  import type { BoardViewHost } from '$lib/editor/board-view-read.ts';
   import type { BoardStore, CardStore } from '$lib/state/index.ts';
   import { Button } from '$lib/ui/button/index.js';
 
@@ -96,6 +97,8 @@
     onEditor?: ((editor: TiptapEditor) => void) | undefined;
     /** What its references are drawn from and put with (`bodyReferences`); without it, none is shown. */
     references?: BodyReferences | undefined;
+    /** What draws and puts in its board views: a card's, a page's or a unit's body; never an entry's. */
+    boardViews?: BoardViewHost | undefined;
     /** Keeps a version of the body now (`keepVersion`); without it, the keys keep none. */
     keep?: (() => Promise<KeepOutcome>) | undefined;
     testId?: string;
@@ -107,6 +110,7 @@
     of = 'card',
     testId = 'card-body',
     references,
+    boardViews,
     keep,
     waiting,
     holding = false,
@@ -336,6 +340,7 @@
           users={people}
           {resolveUser}
           {references}
+          boardViews={of === 'entry' ? undefined : boardViews}
           label={words.label()}
           placeholder={words.placeholder()}
           readPlaceholder={words.readEmpty?.() ?? ''}
@@ -352,7 +357,13 @@
     {@render waiting(() => void keepNow())}
   {:else}
     <div {@attach caret.watch}>
-      <BodyView doc={card.body} {resolveUser} {references} class="text-base">
+      <BodyView
+        doc={card.body}
+        {resolveUser}
+        {references}
+        boardViews={of === 'entry' ? undefined : boardViews}
+        class="text-base"
+      >
         {#snippet empty()}
           <p class="text-base text-muted-foreground">
             {container.canEdit ? words.placeholder() : words.empty()}

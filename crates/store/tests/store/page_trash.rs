@@ -16,12 +16,12 @@ const ROOMY: PageLimits = PageLimits {
 };
 
 async fn restore(store: &Store, wiki_id: &str, page_id: &str, user_id: &str) -> Vec<String> {
-    store
+    let back = store
         .undelete_page(wiki_id, page_id, ROOMY, user_id)
         .await
-        .expect("the page comes back")
-        .pages
-        .into_iter()
+        .expect("the page comes back");
+    std::iter::once(back.first)
+        .chain(back.below)
         .map(|block| block.id)
         .collect()
 }
@@ -136,7 +136,7 @@ async fn a_page_whose_parent_is_gone_comes_back_last_at_the_top() {
         .undelete_page(&wiki.id, &b, ROOMY, &user_id)
         .await
         .expect("it comes back");
-    assert_eq!(restored.pages[0].parent_id, "", "at the top");
+    assert_eq!(restored.first.parent_id, "", "at the top");
     assert_eq!(
         below(&test, &wiki, "").await,
         [d.as_str(), b.as_str()],
@@ -179,7 +179,7 @@ async fn a_page_whose_place_was_taken_meanwhile_comes_back_beside_it() {
     let top = below(&test, &wiki, "").await;
     assert_eq!(top.len(), 3);
     assert_eq!(top[0], a, "the page before it stays before it");
-    assert_eq!(restored.pages[0].fields["order"], orders[1]);
+    assert_eq!(restored.first.fields["order"], orders[1]);
     test.teardown().await;
 }
 
@@ -200,7 +200,8 @@ async fn a_page_comes_back_only_within_the_limits_of_the_wiki_as_it_is_now() {
         parent_id: d.clone(),
         after: None,
     };
-    test.move_page(&wiki.id, &a, &to_d, ROOMY, &user_id)
+    let _ = test
+        .move_page(&wiki.id, &a, &to_d, ROOMY, &user_id)
         .await
         .expect("moved");
     let three_deep = PageLimits {
@@ -318,7 +319,10 @@ async fn the_comments_of_deleted_pages_are_no_pages_below_them() {
         .undelete_page(&wiki.id, &a, two, &user_id)
         .await
         .expect("the pages come back within the limit");
-    let back: Vec<&str> = back.pages.iter().map(|block| block.id.as_str()).collect();
+    let back: Vec<&str> = std::iter::once(&back.first)
+        .chain(&back.below)
+        .map(|block| block.id.as_str())
+        .collect();
     assert_eq!(back.first(), Some(&a.as_str()), "the page asked for first");
     for id in [&b].into_iter().chain(&comments) {
         assert!(back.contains(&id.as_str()), "{id} came back: {back:?}");

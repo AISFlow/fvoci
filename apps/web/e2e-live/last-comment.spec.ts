@@ -54,7 +54,7 @@ test('a comment somebody else posts moves the card in a view sorted by last upda
       updatedCardProperties: [{ id: 'updated', name: 'Updated', type: 'updatedTime', options: [] }],
     },
   });
-  await api.patch(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${board.viewId}`, {
+  await api.patch(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views/${board.viewId}`, {
     data: {
       updatedFields: { sort: [{ propertyId: 'updated', reversed: true }] },
     },
@@ -70,35 +70,24 @@ test('a comment somebody else posts moves the card in a view sorted by last upda
   // The guest comments on the older card: it is the newest change now.
   const guestApi = await signedIn(base, guest);
   const posted = await guestApi.post(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${talked}/comments`,
     {
-      data: [
-        {
-          containerId: board.boardId,
-          parentId: talked,
-          type: 'comment',
-          title: '',
-          fields: {},
-          createdAt: 1,
-          updatedAt: 1,
-          body: paragraph('Any news?'),
-        },
-      ],
+      data: { body: paragraph('Any news?') },
     },
   );
   expect(posted.ok()).toBe(true);
-  const [comment] = (await posted.json()) as Schemas['Block'][];
+  const comment = (await posted.json()) as Schemas['Block'];
   await expect
     .poll(() => titles(page))
     .toEqual([expect.stringContaining('Talked about'), expect.stringContaining('Quiet')]);
   const card = (await (
     await api.get(`/api/v1/w/${board.workspaceId}/cards/${talked}`)
   ).json()) as Schemas['Card'];
-  expect(card.lastCommentAt).toBe(comment?.createdAt);
+  expect(card.lastCommentAt).toBe(comment.createdAt);
 
   // The guest's comment goes (the admin deletes it): the card is where it was.
   const deleted = await api.delete(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${comment?.id ?? ''}`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${talked}/comments/${comment.id}`,
   );
   expect(deleted.ok()).toBe(true);
   await expect

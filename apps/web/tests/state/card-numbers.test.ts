@@ -54,9 +54,9 @@ describe('the numbers of cards, in memory', () => {
     const { backend, boardId } = small();
     const gone = await backend.createCard(boardId, { title: 'Gone' });
     expect(gone.number).toBe(4);
-    await backend.deleteBlock(boardId, gone.id);
+    await backend.batchDeleteCards(boardId, [gone.id]);
     expect((await backend.createCard(boardId, { title: 'After' })).number).toBe(5);
-    await backend.restoreBlock(boardId, gone.id);
+    await backend.batchRestoreCards(boardId, [gone.id]);
     expect((await numbersOf(backend, boardId)).Gone).toBe(4);
     expect((await backend.createCard(boardId, { title: 'Last' })).number).toBe(6);
   });
@@ -77,8 +77,8 @@ describe('the numbers of cards, in memory', () => {
     const alpha = (await backend.cards(boardId)).find((card) => card.title === 'Alpha');
     if (!alpha) throw new Error('no Alpha');
     // Back from the trash, Alpha is the last the world stored; it was made first.
-    await backend.deleteBlock(boardId, alpha.id);
-    await backend.restoreBlock(boardId, alpha.id);
+    await backend.batchDeleteCards(boardId, [alpha.id]);
+    await backend.batchRestoreCards(boardId, [alpha.id]);
     const copy = await backend.duplicateContainer(boardId, false, world.workspace.id);
     expect(await numbersOf(backend, copy.id)).toEqual({ Alpha: 1, Beta: 2, Gamma: 3 });
     const archive = await backend.exportContainer(boardId);
@@ -92,7 +92,8 @@ describe('the numbers of cards, in memory', () => {
 
   it('give the cards of an archive new numbers from 1', async () => {
     const { backend, world, boardId } = small();
-    await backend.deleteBlock(boardId, (await backend.createCard(boardId, { title: 'Gone' })).id);
+    const gone = await backend.createCard(boardId, { title: 'Gone' });
+    await backend.batchDeleteCards(boardId, [gone.id]);
     const archive = await backend.exportContainer(boardId);
     const file = new File([archive.bytes], archive.name);
     await backend.importArchive(world.workspace.id, file);
@@ -109,7 +110,7 @@ describe('the numbers of cards, in memory', () => {
     const workspaceId = world.workspace.id;
     const template = await backend.createCard(boardId, { title: 'Plan', isTemplate: true });
     const gone = await backend.createCard(boardId, { title: 'Gone' });
-    await backend.deleteBlock(boardId, gone.id);
+    await backend.batchDeleteCards(boardId, [gone.id]);
     expect(await backend.references.numbered(workspaceId, boardId, 2)).toEqual({
       id: betaId,
       kind: 'card',
@@ -162,8 +163,8 @@ describe('the numbers of cards, in memory', () => {
     expect(delta.number).toBe(4);
 
     // Trash and restore while template still keeps the preserved number hidden.
-    await backend.deleteBlock(boardId, betaId);
-    await backend.restoreBlock(boardId, betaId);
+    await backend.batchDeleteCards(boardId, [betaId]);
+    await backend.batchRestoreCards(boardId, [betaId]);
     expect((await backend.card(boardId, betaId)).number).toBeUndefined();
 
     // Turning it back into an ordinary card shows #2 again without consuming #5.

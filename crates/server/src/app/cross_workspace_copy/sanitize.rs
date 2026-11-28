@@ -1,6 +1,6 @@
-//! What a copy to another workspace keeps of the people, files, references and dates of
-//! the blocks it copies: only what the target workspace has, and nothing that names
-//! somebody who is not there.
+//! What a copy to another workspace keeps of the people, files, references, board views
+//! and dates of the blocks it copies: only what the target workspace has, and nothing
+//! that names somebody who is not there.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,7 +35,7 @@ pub(super) fn sanitize_copied_blocks(
     blocks: &mut Vec<Block>,
     container: &Container,
     file_map: &HashMap<String, String>,
-    all_copies: &HashMap<String, String>,
+    copies: &HashSet<String>,
     external_titles: &HashMap<String, String>,
     member_names: &HashMap<String, String>,
     present_users: &HashSet<String>,
@@ -99,7 +99,7 @@ pub(super) fn sanitize_copied_blocks(
             block.body = sanitize_copied_body(
                 body,
                 file_map,
-                all_copies,
+                copies,
                 external_titles,
                 member_names,
                 present_users,
@@ -247,10 +247,13 @@ fn retain_present_people(
     }
 }
 
+/// The body of a copied block, whose references and board views name the copies of the
+/// blocks copied with it already (`copies`, by their new identifiers): what names
+/// anything else is let go of.
 pub(super) fn sanitize_copied_body(
     body: Body,
     file_map: &HashMap<String, String>,
-    all_copies: &HashMap<String, String>,
+    copies: &HashSet<String>,
     external_titles: &HashMap<String, String>,
     member_names: &HashMap<String, String>,
     present_users: &HashSet<String>,
@@ -262,7 +265,7 @@ pub(super) fn sanitize_copied_body(
     let mut doc = renamed.document().clone();
     rewrite_body_nodes(
         &mut doc,
-        all_copies,
+        copies,
         external_titles,
         member_names,
         present_users,
@@ -273,7 +276,7 @@ pub(super) fn sanitize_copied_body(
 
 pub(super) fn rewrite_body_nodes(
     node: &mut Value,
-    all_copies: &HashMap<String, String>,
+    copies: &HashSet<String>,
     external_titles: &HashMap<String, String>,
     member_names: &HashMap<String, String>,
     present_users: &HashSet<String>,
@@ -286,11 +289,7 @@ pub(super) fn rewrite_body_nodes(
             .and_then(|a| a.get("id"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if let Some(new_id) = all_copies.get(target_id) {
-            if let Some(attrs) = node.get_mut("attrs").and_then(Value::as_object_mut) {
-                attrs.insert("id".to_owned(), Value::String(new_id.clone()));
-            }
-        } else {
+        if !copies.contains(target_id) {
             let raw_title = external_titles
                 .get(target_id)
                 .map_or("", String::as_str)
@@ -301,6 +300,20 @@ pub(super) fn rewrite_body_nodes(
                 raw_title.as_str()
             };
             *node = json!({ "type": "text", "text": label });
+        }
+        return;
+    }
+    if kind == "boardView" {
+        // A board view of a view copied with it shows the copy; any other would show a
+        // board of the workspace it was copied from, and its place is left empty, as
+        // that of a file that is not copied is.
+        let view_id = node
+            .get("attrs")
+            .and_then(|a| a.get("viewId"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !copies.contains(view_id) {
+            *node = json!({ "type": "paragraph" });
         }
         return;
     }
@@ -328,7 +341,7 @@ pub(super) fn rewrite_body_nodes(
         for child in children.iter_mut() {
             rewrite_body_nodes(
                 child,
-                all_copies,
+                copies,
                 external_titles,
                 member_names,
                 present_users,

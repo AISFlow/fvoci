@@ -31,6 +31,8 @@
     aria-busy={joining}
     onclick={() => {
       if (!joining) onJoin();
-    }}>{m.course_join()}</Button
+    }}
   >
+    {m.course_join()}
+  </Button>
 </div>

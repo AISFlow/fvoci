@@ -13,7 +13,7 @@ use fvoci_model::{FileKey, FileRecord};
 
 use crate::SYSTEM_ORG_ID;
 use crate::Store;
-use crate::db::{Dialect, Id, OptId, Row, Scope};
+use crate::db::{Dialect, FromRow, Id, OptId, Row, Scope};
 use crate::error::StoreError;
 use crate::files;
 
@@ -186,12 +186,7 @@ impl Store {
             sql.bind(LooseState::Doomed.as_str())
                 .push_bind(" AND retry_at <= ", now)
                 .push_bind(" ORDER BY retry_at, path LIMIT ", limit);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(loose_object_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -208,12 +203,7 @@ impl Store {
                 LOOSE_COLUMNS,
                 " FROM loose_objects ORDER BY path",
             ]);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(loose_object_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -429,14 +419,16 @@ pub(crate) fn org_column(scope: &Scope<'_>) -> Option<&'static str> {
     (scope.dialect() == Dialect::Postgres && !scope.has_org()).then_some("org_id")
 }
 
-fn loose_object_from_row(row: &Row) -> Result<LooseObject, StoreError> {
-    Ok(LooseObject {
-        path: row.text(0)?,
-        state: LooseState::parse(&row.text(1)?)?,
-        created_at: row.int(2)?,
-        retry_at: row.int(3)?,
-        attempts: row.int(4)?,
-        last_attempt_at: row.int(5)?,
-        last_error: row.text(6)?,
-    })
+impl FromRow for LooseObject {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(LooseObject {
+            path: row.text(0)?,
+            state: LooseState::parse(&row.text(1)?)?,
+            created_at: row.int(2)?,
+            retry_at: row.int(3)?,
+            attempts: row.int(4)?,
+            last_attempt_at: row.int(5)?,
+            last_error: row.text(6)?,
+        })
+    }
 }

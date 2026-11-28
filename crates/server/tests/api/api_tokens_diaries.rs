@@ -190,7 +190,15 @@ async fn a_token_given_the_own_space_is_refused_by_the_routes_of_a_person_and_of
         agent.get(&format!("{diary}/days")).await,
         agent.get(&entry).await,
         agent.get(&format!("{entry}/body-versions")).await,
+        agent
+            .post(&format!("{entry}/body-versions"), &json!({}))
+            .await,
+        agent.get(&format!("{entry}/body-versions/1")).await,
+        agent
+            .post(&format!("{entry}/body-versions/1/restore"), &json!({}))
+            .await,
         agent.get(&format!("{container}/archive/export")).await,
+        agent.get(&format!("{container}/markdown/export")).await,
         agent.get(&format!("{ws}/archive/export")).await,
         agent
             .post(&format!("{ws}/archive/import"), &json!({}))
@@ -239,6 +247,68 @@ async fn a_token_given_the_own_space_is_refused_by_the_routes_of_a_person_and_of
     for response in &refused {
         check_a_persons(response);
     }
+
+    th.teardown().await;
+}
+
+/// The routes of a board's views, attachments and card batches find no diary and no
+/// entry of one, through the diary or through a board beside it: those a token takes
+/// answer as for what is not there, and those of a person alone refuse the token
+/// before they look. The entry stays as it was.
+#[tokio::test]
+async fn a_token_given_the_own_space_finds_no_diary_through_the_routes_of_a_board() {
+    let Space {
+        th,
+        ws,
+        diary_id,
+        entry,
+        board_id,
+        agent,
+        ..
+    } = a_space_with_a_diary().await;
+    let entry_id = last_of(&entry).to_owned();
+    let before: Value = th.client.get(&entry).await.ok_json();
+    for board in [&diary_id, &board_id] {
+        let boards = format!("{ws}/boards/{board}");
+        let batch = json!({"cardIds": [entry_id], "updatedProperties": {}});
+        let mut taken = vec![
+            agent.get(&format!("{boards}/views/{entry_id}")).await,
+            agent
+                .get(&format!("{boards}/cards/{entry_id}/attachments"))
+                .await,
+            agent
+                .post(&format!("{boards}/cards/batch-patch"), &batch)
+                .await,
+        ];
+        if board == &diary_id {
+            taken.push(agent.get(&format!("{boards}/views")).await);
+        }
+        for response in &taken {
+            check_not_there(response);
+        }
+        let attachment = format!("{boards}/cards/{entry_id}/attachments/{UNKNOWN_ID}");
+        let a_persons = [
+            agent
+                .patch(
+                    &format!("{boards}/views/{entry_id}"),
+                    &json!({"title": "read"}),
+                )
+                .await,
+            agent.delete(&format!("{boards}/views/{entry_id}")).await,
+            agent
+                .post(&format!("{boards}/views/{entry_id}/restore"), &json!({}))
+                .await,
+            agent.delete(&attachment).await,
+            agent
+                .post(&format!("{attachment}/restore"), &json!({}))
+                .await,
+        ];
+        for response in &a_persons {
+            check_a_persons(response);
+        }
+    }
+    let after: Value = th.client.get(&entry).await.ok_json();
+    assert_eq!(after, before, "the entry stays as it was");
 
     th.teardown().await;
 }

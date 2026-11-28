@@ -60,8 +60,8 @@
       opened = id;
     }}
   />
-  <output data-testid="relation-value" class="text-xs break-all text-muted-foreground"
-    >{JSON.stringify(links)}</output
-  >
+  <output data-testid="relation-value" class="text-xs break-all text-muted-foreground">
+    {JSON.stringify(links)}
+  </output>
   <output data-testid="opened-card" class="text-xs text-muted-foreground">{opened}</output>
 </div>

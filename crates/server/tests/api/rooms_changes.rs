@@ -149,45 +149,6 @@ async fn a_template_closed_to_the_workspace_puts_out_its_uninvited_readers() {
 }
 
 #[tokio::test]
-async fn a_batch_closing_a_template_puts_out_its_uninvited_readers() {
-    let th = seldom().start().await.init_basic().await;
-    let (board, mut reader) = template_reader(&th).await;
-    th.client.patch(&format!("/w/{TEST_WORKSPACE_ID}/containers-and-blocks"), &json!({
-        "containerIds": [board], "containerPatches": [{"visibility": "private"}], "blockIds": [], "blockPatches": [],
-    })).await.check_ok();
-    assert_eq!(reader.text("docLeft").await["reason"], json!("not_found"));
-    th.teardown().await;
-}
-
-/// One batch of three boards closed at once, the first with no room: each room of
-/// the others is reached by the one check of the batch.
-#[tokio::test]
-async fn a_batch_closing_several_templates_puts_out_the_readers_of_each() {
-    let th = seldom().start().await.init_basic().await;
-    let roomless = th
-        .create_board(TEST_WORKSPACE_ID, fvoci_model::ContainerVisibility::Open)
-        .await
-        .id;
-    let (first, mut first_reader) = template_reader(&th).await;
-    let (second, mut second_reader) = template_reader(&th).await;
-    th.client
-        .patch(
-            &format!("/w/{TEST_WORKSPACE_ID}/containers-and-blocks"),
-            &json!({
-                "containerIds": [roomless, first, second],
-                "containerPatches": [{"visibility": "private"}, {"visibility": "private"}, {"visibility": "private"}],
-                "blockIds": [], "blockPatches": [],
-            }),
-        )
-        .await
-        .check_ok();
-    for reader in [&mut first_reader, &mut second_reader] {
-        assert_eq!(reader.text("docLeft").await["reason"], json!("not_found"));
-    }
-    th.teardown().await;
-}
-
-#[tokio::test]
 async fn trashing_a_board_or_workspace_empties_its_rooms_immediately() {
     for trash_workspace in [false, true] {
         let th = seldom().start().await.init_basic().await;

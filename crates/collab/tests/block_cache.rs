@@ -30,13 +30,11 @@ use yrs::{
 };
 
 fn expected_files(body: Option<&Body>) -> Vec<String> {
-    body.map(|body| body.file_ids().into_iter().map(str::to_owned).collect())
-        .unwrap_or_default()
+    body.map_or_default(|body| body.file_ids().into_iter().map(str::to_owned).collect())
 }
 
 fn expected_mentions(body: Option<&Body>) -> Vec<String> {
-    body.map(|body| body.mention_ids().into_iter().map(str::to_owned).collect())
-        .unwrap_or_default()
+    body.map_or_default(|body| body.mention_ids().into_iter().map(str::to_owned).collect())
 }
 
 fn json_bytes(body: Option<&Body>) -> Option<Vec<u8>> {

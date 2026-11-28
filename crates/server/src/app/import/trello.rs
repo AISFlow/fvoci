@@ -79,8 +79,8 @@ pub(crate) fn convert_trello_bytes(
     limits: &BundleLimits,
 ) -> Result<StagedArchive, AppError> {
     let board = decode_trello_board(bytes, limits)?;
-    let lists = board.lists.map(|b| b.0).unwrap_or_default();
-    let cards = board.cards.map(|b| b.0).unwrap_or_default();
+    let lists = board.lists.map_or_default(|b| b.0);
+    let cards = board.cards.map_or_default(|b| b.0);
     let labels = board.labels.0;
     let checklists = board.checklists.0;
     let actions = board.actions.0;

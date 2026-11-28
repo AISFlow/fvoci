@@ -32,6 +32,7 @@ import type {
   UnitScheduleUpdate,
   WorkspaceLearningToday,
 } from '../course-types.ts';
+import type { WithReactions } from '../reaction-types.ts';
 
 import { checkedWhole } from './bodies.ts';
 import { MemoryBodyVersions, writtenWhole } from './body-versions.ts';
@@ -64,6 +65,7 @@ import {
   type CourseLimits,
   type Place,
 } from './page-tree.ts';
+import { withMemoryReactions } from './reactions.ts';
 import { fail } from './refuse.ts';
 import { copy, memberOf, orderOf, scramble, unitOf } from './shapes.ts';
 import { checkWorkspace } from './spaces.ts';
@@ -284,10 +286,10 @@ export class MemoryCourses extends MemoryPageComments implements Courses {
     return scramble(this.#nodesOf(courseId)).map(unitOf);
   }
 
-  async unit(courseId: string, unitId: string): Promise<CourseUnitDetail> {
+  async unit(courseId: string, unitId: string): Promise<WithReactions<CourseUnitDetail>> {
     await this.#enter('unit');
     this.#role(courseId);
-    return detailOf(this.#node(courseId, unitId));
+    return withMemoryReactions(this.#world, detailOf(this.#node(courseId, unitId)));
   }
 
   async createUnit(courseId: string, draft: UnitDraft): Promise<CourseUnitDetail> {

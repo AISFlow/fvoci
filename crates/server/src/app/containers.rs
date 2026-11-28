@@ -9,7 +9,7 @@ use fvoci_store::DeletedContainer;
 
 use super::{App, Former};
 use crate::collab::{AccessScope, Deletion};
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 use crate::metrics::CourseSource;
 use crate::permissions::ContainerScope;
 
@@ -36,12 +36,16 @@ impl App {
     ///
     /// Returns a not-found error if there is no such board, or the store's error.
     pub async fn container(&self, container_id: &str) -> Result<Container, AppError> {
-        match self.store().get_container(container_id).await {
-            // A board of another workspace than the handle's is not there.
-            Ok(container) if self.reaches_container(&container) => Ok(container),
-            Ok(_) => Err(AppError::not_found("board")),
-            Err(error) if error.is_not_found() => Err(AppError::not_found("board")),
-            Err(error) => Err(error.into()),
+        let container = self
+            .store()
+            .get_container(container_id)
+            .await
+            .or_missing("board")?;
+        // A board of another workspace than the handle's is not there.
+        if self.reaches_container(&container) {
+            Ok(container)
+        } else {
+            Err(AppError::not_found("board"))
         }
     }
 
@@ -122,9 +126,7 @@ impl App {
         user_id: &str,
         membership: CreatorMembership,
     ) -> Result<Container, AppError> {
-        if !container.id.is_empty() {
-            return Err(AppError::bad_request("new board cannot have an ID").with_field("id"));
-        }
+        refuse_named_id(&container)?;
         self.require_makes(&container)?;
         container.id = new_id();
 
@@ -209,13 +211,11 @@ impl App {
         let mut is_template = false;
         let mut scope_before = None;
         if patch.visibility.is_some() {
-            let container = match self.store().get_container(container_id).await {
-                Ok(container) => container,
-                Err(error) if error.is_not_found() => {
-                    return Err(AppError::not_found("board"));
-                }
-                Err(error) => return Err(error.into()),
-            };
+            let container = self
+                .store()
+                .get_container(container_id)
+                .await
+                .or_missing("board")?;
             is_template = container.is_template;
             scope_before = Some(ContainerScope::of(&container));
         }
@@ -382,10 +382,8 @@ impl App {
         container_id: &str,
         user_id: &str,
     ) -> Result<(), AppError> {
-        let container = match self.store().get_container(container_id).await {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Ok(()),
-            Err(error) => return Err(error.into()),
+        let Some(container) = self.store().get_container(container_id).await.found()? else {
+            return Ok(());
         };
         // The memberships go with the board; who is told is who was a member.
         let members = self
@@ -426,11 +424,10 @@ impl App {
         &self,
         container_id: &str,
     ) -> Result<Option<DeletedContainer>, AppError> {
-        match self.store().get_deleted_container(container_id).await {
-            Ok(deleted) => Ok(Some(deleted)),
-            Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        self.store()
+            .get_deleted_container(container_id)
+            .await
+            .found()
     }
 
     /// Restores a board from the trash, with its blocks, its file records, the
@@ -453,11 +450,7 @@ impl App {
                 .undelete_container(container_id, modified_by)
                 .await
         };
-        let container = match restored {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found("board")),
-            Err(error) => return Err(error.into()),
-        };
+        let container = restored.or_missing("board")?;
         // Its people and its surviving teams have their roles on it again. Its rooms
         // were emptied when it was deleted: this is for an entry under way, which
         // reads the roles again.
@@ -536,5 +529,15 @@ impl App {
                     .await;
             }
         }
+    }
+}
+
+/// Refuses a new board that names its own identifier: the server gives it one, however
+/// the board is made.
+pub(super) fn refuse_named_id(container: &Container) -> Result<(), AppError> {
+    if container.id.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::bad_request("new board cannot have an ID").with_field("id"))
     }
 }

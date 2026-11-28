@@ -2,6 +2,8 @@
  * Cards dropped on a view, executed as one atomic `moveViewCards` server
  * transaction and one step of undo: updates the view's `cardOrder` and (when
  * dropped into another column) the grouping property on all moved cards.
+ * Moved into the column of done, a card that repeats makes its next card:
+ * the undo takes it back and lets the card repeat again.
  */
 import { manualComparator } from '../logic/sort.ts';
 import type { BoardView, Card } from '../logic/wire.ts';
@@ -11,6 +13,7 @@ import { withCardProperty, type CardDrop } from './board-parts.ts';
 import { performBoardAction } from './board-sync.ts';
 import type { BoardStore } from './board.svelte.ts';
 import { droppedCardOrder, placeAmongAll } from './card-order.ts';
+import { nextCardNotices, nextMadeBy, takeBackNext, type MadeNext } from './next-cards.svelte.ts';
 import { put, take } from './write.ts';
 
 interface PlannedCardDrop {
@@ -125,7 +128,12 @@ function applyOptimisticCardDrop(board: BoardStore, plan: PlannedCardDrop): void
   }
 }
 
-async function undoCardDrop(board: BoardStore, plan: PlannedCardDrop): Promise<void> {
+/** Takes back a drop: the order, the values, and the next cards it made (by moved card). */
+async function undoCardDrop(
+  board: BoardStore,
+  plan: PlannedCardDrop,
+  made: ReadonlyMap<string, MadeNext>,
+): Promise<void> {
   if (plan.needsOrderChange) {
     await board.writeView(
       plan.viewId,
@@ -135,12 +143,18 @@ async function undoCardDrop(board: BoardStore, plan: PlannedCardDrop): Promise<v
   }
   if (plan.needsGroupChange && plan.groupBy) {
     for (const [id, prev] of plan.prevValues) {
+      // Its next card goes first: the card repeats again only once it is gone.
+      const planned = made.get(id);
+      const next = planned && (await takeBackNext(board, planned.nextId)) ? planned : undefined;
       const updated = await board.workspace.backend.patchCard(
         board.boardId,
         id,
-        prev === ''
-          ? { deletedProperties: [plan.groupBy] }
-          : { updatedProperties: { [plan.groupBy]: prev } },
+        {
+          ...(prev === ''
+            ? { deletedProperties: [plan.groupBy] }
+            : { updatedProperties: { [plan.groupBy]: prev } }),
+          ...(next ? { recurrence: next.recurrence } : {}),
+        },
         { quiet: true },
       );
       board.receiveCard(updated);
@@ -155,7 +169,9 @@ export async function dropCardsOn(board: BoardStore, drop: CardDrop): Promise<vo
   if (!plan) return;
 
   let said = false;
-  await performBoardAction(
+  /** The next cards the last redo made, by the card moved into the column of done. */
+  const made = new Map<string, MadeNext>();
+  const performing = performBoardAction(
     board,
     async () => {
       const prevCards = board.cards;
@@ -170,14 +186,26 @@ export async function dropCardsOn(board: BoardStore, drop: CardDrop): Promise<vo
         );
         said = true;
         board.views = take(board.views, res.view);
-        for (const updated of res.cards) board.receiveCard(updated);
+        made.clear();
+        for (const updated of res.cards) {
+          const next = nextMadeBy(
+            prevCards.find((card) => card.id === updated.id),
+            updated,
+          );
+          if (next) made.set(updated.id, next);
+          board.receiveCard(updated);
+        }
       } catch (error) {
         board.views = prevViews;
         board.cards = prevCards;
         throw error;
       }
     },
-    () => undoCardDrop(board, plan),
+    () => undoCardDrop(board, plan, made),
     'moveCard',
   );
+  const checkpoint = board.workspace.undo.currentCheckpoint;
+  await performing;
+  if (made.size > 0)
+    void nextCardNotices(board.workspace).say(board, [...made.values()], checkpoint);
 }

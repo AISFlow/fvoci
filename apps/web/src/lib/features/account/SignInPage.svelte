@@ -403,9 +403,9 @@
       {#if mode === 'signIn' && forgotHref}
         {#await options then read}
           {#if read?.mailEnabled}
-            <a href={forgotHref} class="text-center text-sm underline underline-offset-4"
-              >{m.reset_forgot()}</a
-            >
+            <a href={forgotHref} class="text-center text-sm underline underline-offset-4">
+              {m.reset_forgot()}
+            </a>
           {/if}
         {/await}
       {/if}

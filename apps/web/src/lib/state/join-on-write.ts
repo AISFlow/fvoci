@@ -25,13 +25,17 @@ export function joinedPermissions(
   return permissionsOfRole(joinedRole(minimumRole), { isWorkspaceAdmin: workspaceAdmin });
 }
 
-/** Whether a first write joins: the container is open and joinable, to one who is no guest, and joined they write. */
+/**
+ * Whether a first write joins: the container is open and joinable, to one
+ * who is signed in and no guest, and joined they write. A reader by a public
+ * link is nobody (`me.id` is empty): they join nothing, and read only.
+ */
 export function joinsOnWrite(
   joinable: boolean,
   workspace: Workspace,
   minimumRole: MemberRole | undefined,
 ): boolean {
-  if (!joinable || workspace.info?.role === 'guest') return false;
+  if (!joinable || !workspace.me?.id || workspace.info?.role === 'guest') return false;
   const joined = joinedPermissions(minimumRole, false);
   return joined.canEdit || joined.canComment;
 }

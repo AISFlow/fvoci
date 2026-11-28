@@ -97,20 +97,12 @@ async function comment(
   cardId: string,
   content: Inline[],
 ): Promise<void> {
-  const written = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        parentId: cardId,
-        type: 'comment',
-        title: '',
-        createdAt: 1,
-        updatedAt: 1,
-        fields: {},
-        body: { type: 'doc', content: [{ type: 'paragraph', content }] },
-      },
-    ],
-  });
+  const written = await api.post(
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`,
+    {
+      data: { body: { type: 'doc', content: [{ type: 'paragraph', content }] } },
+    },
+  );
   expect(written.ok(), await written.text()).toBe(true);
 }
 

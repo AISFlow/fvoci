@@ -456,13 +456,17 @@ async fn create_board_create_public_board_and_its_blocks() {
     // "creator should be able to access the public board and its blocks"
     let blocks = th
         .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await;
-    assert_eq!(blocks.ok_json::<Vec<Block>>(), vec![], "no blocks yet");
+    assert_eq!(
+        blocks.ok_json::<Vec<Value>>(),
+        Vec::<Value>::new(),
+        "no cards yet"
+    );
 
     // Workspace members can read an open board's blocks without joining, while creating cards is refused until joined.
     th.client2
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_ok();
     th.client2
@@ -547,14 +551,18 @@ async fn create_board_create_private_board_and_its_blocks() {
     // "creator should be able to access the private board and its blocks"
     let blocks = th
         .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await;
-    assert_eq!(blocks.ok_json::<Vec<Block>>(), vec![], "no blocks yet");
+    assert_eq!(
+        blocks.ok_json::<Vec<Value>>(),
+        Vec::<Value>::new(),
+        "no cards yet"
+    );
 
     // "unauthorized user should not be able to access the private board or its blocks":
     // for them it does not exist.
     th.client2
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_error(StatusCode::NOT_FOUND, "board not found");
 
@@ -868,13 +876,13 @@ async fn create_board_template_create_public_board_template_and_its_blocks() {
 
     // "creator should be able to access the public board template and its blocks"
     th.client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_ok();
 
     // "another user should be able to access the public board template and its blocks"
     th.client2
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_ok();
 
@@ -953,14 +961,14 @@ async fn create_board_template_create_private_board_template_and_its_blocks() {
 
     // "creator should be able to access the private board template and its blocks"
     th.client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_ok();
 
     // "unauthorized user should not be able to access the private board template or its
     // blocks": for them it does not exist.
     th.client2
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_error(StatusCode::NOT_FOUND, "board not found");
 

@@ -2,13 +2,23 @@
 //! as it is comes back the same, and each block it does not is named
 //! ([`ComplexBlock`]). An empty paragraph is not written, and the marks of the spaces
 //! at the edge of a bold, italic or struck text are not kept.
+//!
+//! A toggle is written as GitHub draws one, `<details>` with its summary's line in
+//! `<summary>…</summary>`, and a callout as a GitHub alert (`> [!NOTE]`, `[!TIP]`,
+//! `[!WARNING]` or `[!CAUTION]`, by its tone). Whether a toggle is open is not the
+//! body's, and is not written. The summary is in a block of HTML, which a renderer of
+//! Markdown passes on as it is: there each `<`, `>` and `&` of the line is written as a
+//! character reference, so that no letter of a body is ever a tag, and code, a formula
+//! or the target of a link that holds one is named, as its own letters cannot be kept
+//! there. A board view, which Markdown has none of, is a link to its view, and named.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use fvoci_model::{ComplexBlock, ComplexBlockReason};
 use serde_json::Value;
 
-use super::{FILE_SCHEME, USER_SCHEME};
+use super::{FILE_SCHEME, USER_SCHEME, VIEW_SCHEME};
 
 /// What the Markdown of a body calls what the body names by identifier; one not here is
 /// called by its identifier.
@@ -18,6 +28,71 @@ pub(crate) struct Names {
     pub(crate) files: HashMap<String, String>,
     /// The names people are shown by, by their identifiers.
     pub(crate) users: HashMap<String, String>,
+    /// The names of the views board views show (their board's title and theirs), by
+    /// their identifiers.
+    pub(crate) views: HashMap<String, String>,
+    /// Set where the body is written into an export of Markdown files
+    /// (`export_markdown`): its files and the pages, cards and units it holds are
+    /// linked where the export puts them, a person is named in plain text, and what
+    /// else a reference names is called by its title where the reader reads it.
+    pub(crate) export: Option<Exported>,
+}
+
+/// The path from a file in the folder `from` to the file `to`, both from the root of an
+/// export: out of the folders `to` is not in, then down into those it is.
+pub(crate) fn relative(from: &[String], to: &[String]) -> String {
+    let (folders, _) = to
+        .split_last()
+        .map_or((to, None), |(name, folders)| (folders, Some(name)));
+    let common = from
+        .iter()
+        .zip(folders)
+        .take_while(|(one, other)| one == other)
+        .count();
+    let mut path = "../".repeat(from.len() - common);
+    path.push_str(&to[common..].join("/"));
+    path
+}
+
+/// Where an export of Markdown files puts what a body names, and where the body is.
+#[derive(Debug, Clone)]
+pub(crate) struct Exported {
+    /// The folders of the file the body is written to, from the root of the export.
+    pub(crate) from: Vec<String>,
+    /// What the export holds, and the titles of what else the reader reads.
+    pub(crate) places: Arc<ExportPlaces>,
+}
+
+/// What an export of Markdown files holds, by identifier: where each is, from the root
+/// of the export.
+#[derive(Debug, Default)]
+pub(crate) struct ExportPlaces {
+    /// The files, by their stored names (a body's `fileId`).
+    pub(crate) files: HashMap<String, Vec<String>>,
+    /// The pages, cards and units, and their titles.
+    pub(crate) blocks: HashMap<String, (Vec<String>, String)>,
+    /// The titles of what a reference names that the reader reads and the export does
+    /// not hold.
+    pub(crate) titles: HashMap<String, String>,
+}
+
+impl Exported {
+    /// The link from the body's file to `to`, in `<…>` so that a space or a parenthesis
+    /// of a name ends no link.
+    fn link(&self, to: &[String]) -> String {
+        format!("<{}>", relative(&self.from, to))
+    }
+
+    /// The link to `to` in a toggle's summary, a block of HTML: without `<…>`, its
+    /// spaces written `%20` and the letters HTML reads as markup as references.
+    fn link_in_summary(&self, to: &[String]) -> String {
+        as_references(&destination(&relative(&self.from, to).replace(' ', "%20")))
+    }
+
+    /// The link to a file the export holds.
+    fn file(&self, id: &str) -> Option<String> {
+        self.places.files.get(id).map(|to| self.link(to))
+    }
 }
 
 /// A body in Markdown.
@@ -67,6 +142,34 @@ enum Within {
     Heading,
     /// A cell: a `|` in code ends it too.
     Cell,
+    /// The summary of a toggle, in a block of HTML: [`MARKUP`] is written as character
+    /// references.
+    Summary,
+}
+
+/// What HTML reads as markup in the summary of a toggle.
+const MARKUP: [char; 3] = ['<', '>', '&'];
+
+/// The character reference a letter of [`MARKUP`] is written as.
+fn reference_of(letter: char) -> Option<&'static str> {
+    match letter {
+        '<' => Some("&lt;"),
+        '>' => Some("&gt;"),
+        '&' => Some("&amp;"),
+        _ => None,
+    }
+}
+
+/// `text` with each letter of [`MARKUP`] written as its character reference.
+fn as_references(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for letter in text.chars() {
+        match reference_of(letter) {
+            Some(reference) => out.push_str(reference),
+            None => out.push(letter),
+        }
+    }
+    out
 }
 
 struct Writer<'n> {
@@ -143,17 +246,21 @@ impl Writer<'_> {
             "bulletList" | "taskList" | "orderedList" => self.list(node, path, marker),
             "codeBlock" => code_block(node),
             "horizontalRule" => "---".to_owned(),
-            "image" => format!(
-                "![{}]({FILE_SCHEME}{})",
-                escape(attr_text(node, "alt"), Line::Inside, Within::Paragraph),
-                attr_text(node, "fileId")
-            ),
+            "image" => {
+                let id = attr_text(node, "fileId");
+                format!(
+                    "![{}]({})",
+                    escape(attr_text(node, "alt"), Line::Inside, Within::Paragraph),
+                    self.file_link(id)
+                )
+            }
             "file" => {
                 let id = attr_text(node, "fileId");
                 let name = self.names.files.get(id).map_or(id, String::as_str);
                 format!(
-                    "[{}]({FILE_SCHEME}{id})",
-                    escape(name, Line::Inside, Within::Paragraph)
+                    "[{}]({})",
+                    escape(name, Line::Inside, Within::Paragraph),
+                    self.file_link(id)
                 )
             }
             "blockMath" => {
@@ -164,7 +271,54 @@ impl Writer<'_> {
                 format!("$${latex}$$")
             }
             "table" => self.table(node, path),
+            "details" => self.details(node, path),
+            "boardView" => {
+                self.complex(path, ComplexBlockReason::BoardView);
+                let id = attr_text(node, "viewId");
+                let name = self
+                    .names
+                    .views
+                    .get(id)
+                    .map_or("Board view", String::as_str);
+                if self.names.export.is_some() {
+                    // Out of the app a view is named alone: no link of the app leads
+                    // anywhere there.
+                    return escape(name, Line::Whole, Within::Paragraph);
+                }
+                format!(
+                    "[{}]({VIEW_SCHEME}{id})",
+                    escape(name, Line::Inside, Within::Paragraph)
+                )
+            }
+            "callout" => {
+                let marker = match attr_text(node, "tone") {
+                    "tip" => "TIP",
+                    "warn" => "WARNING",
+                    "danger" => "CAUTION",
+                    _ => "NOTE",
+                };
+                let inner = self.blocks(children(node), path);
+                if inner.is_empty() {
+                    format!("> [!{marker}]")
+                } else {
+                    format!("> [!{marker}]\n{}", prefixed(&inner, "> ", "> "))
+                }
+            }
             _ => String::new(),
+        }
+    }
+
+    /// A toggle: its summary in a block of HTML of its own, and what it hides between
+    /// blank lines, so that Markdown reads it as Markdown.
+    fn details(&mut self, node: &Value, path: &str) -> String {
+        let parts = children(node);
+        let part = |index: usize| parts.get(index).map_or(&[][..], children);
+        let line = self.inlines(part(0), &format!("{path}/content/0"), Within::Summary);
+        let inner = self.blocks(part(1), &format!("{path}/content/1"));
+        if inner.is_empty() {
+            format!("<details>\n<summary>{line}</summary>\n\n</details>")
+        } else {
+            format!("<details>\n<summary>{line}</summary>\n\n{inner}\n\n</details>")
         }
     }
 
@@ -272,7 +426,7 @@ impl Writer<'_> {
                 .count();
             while open.len() > kept {
                 if let Some(mark) = open.pop() {
-                    out.push_str(&mark.closing());
+                    out.push_str(&self.closing(mark, path, within));
                 }
             }
             for mark in &piece.marks[kept..] {
@@ -291,9 +445,18 @@ impl Writer<'_> {
             };
             match &piece.what {
                 What::Text(text) => out.push_str(&escape(text, line, within)),
-                What::Code(code) => out.push_str(&code_span(code, within)),
+                What::Code(code) => {
+                    if within == Within::Summary && code.contains(MARKUP) {
+                        self.complex(path, ComplexBlockReason::MarkupInSummary);
+                    }
+                    out.push_str(&code_span(code, within));
+                }
                 What::Node(node) => {
-                    let written = self.inline_node(node, &format!("{path}/content/{index}"));
+                    if within == Within::Summary && attr_text(node, "latex").contains(MARKUP) {
+                        self.complex(path, ComplexBlockReason::MarkupInSummary);
+                    }
+                    let at = format!("{path}/content/{index}");
+                    let written = self.inline_node(node, &at, within);
                     out.push_str(&written);
                 }
                 What::Break => {
@@ -305,27 +468,94 @@ impl Writer<'_> {
             line_empty = false;
         }
         while let Some(mark) = open.pop() {
-            out.push_str(&mark.closing());
+            out.push_str(&self.closing(mark, path, within));
         }
         out
     }
 
-    fn inline_node(&mut self, node: &Value, path: &str) -> String {
+    /// Where a file is linked: where the export puts it, or by its identifier.
+    fn file_link(&self, id: &str) -> String {
+        self.names
+            .export
+            .as_ref()
+            .and_then(|exported| exported.file(id))
+            .unwrap_or_else(|| format!("{FILE_SCHEME}{id}"))
+    }
+
+    /// A reference: `[[id]]`, or in an export a link to what it names where the export
+    /// holds it, and its title where the reader reads it elsewhere. `within` is a
+    /// summary's or a paragraph's.
+    fn reference(&self, id: &str, within: Within) -> String {
+        let Some(exported) = &self.names.export else {
+            return format!("[[{id}]]");
+        };
+        if let Some((to, title)) = exported.places.blocks.get(id) {
+            let link = if within == Within::Summary {
+                exported.link_in_summary(to)
+            } else {
+                exported.link(to)
+            };
+            return format!("[{}]({link})", escape(title, Line::Inside, within));
+        }
+        match exported.places.titles.get(id) {
+            Some(title) => escape(title, Line::Inside, within),
+            None => format!("[[{id}]]"),
+        }
+    }
+
+    /// The end of a mark; in a summary, a link whose target HTML would read as markup
+    /// is named, and its target written without it.
+    fn closing(&mut self, mark: &Mark, path: &str, within: Within) -> String {
+        match mark {
+            Mark::Link(href) if within == Within::Summary => {
+                if href.contains(['<', '>', ' ']) {
+                    self.complex(path, ComplexBlockReason::MarkupInSummary);
+                }
+                let target = href
+                    .replace(' ', "%20")
+                    .replace('<', "%3C")
+                    .replace('>', "%3E");
+                format!("]({})", as_references(&destination(&target)))
+            }
+            _ => mark.closing(),
+        }
+    }
+
+    fn inline_node(&mut self, node: &Value, path: &str, within: Within) -> String {
         match kind(node) {
             "mention" => {
                 let id = attr_text(node, "userId");
                 // Who is not seen is named by the identifier alone.
                 let name = self.names.users.get(id).map_or("", String::as_str);
+                let within = if within == Within::Summary {
+                    Within::Summary
+                } else {
+                    Within::Paragraph
+                };
+                if self.names.export.is_some() {
+                    let shown = if name.is_empty() { id } else { name };
+                    return format!("@{}", escape(shown, Line::Inside, within));
+                }
                 format!(
                     "@[{}]({USER_SCHEME}{id})",
-                    escape(name, Line::Inside, Within::Paragraph)
+                    escape(name, Line::Inside, within)
                 )
             }
-            "reference" => format!("[[{}]]", attr_text(node, "id")),
+            "reference" => {
+                let within = if within == Within::Summary {
+                    Within::Summary
+                } else {
+                    Within::Paragraph
+                };
+                self.reference(attr_text(node, "id"), within)
+            }
             "inlineMath" => {
                 let latex = attr_text(node, "latex");
                 if !inline_formula_is_written(latex) {
                     self.complex(path, ComplexBlockReason::UnwrittenFormula);
+                }
+                if within == Within::Summary {
+                    return format!("${}$", as_references(latex));
                 }
                 format!("${latex}$")
             }
@@ -381,10 +611,10 @@ fn code_span(code: &str, within: Within) -> String {
     let padded = code.starts_with('`')
         || code.ends_with('`')
         || (code.starts_with(' ') && code.ends_with(' ') && code.trim() != "");
-    let code = if within == Within::Cell {
-        code.replace('|', "\\|")
-    } else {
-        code.to_owned()
+    let code = match within {
+        Within::Cell => code.replace('|', "\\|"),
+        Within::Summary => as_references(code),
+        Within::Paragraph | Within::Heading => code.to_owned(),
     };
     if padded {
         format!("{fence} {code} {fence}")
@@ -470,6 +700,12 @@ fn escape(text: &str, line: Line, within: Within) -> String {
         let first = line.starts() && at == lead;
         if at < lead || at >= trail_from {
             out.push_str(if letter == '\t' { "&#9;" } else { "&#32;" });
+            continue;
+        }
+        if within == Within::Summary
+            && let Some(reference) = reference_of(letter)
+        {
+            out.push_str(reference);
             continue;
         }
         let escaped = match letter {

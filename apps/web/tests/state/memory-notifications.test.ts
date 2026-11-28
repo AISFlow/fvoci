@@ -116,7 +116,7 @@ describe('the notifications of comments, in memory', () => {
     const made = await aCard();
     const mine = notifications(made.backend);
     await made.other.createComment(made.boardId, made.cardId, text('soon gone'));
-    await made.backend.deleteBlock(made.boardId, made.cardId);
+    await made.backend.batchDeleteCards(made.boardId, [made.cardId]);
     const [gone] = await mine.list();
     expect(gone?.subject).toBeNull();
 

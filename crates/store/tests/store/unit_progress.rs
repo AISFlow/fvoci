@@ -50,7 +50,7 @@ async fn create_item(
         )
         .await
         .expect("item created")
-        .unit
+        .first
 }
 
 fn change(completion: CompletionChange, last_position: LastPositionChange) -> UnitProgressChange {
@@ -261,7 +261,8 @@ async fn trash_preserves_progress_until_permanent_purge() {
         .expect_err("trashed unit refused");
     assert!(err.is_not_found(), "{err:?}");
 
-    test.undelete_unit(&course.id, &unit1.id, CourseLimits::DEFAULT, &alice)
+    let _ = test
+        .undelete_unit(&course.id, &unit1.id, CourseLimits::DEFAULT, &alice)
         .await
         .expect("unit1 restored");
     assert_eq!(

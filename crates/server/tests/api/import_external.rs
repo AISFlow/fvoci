@@ -251,11 +251,7 @@ async fn assert_trello_cards_and_comments(
     importer_id: &str,
     trap_att_url: &str,
 ) {
-    let blocks: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&ts.client, &board.id).await;
     let ship_card = blocks
         .iter()
         .find(|b| b.block_type == BlockType::Card && b.title == "Ship v1 release")
@@ -634,11 +630,7 @@ async fn assert_notion_board(ts: &TestServer, txt_bytes: &[u8]) {
         );
     }
 
-    let board_blocks: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
-        .await
-        .ok_json();
+    let board_blocks = crate::blocks::blocks_of(&ts.client, &board.id).await;
     let launch_card = board_blocks
         .iter()
         .find(|b| b.block_type == BlockType::Card && b.title == "Launch Checklist")

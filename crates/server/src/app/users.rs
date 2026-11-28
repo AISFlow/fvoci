@@ -11,7 +11,7 @@ use fvoci_store::{AdminChange, Looking, Sight};
 
 use super::App;
 use crate::collab::AccessScope;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 use crate::permissions;
 
 impl App {
@@ -164,11 +164,11 @@ impl App {
     ///
     /// Returns a not-found error if no user has that name.
     pub async fn make_admin_by_username(&self, username: &str) -> Result<User, AppError> {
-        let user = match self.store().get_user_by_username(username).await {
-            Ok(user) => user,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found("user")),
-            Err(error) => return Err(error.into()),
-        };
+        let user = self
+            .store()
+            .get_user_by_username(username)
+            .await
+            .or_missing("user")?;
         match self.store().make_admin_by_operator(&user.id).await? {
             AdminChange::Done(user) => Ok(*user),
             AdminChange::NoSuchUser => Err(AppError::not_found("user")),

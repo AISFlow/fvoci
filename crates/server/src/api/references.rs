@@ -38,10 +38,15 @@ pub(super) fn routes() -> OpenApiRouter<App> {
 /// of this workspace on a board, a wiki or a course the user reads (as `getCard`,
 /// `getPage` and `getUnit` ask), each once, in the order they were first named.
 ///
+/// A board view of a body (the node `boardView`) names a view of a board by its
+/// identifier alone too: a view of a board the user reads is told of with `kind` `view`,
+/// its title, its board (`containerId`, `containerTitle`) and how it shows its cards
+/// (`viewType`), as a private board's view is told to its members alone.
+///
 /// Whatever else an identifier names is left out, and the answer does not tell why:
 /// nothing at all, something in the trash, something of another workspace or
-/// organization, a card, a page or a unit the user does not read, or a block that is none
-/// of those (such as a chapter of a course).
+/// organization, a card, a page, a unit or a view the user does not read, or a block that
+/// is none of those (such as a chapter of a course).
 /// The body names at most 100 identifiers (more is 400, as an entry that has not the
 /// form of an identifier is); an empty list answers an empty list.
 #[utoipa::path(

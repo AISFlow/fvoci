@@ -1,5 +1,6 @@
-//! Integration and application-layer tests for block routes: permissions, validation,
-//! error messages, batch mutations, undeletion, and websocket change broadcasts.
+//! The blocks of a board in the tests: the fixtures that make, read and delete them by
+//! the routes of their types ([`crate::block_insert`]), the websocket the tests listen
+//! with, and the tests of the application layer's block writes, through the real store.
 //!
 //! Each test sets up its own isolated server instance and creates prerequisite boards
 //! through the store via [`create_board_in_store`].
@@ -9,22 +10,20 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use fvoci_model::{
-    BLOCK_FIELDS_MAX_CHARS, BLOCK_TITLE_MAX_CHARS, Block, BlockPatch, BlockPatchBatch, BlockType,
-    Category, Container, ContainerMember, ContainerVisibility, JsonMap, new_id,
+    BLOCK_TITLE_MAX_CHARS, Block, BlockPatch, BlockPatchBatch, BlockType, Card, Category,
+    Container, ContainerMember, ContainerVisibility, JsonMap, new_id,
 };
 use fvoci_server::app::ChangeNotification;
 use fvoci_server::error::ErrorKind;
-use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::common::TEST_WS;
-use crate::common::{Client, Setup, TEST_WORKSPACE_ID, TestServer, UNKNOWN_ID};
+use crate::common::{ApiResponse, Client, Setup, TEST_WORKSPACE_ID, TestServer, UNKNOWN_ID};
 
 mod told;
-mod writes;
 
 /// How long to wait for a websocket message that should arrive.
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -32,11 +31,6 @@ const PATIENCE: Duration = Duration::from_secs(5);
 pub(crate) const QUIET: Duration = Duration::from_millis(300);
 /// How long background notifications may take to finish.
 const BACKGROUND: Duration = Duration::from_secs(10);
-
-/// The refusal for a user who may not manage the cards of a board.
-pub(crate) const NO_CHANGES: &str = "access denied to make board changes";
-/// The refusal for a user who may not comment on a board.
-const NO_COMMENTS: &str = "access denied to post card comments";
 
 // -- helpers --------------------------------------------------------------------------
 
@@ -174,22 +168,6 @@ pub(crate) fn child_of(parent: &Block, block_type: BlockType, title: &str) -> Bl
     }
 }
 
-pub(crate) fn blocks_path(board_id: &str) -> String {
-    format!("{TEST_WS}/boards/{board_id}/blocks")
-}
-
-pub(crate) fn block_path(board_id: &str, block_id: &str) -> String {
-    format!("{TEST_WS}/boards/{board_id}/blocks/{block_id}")
-}
-
-pub(crate) fn undelete_path(board_id: &str, block_id: &str) -> String {
-    format!("{}/restore", block_path(board_id, block_id))
-}
-
-fn duplicate_path(board_id: &str, block_id: &str) -> String {
-    format!("{}/duplicate", block_path(board_id, block_id))
-}
-
 /// What a board answers that is not there, or that the user cannot see.
 pub(crate) const NO_BOARD: &str = "board not found";
 
@@ -198,7 +176,8 @@ pub(crate) const NO_BLOCK: &str = "block not found";
 
 pub(crate) use crate::block_insert::insert_in;
 
-/// `InsertBlocks`, expecting success.
+/// Makes `blocks` on a board of the test workspace by the routes of their types
+/// ([`insert_in`]), expecting success.
 pub(crate) async fn insert(client: &Client, board_id: &str, blocks: &[Block]) -> Vec<Block> {
     insert_in(client, TEST_WORKSPACE_ID, board_id, blocks).await
 }
@@ -211,25 +190,93 @@ pub(crate) async fn insert_one(client: &Client, block: &Block) -> Block {
         .expect("one block was inserted")
 }
 
-/// `GetBlocksForBoard`.
+/// Every block of a board of the test workspace as `client` reads them by the routes of
+/// their types ([`blocks_of_in`]).
 pub(crate) async fn blocks_of(client: &Client, board_id: &str) -> Vec<Block> {
-    client.get(&blocks_path(board_id)).await.ok_json()
+    blocks_of_in(client, TEST_WORKSPACE_ID, board_id).await
 }
 
-/// `PatchBlock`, expecting success.
-async fn patch(client: &Client, block: &Block, patch: &BlockPatch) {
-    let response = client
-        .patch(&block_path(&block.container_id, &block.id), patch)
-        .await;
-    response.check_no_content();
+/// Every live block of `board_id` of `workspace_id` as `client` reads them by the routes
+/// of their types: its views, then card by card the comments and attachments of the card
+/// and the card itself (templates too), each card as `getCard` answers it.
+pub(crate) async fn blocks_of_in(
+    client: &Client,
+    workspace_id: &str,
+    board_id: &str,
+) -> Vec<Block> {
+    let board = format!("/w/{workspace_id}/boards/{board_id}");
+    let cards: Vec<Card> = client
+        .get(&format!("{board}/cards?perPage=1000"))
+        .await
+        .ok_json();
+    let mut blocks: Vec<Block> = client.get(&format!("{board}/views")).await.ok_json();
+    for card in cards {
+        for below in ["comments", "attachments"] {
+            let found: Vec<Block> = client
+                .get(&format!("{board}/cards/{}/{below}", card.id))
+                .await
+                .ok_json();
+            blocks.extend(found);
+        }
+        let card: Card = client
+            .get(&format!("/w/{workspace_id}/cards/{}", card.id))
+            .await
+            .ok_json();
+        blocks.push(Block::from(card));
+    }
+    blocks
 }
 
-/// `DeleteBlock`, expecting success.
+/// Every live block of `board_id` as the store holds them, for a test that reads what a
+/// write left rather than what a reader is answered.
+pub(crate) async fn stored_blocks(th: &TestServer, board_id: &str) -> Vec<Block> {
+    th.app
+        .blocks(board_id, None, None)
+        .await
+        .expect("the blocks of the board are read")
+}
+
+/// Deletes `block` of the test workspace by the route of its type, expecting success.
 pub(crate) async fn delete(client: &Client, block: &Block) {
-    let response = client
-        .delete(&block_path(&block.container_id, &block.id))
-        .await;
-    response.check_no_content();
+    crate::block_insert::delete_in(client, TEST_WORKSPACE_ID, block).await;
+}
+
+/// Makes the card `card_id` a template in the store, as an older server's `patchBlock`
+/// did: no route makes a card a template now.
+pub(crate) async fn make_template_unchecked(th: &TestServer, card_id: &str) {
+    let store = th.app.store();
+    let mut fields = store
+        .get_block(card_id)
+        .await
+        .expect("the card is stored")
+        .fields;
+    fields.insert("isTemplate".to_owned(), serde_json::Value::Bool(true));
+    store
+        .set_block_fields_unchecked(card_id, &fields)
+        .await
+        .expect("written as an older server would have");
+}
+
+/// Takes the card `card_id` of `board_id` of the test workspace to the trash, alone in
+/// a `batchDeleteCards`.
+pub(crate) async fn trash_card(client: &Client, board_id: &str, card_id: &str) -> ApiResponse {
+    client
+        .post(
+            &format!("{TEST_WS}/boards/{board_id}/cards/batch-delete"),
+            &json!({ "cardIds": [card_id] }),
+        )
+        .await
+}
+
+/// Brings the card `card_id` of `board_id` of the test workspace back from the trash,
+/// alone in a `batchRestoreCards`.
+pub(crate) async fn restore_card(client: &Client, board_id: &str, card_id: &str) -> ApiResponse {
+    client
+        .post(
+            &format!("{TEST_WS}/boards/{board_id}/cards/batch-restore"),
+            &json!({ "cardIds": [card_id] }),
+        )
+        .await
 }
 
 pub(crate) fn ids(blocks: &[Block]) -> Vec<&str> {
@@ -356,327 +403,6 @@ impl Socket {
     }
 }
 
-// -- Block HTTP route tests -------------------------------------------------------------
-
-/// Fetching blocks on a board returns the inserted blocks.
-#[tokio::test]
-async fn get_blocks() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-
-    let new_blocks = [
-        new_block(&board.id, BlockType::Card, ""),
-        new_block(&board.id, BlockType::Card, ""),
-    ];
-    let inserted = insert(&th.client, &board.id, &new_blocks).await;
-    assert_eq!(inserted.len(), 2, "both blocks are answered");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(blocks.len(), 2, "both blocks are stored");
-    let block_ids = ids(&blocks);
-    assert!(block_ids.contains(&inserted[0].id.as_str()), "the first");
-    assert!(block_ids.contains(&inserted[1].id.as_str()), "the second");
-
-    th.teardown().await;
-}
-
-/// Creating a single block via `POST /blocks`.
-#[tokio::test]
-async fn post_block_create_a_single_block() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-
-    let block = new_block(&board.id, BlockType::Card, "New title");
-    let inserted = insert(&th.client, &board.id, std::slice::from_ref(&block)).await;
-    assert_eq!(inserted.len(), 1, "one block is answered");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(blocks.len(), 1, "one block is stored");
-    assert_eq!(blocks[0].id, inserted[0].id, "the answered block");
-
-    th.teardown().await;
-}
-
-/// Creating multiple blocks in a single `POST /blocks` call.
-#[tokio::test]
-async fn post_block_create_a_couple_of_blocks_in_the_same_call() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let first = insert_one(
-        &th.client,
-        &new_block(&board.id, BlockType::Card, "New title"),
-    )
-    .await;
-
-    let new_blocks = [
-        new_block(&board.id, BlockType::Card, ""),
-        new_block(&board.id, BlockType::Card, ""),
-    ];
-    let inserted = insert(&th.client, &board.id, &new_blocks).await;
-    assert_eq!(inserted.len(), 2, "both blocks are answered");
-    assert_ne!(inserted[0].id, new_blocks[0].id, "a new identifier");
-    assert_ne!(inserted[1].id, new_blocks[1].id, "a new identifier");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(blocks.len(), 3, "three blocks are stored");
-    let block_ids = ids(&blocks);
-    for expected in [&first.id, &inserted[0].id, &inserted[1].id] {
-        assert!(
-            block_ids.contains(&expected.as_str()),
-            "{expected} is stored"
-        );
-    }
-
-    th.teardown().await;
-}
-
-/// Updating an existing block through `POST /blocks` is not allowed.
-#[tokio::test]
-async fn post_block_update_a_block_should_not_be_possible_through_the_insert_endpoint() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let first = insert_one(
-        &th.client,
-        &new_block(&board.id, BlockType::Card, "New title"),
-    )
-    .await;
-
-    let update = Block {
-        id: first.id.clone(),
-        updated_at: 20,
-        ..new_block(&board.id, BlockType::Card, "Updated title")
-    };
-    let inserted = insert(&th.client, &board.id, std::slice::from_ref(&update)).await;
-    assert_eq!(inserted.len(), 1, "one block is answered");
-    assert_ne!(inserted[0].id, first.id, "the identifier was replaced");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(blocks.len(), 2, "a second block was stored");
-    assert_eq!(
-        find(&blocks, &inserted[0].id).title,
-        "Updated title",
-        "the new block has the title"
-    );
-    assert_eq!(
-        find(&blocks, &first.id).title,
-        "New title",
-        "the first block is untouched"
-    );
-
-    th.teardown().await;
-}
-
-/// Fixture block used by the single-block patch tests.
-async fn patch_block_fixture(th: &TestServer) -> Block {
-    let board = create_board_in_store(th, ContainerVisibility::Open).await;
-    let block = Block {
-        fields: fields(json!({"test": "test value", "test2": "test value 2"})),
-        ..new_block(&board.id, BlockType::Card, "New title")
-    };
-    insert_one(&th.client, &block).await
-}
-
-/// Patching a block's basic fields updates them.
-#[tokio::test]
-async fn patch_block_patch_a_block_basic_field() {
-    let th = Setup::one_user().start().await;
-    let block = patch_block_fixture(&th).await;
-
-    patch(&th.client, &block, &title_patch("Updated title")).await;
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert_eq!(blocks.len(), 1, "still one block");
-    assert_eq!(find(&blocks, &block.id).title, "Updated title", "the title");
-
-    th.teardown().await;
-}
-
-fn custom_fields_patch() -> BlockPatch {
-    BlockPatch {
-        updated_fields: fields(json!({"test": "new test value", "test3": "new field"})),
-        ..BlockPatch::default()
-    }
-}
-
-/// Patching a block's custom `fields` updates them.
-#[tokio::test]
-async fn patch_block_patch_a_block_custom_fields() {
-    let th = Setup::one_user().start().await;
-    let block = patch_block_fixture(&th).await;
-    patch(&th.client, &block, &title_patch("Updated title")).await;
-
-    patch(&th.client, &block, &custom_fields_patch()).await;
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert_eq!(blocks.len(), 1, "still one block");
-    let updated = find(&blocks, &block.id);
-    assert_eq!(updated.fields["test"], json!("new test value"), "replaced");
-    assert_eq!(updated.fields["test3"], json!("new field"), "added");
-    assert_eq!(updated.title, "Updated title", "the title is untouched");
-
-    th.teardown().await;
-}
-
-/// Patching a block with `deletedFields` removes custom fields.
-#[tokio::test]
-async fn patch_block_patch_a_block_to_remove_custom_fields() {
-    let th = Setup::one_user().start().await;
-    let block = patch_block_fixture(&th).await;
-    patch(&th.client, &block, &custom_fields_patch()).await;
-
-    let remove = BlockPatch {
-        deleted_fields: vec!["test".to_owned(), "test3".to_owned(), "test100".to_owned()],
-        ..BlockPatch::default()
-    };
-    patch(&th.client, &block, &remove).await;
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert_eq!(blocks.len(), 1, "still one block");
-    let updated = find(&blocks, &block.id);
-    assert_eq!(updated.fields.get("test"), None, "removed");
-    assert_eq!(updated.fields["test2"], json!("test value 2"), "kept");
-    assert_eq!(updated.fields.get("test3"), None, "removed");
-
-    th.teardown().await;
-}
-
-/// Creating a block before testing deletion.
-#[tokio::test]
-async fn delete_block_create_a_block() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-
-    let block = new_block(&board.id, BlockType::Card, "New title");
-    let inserted = insert(&th.client, &board.id, std::slice::from_ref(&block)).await;
-    assert_eq!(inserted.len(), 1, "one block is answered");
-    assert!(!inserted[0].id.is_empty(), "it has an identifier");
-    assert_ne!(inserted[0].id, block.id, "a new one");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(
-        ids(&blocks),
-        [inserted[0].id.as_str()],
-        "the block is stored"
-    );
-
-    th.teardown().await;
-}
-
-/// Deleting a block removes it from the board's active block list.
-#[tokio::test]
-async fn delete_block_delete_a_block() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let block = insert_one(
-        &th.client,
-        &new_block(&board.id, BlockType::Card, "New title"),
-    )
-    .await;
-
-    delete(&th.client, &block).await;
-
-    let response = th.client.get(&blocks_path(&board.id)).await;
-    response.check_ok();
-    assert_eq!(
-        response.text(),
-        "[]",
-        "no blocks are left, as an empty list"
-    );
-
-    th.teardown().await;
-}
-
-/// Fixture block for undelete tests: a view on an open board of the first user.
-async fn undelete_block_fixture(th: &TestServer) -> Block {
-    let board = create_board_in_store(th, ContainerVisibility::Open).await;
-    assert!(
-        blocks_of(&th.client, &board.id).await.is_empty(),
-        "the board starts empty"
-    );
-    insert_one(
-        &th.client,
-        &new_block(&board.id, BlockType::View, "New title"),
-    )
-    .await
-}
-
-/// Creating the fixture block used by undelete tests.
-#[tokio::test]
-async fn undelete_block_create_a_block() {
-    let th = Setup::native().start().await.init_basic().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-
-    let block = new_block(&board.id, BlockType::View, "New title");
-    let inserted = insert(&th.client, &board.id, std::slice::from_ref(&block)).await;
-    assert_eq!(inserted.len(), 1, "one block is answered");
-    assert!(!inserted[0].id.is_empty(), "it has an identifier");
-    assert_ne!(inserted[0].id, block.id, "a new one");
-
-    let blocks = blocks_of(&th.client, &board.id).await;
-    assert_eq!(
-        ids(&blocks),
-        [inserted[0].id.as_str()],
-        "the block is stored"
-    );
-
-    th.teardown().await;
-}
-
-/// Deleting the fixture block hides it from active blocks.
-#[tokio::test]
-async fn undelete_block_delete_a_block() {
-    let th = Setup::native().start().await.init_basic().await;
-    let block = undelete_block_fixture(&th).await;
-
-    delete(&th.client, &block).await;
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert!(blocks.is_empty(), "the block is gone: {:?}", ids(&blocks));
-
-    th.teardown().await;
-}
-
-/// Undeleting a deleted block restores it to the board.
-#[tokio::test]
-async fn undelete_block_undelete_a_block() {
-    let th = Setup::native().start().await.init_basic().await;
-    let block = undelete_block_fixture(&th).await;
-    delete(&th.client, &block).await;
-
-    let undeleted: Block = th
-        .client
-        .post_empty(&undelete_path(&block.container_id, &block.id))
-        .await
-        .ok_json();
-    assert_eq!(undeleted.id, block.id, "the answer is the restored block");
-    assert_eq!(undeleted.title, "New title", "with its content");
-    assert_eq!(undeleted.deleted_at, None, "and not deleted");
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert_eq!(ids(&blocks), [block.id.as_str()], "the block is back");
-
-    th.teardown().await;
-}
-
-/// Rejects undeleting a block without write permission on the board.
-#[tokio::test]
-async fn undelete_block_try_to_undelete_a_block_without_permissions() {
-    let th = Setup::native().start().await.init_basic().await;
-    let block = undelete_block_fixture(&th).await;
-    let path = undelete_path(&block.container_id, &block.id);
-    delete(&th.client, &block).await;
-    th.client.post_empty(&path).await.check_ok();
-    delete(&th.client, &block).await;
-
-    let response = th.client2.post_empty(&path).await;
-    response.check_error(StatusCode::FORBIDDEN, NO_CHANGES);
-
-    let blocks = blocks_of(&th.client, &block.container_id).await;
-    assert!(blocks.is_empty(), "the block stays deleted");
-
-    th.teardown().await;
-}
-
 // -- Application-layer block tests, through the real store --------------------------------
 
 /// Inserting a single block via the application layer succeeds.
@@ -687,7 +413,7 @@ async fn app_insert_block_success_scenario() {
     let mut block = new_block(&board.id, BlockType::Card, "A card");
 
     th.app
-        .insert_block(&mut block, &th.stranger().await, ChangeNotification::Send)
+        .insert_block_unchecked(&mut block, &th.stranger().await, ChangeNotification::Send)
         .await
         .expect("the block is inserted");
 
@@ -720,7 +446,7 @@ async fn app_insert_block_error_scenario() {
     );
     let error = th
         .app
-        .insert_block(
+        .insert_block_unchecked(
             &mut too_long,
             &th.stranger().await,
             ChangeNotification::Send,
@@ -736,7 +462,7 @@ async fn app_insert_block_error_scenario() {
     let mut homeless = new_block("no-such-board", BlockType::Card, "");
     let error = th
         .app
-        .insert_block(
+        .insert_block_unchecked(
             &mut homeless,
             &th.stranger().await,
             ChangeNotification::Send,
@@ -756,7 +482,7 @@ async fn app_patch_blocks_success_scenario() {
     let block = insert_one(&th.client, &new_block(&board.id, BlockType::Card, "old")).await;
 
     th.app
-        .patch_blocks(
+        .patch_blocks_unchecked(
             TEST_WORKSPACE_ID,
             &batch(&[(&block, "new title")]),
             &th.stranger().await,
@@ -782,7 +508,7 @@ async fn app_patch_blocks_error_scenario() {
 
     let error = th
         .app
-        .patch_blocks(
+        .patch_blocks_unchecked(
             TEST_WORKSPACE_ID,
             &batch(&[(&block, "new title"), (&missing, "new title")]),
             &th.stranger().await,
@@ -806,7 +532,7 @@ async fn app_delete_block_success_scenario() {
     let block = insert_one(&th.client, &new_block(&board.id, BlockType::Card, "")).await;
 
     th.app
-        .delete_block(&block.id, &th.stranger().await, ChangeNotification::Send)
+        .delete_block_unchecked(&block.id, &th.stranger().await, ChangeNotification::Send)
         .await
         .expect("the block is deleted");
 
@@ -838,7 +564,7 @@ async fn app_delete_block_error_scenario() {
 
     let error = th
         .app
-        .delete_block(
+        .delete_block_unchecked(
             "no-such-block",
             &th.stranger().await,
             ChangeNotification::Send,
@@ -858,13 +584,13 @@ async fn app_undelete_block_success_scenario() {
     let board = create_board_in_store(&th, ContainerVisibility::Open).await;
     let block = insert_one(&th.client, &new_block(&board.id, BlockType::Card, "back")).await;
     th.app
-        .delete_block(&block.id, &th.stranger().await, ChangeNotification::Send)
+        .delete_block_unchecked(&block.id, &th.stranger().await, ChangeNotification::Send)
         .await
         .expect("the block is deleted");
 
     let undeleted = th
         .app
-        .undelete_block(&block.id, &th.stranger().await)
+        .undelete_block_unchecked(&block.id, &th.stranger().await)
         .await
         .expect("the block is undeleted");
     assert_eq!(undeleted.id, block.id, "the restored block is returned");
@@ -887,7 +613,7 @@ async fn app_undelete_block_that_is_not_in_the_trash() {
     for block_id in [UNKNOWN_ID, "no-such-block", block.id.as_str()] {
         let error = th
             .app
-            .undelete_block(block_id, &th.stranger().await)
+            .undelete_block_unchecked(block_id, &th.stranger().await)
             .await
             .expect_err("nothing to restore");
         assert!(error.is_not_found(), "{block_id}: {error:?}");
@@ -906,7 +632,7 @@ async fn app_insert_blocks_success_scenario() {
     let mut blocks = vec![new_block(&board.id, BlockType::Card, "A card")];
 
     th.app
-        .insert_blocks(&mut blocks, &th.stranger().await, ChangeNotification::Send)
+        .insert_blocks_unchecked(&mut blocks, &th.stranger().await, ChangeNotification::Send)
         .await
         .expect("the blocks are inserted");
 
@@ -923,7 +649,7 @@ async fn app_insert_blocks_success_scenario() {
     );
 
     th.app
-        .insert_blocks(&mut [], &th.stranger().await, ChangeNotification::Send)
+        .insert_blocks_unchecked(&mut [], &th.stranger().await, ChangeNotification::Send)
         .await
         .expect("no blocks are no error");
 
@@ -945,7 +671,7 @@ async fn app_insert_blocks_error_scenario() {
     )];
     let error = th
         .app
-        .insert_blocks(
+        .insert_blocks_unchecked(
             &mut too_long,
             &th.stranger().await,
             ChangeNotification::Send,
@@ -960,7 +686,7 @@ async fn app_insert_blocks_error_scenario() {
     ];
     let error = th
         .app
-        .insert_blocks(&mut mixed, &th.stranger().await, ChangeNotification::Send)
+        .insert_blocks_unchecked(&mut mixed, &th.stranger().await, ChangeNotification::Send)
         .await
         .expect_err("two boards in one call");
     assert_eq!(error.kind(), ErrorKind::BadRequest, "{error:?}");
@@ -976,296 +702,6 @@ async fn app_insert_blocks_error_scenario() {
         .await
         .expect("readable");
     assert!(stored.is_empty(), "nothing was stored: {:?}", ids(&stored));
-
-    th.teardown().await;
-}
-
-// -- GET /boards/{board_id}/blocks ------------------------------------------------------
-
-/// Who may read the blocks of a board, and what the others are told.
-#[tokio::test]
-async fn get_blocks_permissions() {
-    let th = Setup::native().start().await.init_basic().await;
-    let boards = boards_with_roles(&th).await;
-    let open_board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    card_with_content(&th, &boards).await;
-    let path = blocks_path(&boards.board.id);
-
-    let response = th.anonymous().get(&path).await;
-    response.check_unauthorized();
-    assert_eq!(response.error_message(), "no session token", "no session");
-
-    // Without a session the board is not even looked up.
-    let response = th.anonymous().get(&blocks_path("no-such-board")).await;
-    response.check_unauthorized();
-    assert_eq!(
-        response.error_message(),
-        "no session token",
-        "no session, no board"
-    );
-
-    let response = th.client.get(&blocks_path("no-such-board")).await;
-    response.check_error(StatusCode::NOT_FOUND, NO_BOARD);
-
-    // No member: an open board can be read by workspace members; the private one does
-    // not exist.
-    let open_blocks: Vec<Block> = th.client2.get(&blocks_path(&open_board.id)).await.ok_json();
-    assert!(
-        open_blocks.is_empty(),
-        "open board is readable in the workspace"
-    );
-    let response = th.client2.get(&blocks_path(&boards.board.id)).await;
-    response.check_error(StatusCode::NOT_FOUND, NO_BOARD);
-
-    for (role, client) in [
-        ("viewer", &boards.viewer),
-        ("commenter", &boards.commenter),
-        ("editor", &boards.editor),
-        ("admin", &th.client),
-    ] {
-        let blocks: Vec<Block> = client.get(&path).await.ok_json();
-        assert_eq!(titles(&blocks), ["card", "comment", "text"], "{role}");
-    }
-
-    th.teardown().await;
-}
-
-/// The blocks of an open template are for everyone in the workspace; a private template is
-/// for its members.
-#[tokio::test]
-async fn get_blocks_of_templates() {
-    let th = Setup::native().start().await.init_basic().await;
-    let template = |board_type| Container {
-        workspace_id: TEST_WORKSPACE_ID.to_owned(),
-        visibility: board_type,
-        is_template: true,
-        ..Container::default()
-    };
-    let open_template = store_board(&th, template(ContainerVisibility::Open)).await;
-    let private_template = store_board(&th, template(ContainerVisibility::Private)).await;
-    for board in [&open_template, &private_template] {
-        let block = new_block(&board.id, BlockType::Card, "in a template");
-        insert_one(&th.client, &block).await;
-    }
-
-    let blocks: Vec<Block> = th
-        .client2
-        .get(&blocks_path(&open_template.id))
-        .await
-        .ok_json();
-    assert_eq!(titles(&blocks), ["in a template"], "no membership needed");
-
-    // A private template is for its members; for everyone else it does not exist.
-    let response = th.client2.get(&blocks_path(&private_template.id)).await;
-    response.check_error(StatusCode::NOT_FOUND, NO_BOARD);
-
-    let blocks: Vec<Block> = th
-        .client
-        .get(&blocks_path(&private_template.id))
-        .await
-        .ok_json();
-    assert_eq!(blocks.len(), 1, "a member reads the private template");
-
-    th.teardown().await;
-}
-
-/// The list parameters of `GET /boards/{board_id}/blocks`: `all`, `parentId` and
-/// `type`.
-#[tokio::test]
-async fn get_blocks_filters() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let path = blocks_path(&board.id);
-
-    let empty = th.client.get(&path).await;
-    empty.check_ok();
-    assert_eq!(empty.text(), "[]", "an empty board is an empty list");
-
-    let card = insert_one(&th.client, &new_block(&board.id, BlockType::Card, "card")).await;
-    let children = [
-        child_of(&card, BlockType::Attachment, "text"),
-        child_of(&card, BlockType::Comment, "comment"),
-    ];
-    insert(&th.client, &board.id, &children).await;
-    insert_one(&th.client, &new_block(&board.id, BlockType::Card, "card 2")).await;
-    let children_of_card = format!("parentId={}", card.id);
-
-    let everything = vec!["card", "card 2", "comment", "text"];
-    let none: Vec<&str> = Vec::new();
-    let cases = [
-        ("no parameters", String::new(), everything.clone()),
-        ("all", "?all=true".to_owned(), everything.clone()),
-        (
-            "all wins over the filters",
-            "?all=true&type=card&parentId=x".to_owned(),
-            everything.clone(),
-        ),
-        (
-            "an empty all is no all",
-            "?all=".to_owned(),
-            everything.clone(),
-        ),
-        (
-            "the children of the card",
-            format!("?{children_of_card}"),
-            vec!["comment", "text"],
-        ),
-        ("by type", "?type=card".to_owned(), vec!["card", "card 2"]),
-        (
-            "by type and parent",
-            format!("?type=attachment&{children_of_card}"),
-            vec!["text"],
-        ),
-        (
-            "no card has the card as parent",
-            format!("?type=card&{children_of_card}"),
-            none.clone(),
-        ),
-        (
-            "a type the server does not know is matched as written: no block has it",
-            "?type=h1".to_owned(),
-            none.clone(),
-        ),
-        (
-            "unknown is a type as any other",
-            "?type=unknown".to_owned(),
-            none.clone(),
-        ),
-        ("the type is case-sensitive", "?type=Card".to_owned(), none),
-    ];
-    for (case, query, expected) in cases {
-        let blocks: Vec<Block> = th.client.get(&format!("{path}{query}")).await.ok_json();
-        assert_eq!(titles(&blocks), expected, "{case}");
-    }
-    th.client
-        .get(&format!("{path}?page=1&perPage=1"))
-        .await
-        .check_bad_request();
-
-    let no_children = th.client.get(&format!("{path}?parentId=nobody")).await;
-    no_children.check_ok();
-    assert_eq!(no_children.text(), "[]", "no match is an empty list");
-
-    th.teardown().await;
-}
-
-/// `GET /boards/{board_id}/blocks?blockId=`: one block, if it is on the board.
-#[tokio::test]
-async fn get_blocks_by_block_id() {
-    let th = Setup::one_user().start().await;
-    let board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let other_board = create_board_in_store(&th, ContainerVisibility::Open).await;
-    let path = blocks_path(&board.id);
-    let card = insert_one(&th.client, &new_block(&board.id, BlockType::Card, "card")).await;
-    insert_one(&th.client, &child_of(&card, BlockType::Attachment, "text")).await;
-    let other_block = insert_one(
-        &th.client,
-        &new_block(&other_board.id, BlockType::Card, "other"),
-    )
-    .await;
-
-    let blocks: Vec<Block> = th
-        .client
-        .get(&format!("{path}?blockId={}&type=text", card.id))
-        .await
-        .ok_json();
-    assert_eq!(
-        ids(&blocks),
-        [card.id.as_str()],
-        "the one block, whatever the filters say"
-    );
-
-    let response = th
-        .client
-        .get(&format!("{path}?blockId=no-such-block"))
-        .await;
-    response.check_error(StatusCode::NOT_FOUND, NO_BLOCK);
-
-    let response = th
-        .client
-        .get(&format!("{path}?blockId={}", other_block.id))
-        .await;
-    // A block of another board answers as one that does not exist.
-    response.check_error(StatusCode::NOT_FOUND, NO_BLOCK);
-
-    th.teardown().await;
-}
-
-/// A query parameter has one spelling. Any other spelling of it is refused with 400
-/// (`deny_unknown_fields`), while the exact spelling filters or checks as documented.
-#[tokio::test]
-async fn a_query_parameter_spelled_another_way_is_no_parameter() {
-    let th = Setup::local_mode().start().await.init_basic().await;
-    let boards = boards_with_roles(&th).await;
-    let content = card_with_content(&th, &boards).await;
-    let path = blocks_path(&boards.board.id);
-
-    for query in [
-        format!("parent_id={}", content.card.id),
-        "parent_id=nobody".to_owned(),
-        format!("parentID={}", content.card.id),
-        format!("block_id={}", content.text.id),
-        "block_id=no-such-block".to_owned(),
-        format!("blockID={}", content.text.id),
-    ] {
-        th.client
-            .get(&format!("{path}?{query}"))
-            .await
-            .check_bad_request();
-    }
-    let children: Vec<Block> = th
-        .client
-        .get(&format!("{path}?parentId={}", content.card.id))
-        .await
-        .ok_json();
-    assert_eq!(
-        titles(&children),
-        ["comment", "text"],
-        "the parameter itself filters"
-    );
-
-    // No read token, under any name: anonymous requests are refused for missing session,
-    // strict query routes refuse unknown parameters, and container routes hide private boards.
-    let read_token = th.share(&boards.board.id).await;
-    let anonymous = th.anonymous();
-    for name in ["readToken", "read_token", "readtoken", "ReadToken"] {
-        let blocks_with_token = format!("{path}?{name}={read_token}");
-        let response = anonymous.get(&blocks_with_token).await;
-        response.check_unauthorized();
-        assert_eq!(
-            response.problem_type(),
-            "/problems/unauthorized",
-            "{blocks_with_token}"
-        );
-        th.client2.get(&blocks_with_token).await.check_bad_request();
-
-        let container_with_token = format!(
-            "{TEST_WS}/containers/{}?{name}={read_token}",
-            boards.board.id
-        );
-        anonymous
-            .get(&container_with_token)
-            .await
-            .check_unauthorized();
-        th.client2
-            .get(&container_with_token)
-            .await
-            .check_error(StatusCode::NOT_FOUND, NO_BOARD);
-    }
-
-    // Source board parameter: a missing source is 404, and other spellings are 400.
-    let view = new_block(&boards.board.id, BlockType::View, "posted");
-    let response = th
-        .client
-        .post(&format!("{path}?sourceBoardId=no-such-board"), &[&view])
-        .await;
-    response.check_error(StatusCode::NOT_FOUND, "source board not found");
-    for name in ["sourceBoardID", "source_board_id"] {
-        th.client
-            .post(&format!("{path}?{name}=no-such-board"), &[&view])
-            .await
-            .check_bad_request();
-    }
 
     th.teardown().await;
 }

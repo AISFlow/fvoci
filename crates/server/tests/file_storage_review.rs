@@ -153,7 +153,7 @@ async fn a_body_checked_before_collection_cannot_commit_a_missing_image() {
         .expect("the collected object's bytes are removed");
     let created = ts
         .app
-        .create_card(
+        .create_card_unchecked(
             Card {
                 body: Some(body.clone()),
                 ..Card::default()
@@ -193,7 +193,7 @@ async fn a_purge_mark_cannot_doom_the_bytes_of_a_newly_shown_image() {
     }))
     .expect("a valid image body");
     ts.app
-        .create_card(
+        .create_card_unchecked(
             Card {
                 body: Some(body),
                 ..Card::default()

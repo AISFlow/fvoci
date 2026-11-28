@@ -167,8 +167,7 @@ impl Listeners {
                     .iter()
                     .find(|permit| permit.container == container_id)
             })
-            .map(|permit| permit.blocks.clone())
-            .unwrap_or_default();
+            .map_or_default(|permit| permit.blocks.clone());
         for block in block_ids {
             if !blocks.contains(block) {
                 blocks.push(block.clone());

@@ -20,11 +20,11 @@ use fvoci_model::{
 
 use crate::Store;
 use crate::audit::{self, AuditEntry};
-use crate::db::{Dialect, Id, LockRank, OptId, Row, Scope};
+use crate::db::{Dialect, FromRow, Id, LockRank, OptId, Row, RowLock, Scope};
 use crate::error::StoreError;
 use crate::oidc::{Identity, StoredProvider};
 
-/// The columns of a token as its list shows it, in the order [`listed_from_row`] reads.
+/// The columns of a token as its list shows it, in the order [`ApiToken::from_row`] reads.
 const LISTED_COLUMNS: &str = "t.id, t.user_id, t.name, t.token_prefix, t.scope, \
      t.allow_personal_space, t.notify_self, t.last_used_at, t.last_used_address, \
      t.created_at, t.expires_at";
@@ -354,8 +354,10 @@ impl Store {
                 sql.bind(Id(user_id))
                     .push(" AND t.revoked_at IS NULL ORDER BY t.created_at DESC, t.id");
                 let rows = scope.fetch_all(sql).await?;
-                let mut tokens: Vec<ApiToken> =
-                    rows.iter().map(listed_from_row).collect::<Result<_, _>>()?;
+                let mut tokens: Vec<ApiToken> = rows
+                    .iter()
+                    .map(ApiToken::from_row)
+                    .collect::<Result<_, _>>()?;
                 let mut sql = scope.sql(
                     "SELECT tw.token_id, tw.workspace_id, tw.org_id, w.name \
                      FROM api_token_workspaces AS tw \
@@ -418,8 +420,10 @@ impl Store {
                 .push_bind(" AND t.expires_at > ", now)
                 .push(" ORDER BY t.created_at DESC, t.id");
             let rows = scope.fetch_all(sql).await?;
-            let mut tokens: Vec<ApiToken> =
-                rows.iter().map(listed_from_row).collect::<Result<_, _>>()?;
+            let mut tokens: Vec<ApiToken> = rows
+                .iter()
+                .map(ApiToken::from_row)
+                .collect::<Result<_, _>>()?;
             let mut sql = scope.sql(
                 "SELECT tw.token_id, tw.workspace_id, tw.org_id, w.name \
                  FROM api_token_workspaces AS tw JOIN workspaces AS w ON w.id = tw.workspace_id",
@@ -460,10 +464,8 @@ impl Store {
                     .sql("SELECT t.user_id, t.token_prefix FROM api_tokens AS t WHERE t.id = ");
                 sql.bind(Id(token_id))
                     .push(" AND t.revoked_at IS NULL")
-                    .push_bind(" AND t.expires_at > ", now);
-                if scope.dialect() == Dialect::Postgres {
-                    sql.push(" FOR UPDATE");
-                }
+                    .push_bind(" AND t.expires_at > ", now)
+                    .push_lock(scope.row_lock(LockRank::ApiToken, token_id, RowLock::Update));
                 let Some(row) = scope.fetch_optional(sql).await? else {
                     return Ok(false);
                 };
@@ -507,13 +509,10 @@ async fn admitted(
     };
     // Who changes the account (its password, its erasure) waits for this, and so does
     // another token of it, which counts this one then.
-    scope.record_lock(LockRank::Users, token.user_id);
     let mut sql = scope.sql("SELECT id FROM users WHERE id = ");
     sql.bind(Id(token.user_id));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
-    if scope.fetch_optional(sql).await?.is_none() {
+    sql.push_lock(scope.row_lock(LockRank::Users, token.user_id, RowLock::Update));
+    if !scope.exists(sql).await? {
         return Ok(Err(Issuance::SessionEnded));
     }
     // What ends the session without changing the account (a provider changed or
@@ -521,21 +520,16 @@ async fn admitted(
     let mut sql = scope.sql("SELECT id FROM sessions WHERE id = ");
     sql.bind(Id(token.session_id))
         .push_bind(" AND user_id = ", Id(token.user_id))
-        .push_bind(" AND expires_at > ", token.created_at);
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE");
-    }
-    if scope.fetch_optional(sql).await?.is_none() {
+        .push_bind(" AND expires_at > ", token.created_at)
+        .push_lock(scope.row_lock(LockRank::Session, token.session_id, RowLock::Share));
+    if !scope.exists(sql).await? {
         return Ok(Err(Issuance::SessionEnded));
     }
     let mut sql = scope.sql("SELECT COUNT(*) FROM api_tokens WHERE user_id = ");
     sql.bind(Id(token.user_id))
         .push(" AND revoked_at IS NULL")
         .push_bind(" AND expires_at > ", token.created_at);
-    let live = match scope.fetch_optional(sql).await? {
-        Some(row) => row.int(0)?,
-        None => 0,
-    };
+    let live: i64 = scope.first(sql).await?.unwrap_or(0);
     if usize::try_from(live).unwrap_or(usize::MAX) >= API_TOKEN_MAX_LIVE {
         return Ok(Err(Issuance::TooMany));
     }
@@ -582,15 +576,12 @@ async fn provider_of_session(
         subject: row.opt_text(3)?,
         provider_id,
     };
-    scope.record_lock(LockRank::Provider, &origin.provider_id);
     let mut sql = scope.sql("SELECT 1 FROM oidc_providers WHERE id = ");
     sql.bind(Id(&origin.provider_id))
         .push_bind(" AND enabled = ", true)
         .push_bind(" AND revision = ", revision);
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR SHARE");
-    }
-    if scope.fetch_optional(sql).await?.is_none() {
+    sql.push_lock(scope.row_lock(LockRank::Provider, &origin.provider_id, RowLock::Share));
+    if !scope.exists(sql).await? {
         return Ok(Err(Issuance::ProviderChanged));
     }
     Ok(Ok(Some(origin)))
@@ -858,7 +849,7 @@ async fn listed_of(scope: &mut Scope<'_>, token_id: &str) -> Result<Option<ApiTo
     let Some(row) = scope.fetch_optional(sql).await? else {
         return Ok(None);
     };
-    let mut tokens = vec![listed_from_row(&row)?];
+    let mut tokens = vec![ApiToken::from_row(&row)?];
     let mut sql = scope.sql(
         "SELECT tw.token_id, tw.workspace_id, tw.org_id, w.name \
          FROM api_token_workspaces AS tw JOIN workspaces AS w ON w.id = tw.workspace_id",
@@ -871,21 +862,23 @@ async fn listed_of(scope: &mut Scope<'_>, token_id: &str) -> Result<Option<ApiTo
 }
 
 /// Reads a token of [`LISTED_COLUMNS`], with no workspace yet.
-fn listed_from_row(row: &Row) -> Result<ApiToken, StoreError> {
-    Ok(ApiToken {
-        id: row.id(0)?,
-        user_id: row.id(1)?,
-        name: row.text(2)?,
-        token_prefix: row.text(3)?,
-        scope: scope_of(row, 4)?,
-        workspaces: Vec::new(),
-        allow_personal_space: row.bool(5)?,
-        notify_self: row.bool(6)?,
-        last_used_at: row.opt_int(7)?,
-        last_used_address: row.opt_text(8)?,
-        created_at: row.int(9)?,
-        expires_at: row.int(10)?,
-    })
+impl FromRow for ApiToken {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(ApiToken {
+            id: row.id(0)?,
+            user_id: row.id(1)?,
+            name: row.text(2)?,
+            token_prefix: row.text(3)?,
+            scope: scope_of(row, 4)?,
+            workspaces: Vec::new(),
+            allow_personal_space: row.bool(5)?,
+            notify_self: row.bool(6)?,
+            last_used_at: row.opt_int(7)?,
+            last_used_address: row.opt_text(8)?,
+            created_at: row.int(9)?,
+            expires_at: row.int(10)?,
+        })
+    }
 }
 
 /// Puts rows of `(token_id, workspace_id, org_id, name)` with their tokens.

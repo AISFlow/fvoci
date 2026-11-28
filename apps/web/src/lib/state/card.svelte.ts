@@ -20,7 +20,8 @@ import { BodyUploads } from './body-uploads.svelte.ts';
 import type { BoardStore } from './board.svelte.ts';
 import type { CommentEdit } from './card-parts.ts';
 import { CollaborativeBodyState, SAVING_SHOWN } from './collab-body.svelte.ts';
-import { CommentThreadStore } from './comment-thread.svelte.ts';
+import { CommentThreadStore, type ThreadReactions } from './comment-thread.svelte.ts';
+import type { Reaction, WithReactions } from './reaction-types.ts';
 import { byCreation } from './order.ts';
 import { UploadKept, type Transfer } from './transfers.svelte.ts';
 import { authorIds } from './user-names.ts';
@@ -77,6 +78,8 @@ export class CardStore {
     this.#commentThread = new CommentThreadStore({
       workspace: board.workspace,
       parentId: cardId,
+      containerId: board.boardId,
+      joined: (write) => this.board.writeJoined(write),
       role: () => this.board.role,
       permissions: () => this.board.effectivePermissions,
       joinable: () => this.board.joinable,
@@ -140,19 +143,26 @@ export class CardStore {
     return this.#commentThread.comments;
   }
 
+  /** The reactions to the card and to its comments. */
+  get reactions(): ThreadReactions {
+    return this.#commentThread;
+  }
+
   async load(): Promise<void> {
     this.status = 'loading';
     this.openBody();
+    const mark = this.#commentThread.reactionsMark();
     try {
-      const [detail, comments, attachments] = await Promise.all([
+      const [read, comments, attachments] = await Promise.all([
         this.#backend.card(this.#boardId, this.cardId),
         this.#backend.comments(this.#boardId, this.cardId),
         this.#backend.attachments(this.#boardId, this.cardId),
       ]);
       if (this.#closed) return;
-      this.#takeDetail(detail);
-      void this.board.workspace.learnUsers(authorIds([detail, ...comments]));
-      this.#commentThread.setInitial(comments);
+      this.#takeDetail(read);
+      this.#commentThread.takeReactions(read.reactions, mark);
+      void this.board.workspace.learnUsers(authorIds([read, ...comments]));
+      this.#commentThread.setInitial(comments, mark);
       this.#attachments = attachments;
       this.status = 'ready';
       this.#collab.probeIfNotFound();
@@ -171,8 +181,9 @@ export class CardStore {
     this.#bodyUploads.giveUp();
   }
 
-  #takeDetail(detail: CardDetail): void {
-    const { body, ...summary } = detail;
+  /** Takes the card as read; its reactions, if the read carried them, are the thread's. */
+  #takeDetail(detail: WithReactions<CardDetail>): void {
+    const { body, reactions: _reactions, ...summary } = detail;
     this.#readAt = detail.updatedAt;
     this.missing = false;
     this.board.receiveCard(summary);
@@ -219,6 +230,7 @@ export class CardStore {
       this.#news = card;
       return;
     }
+    const mark = this.#commentThread.reactionsMark();
     void this.#backend
       .card(this.#boardId, this.cardId)
       .then((detail) => {
@@ -228,6 +240,7 @@ export class CardStore {
         }
         if (!back && detail.updatedAt <= this.#readAt) return;
         this.#takeDetail(detail);
+        this.#commentThread.takeReactions(detail.reactions, mark);
       })
       .catch(() => undefined);
   }
@@ -262,16 +275,16 @@ export class CardStore {
     const commentsBefore = this.#commentThread.snapshotRead();
     const attachmentsBefore = this.#attachments.map((attachment) => attachment.id);
     try {
-      const [comments, attachments] = await Promise.all([
+      // The card too, for its reactions: one changes nothing of the card, so no
+      // newer card is heard of when the reader comes back.
+      const [read, comments, attachments] = await Promise.all([
+        this.#backend.card(this.#boardId, this.cardId),
         this.#backend.comments(this.#boardId, this.cardId),
         this.#backend.attachments(this.#boardId, this.cardId),
       ]);
       if (this.#isClosed() || reading !== this.#refreshing) return;
-      this.#commentThread.mergeRead(
-        comments,
-        commentsBefore.beforeIds,
-        commentsBefore.deletedBefore,
-      );
+      this.#commentThread.takeReactions(read.reactions, commentsBefore.mark);
+      this.#commentThread.mergeRead(comments, commentsBefore);
       this.#attachments = reread(this.#attachments, attachments, attachmentsBefore);
     } catch (error) {
       if (this.#isClosed() || reading !== this.#refreshing) return;
@@ -281,6 +294,11 @@ export class CardStore {
 
   #isClosed(): boolean {
     return this.#closed;
+  }
+
+  /** `reactionsChanged` of the card or one of its comments. */
+  receiveReactions(blockId: string, reactions: readonly Reaction[]): void {
+    this.#commentThread.receiveReactions(blockId, reactions);
   }
 
   forget(blockIds: readonly string[]): void {
@@ -312,13 +330,13 @@ export class CardStore {
         async () => {
           this.board.deleting(attachmentId);
           await this.board.writeJoined(() =>
-            this.#backend.deleteBlock(this.#boardId, attachmentId),
+            this.#backend.deleteAttachment(this.#boardId, this.cardId, attachmentId),
           );
           this.forget([attachmentId]);
         },
         async () => {
           await this.board.writeJoined(() =>
-            this.#backend.restoreBlock(this.#boardId, attachmentId),
+            this.#backend.restoreAttachment(this.#boardId, this.cardId, attachmentId),
           );
           if (child) this.receive(child);
         },
@@ -352,7 +370,7 @@ export class CardStore {
           return;
         }
         try {
-          await backend.deleteBlock(boardId, attachment.id);
+          await backend.deleteAttachment(boardId, cardId, attachment.id);
         } catch (error) {
           if (isBackendError(error) && error.status === 404) return;
           shown(attachment);

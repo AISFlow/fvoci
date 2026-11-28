@@ -185,7 +185,7 @@ describe('MemoryTime parity with server rules', () => {
       startedAt: 10_000,
       endedAt: 20_000,
     });
-    await backend.deleteBlock(board.id, card.id);
+    await backend.batchDeleteCards(board.id, [card.id]);
     const listed = await backend.time.listTimeEntries({ from: 10_000, to: 20_000 });
     expect(listed.entries[0]?.id).toBe(logged.id);
     expect(listed.entries[0]?.targetTitle).toBe('Snapshot Card');

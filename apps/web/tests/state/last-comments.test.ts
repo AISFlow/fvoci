@@ -27,12 +27,14 @@ describe('the memory backend', () => {
       second.createdAt,
     );
     // A changed comment does not move it; a deleted one does not count.
-    await backend.patchComment(board.boardId, first.id, {
-      body: text('one, changed'),
-      readAt: first.updatedAt,
-    });
+    await backend.patchComment(
+      board.boardId,
+      first.id,
+      { body: text('one, changed'), readAt: first.updatedAt },
+      betaId,
+    );
     expect((await backend.card(board.boardId, betaId)).lastCommentAt).toBe(second.createdAt);
-    await backend.deleteBlock(board.boardId, second.id);
+    await backend.deleteComment(board.boardId, betaId, second.id);
     expect((await backend.card(board.boardId, betaId)).lastCommentAt).toBe(first.createdAt);
 
     const heard: unknown[] = [];
@@ -71,13 +73,13 @@ describe('an open board', () => {
     expect(board.card(betaId)?.lastCommentAt).toBe(newer.createdAt);
 
     // The reader, the board's admin, deletes somebody else's comment.
-    await backend.deleteBlock(board.boardId, newer.id);
+    await backend.deleteComment(board.boardId, betaId, newer.id);
     await settle();
     await vi.waitFor(() => {
       expect(board.card(betaId)?.lastCommentAt).toBe(older.createdAt);
     });
     // Brought back, it counts again.
-    await backend.restoreBlock(board.boardId, newer.id);
+    await backend.restoreComment(board.boardId, betaId, newer.id);
     await settle();
     expect(board.card(betaId)?.lastCommentAt).toBe(newer.createdAt);
   });
@@ -106,7 +108,7 @@ describe('an open board', () => {
     const kept = silently('kept');
     const gone = silently('gone');
     const cards = vi.spyOn(backend, 'cards');
-    await backend.deleteBlock(board.boardId, gone);
+    await backend.deleteComment(board.boardId, betaId, gone);
     await settle();
     await vi.waitFor(() => {
       expect(board.card(betaId)?.lastCommentAt).toBe(world.blocks.get(kept)?.createdAt);
@@ -155,13 +157,15 @@ describe('an open board', () => {
       await held;
       return answer;
     });
-    await backend.deleteBlock(board.boardId, newer.id);
+    await backend.deleteComment(board.boardId, betaId, newer.id);
     await settle();
     // The older one is changed while the card is read again: it does not make the time newer.
-    await other.patchComment(board.boardId, older.id, {
-      body: text('older, changed'),
-      readAt: older.updatedAt,
-    });
+    await other.patchComment(
+      board.boardId,
+      older.id,
+      { body: text('older, changed'), readAt: older.updatedAt },
+      betaId,
+    );
     await settle();
     release();
     await vi.waitFor(() => {
@@ -211,9 +215,9 @@ describe('an open board', () => {
       await held;
       return answer;
     });
-    await backend.deleteBlock(board.boardId, posted.id);
+    await backend.deleteComment(board.boardId, betaId, posted.id);
     await settle();
-    await backend.restoreBlock(board.boardId, posted.id);
+    await backend.restoreComment(board.boardId, betaId, posted.id);
     await settle();
     release();
     await settle();

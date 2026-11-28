@@ -238,9 +238,9 @@
             })}
           </h3>
           <label class="flex min-h-8 items-center gap-3 roomy:min-h-touch">
-            <span class="min-w-0 flex-1 text-muted-foreground"
-              >{words.workspaceOpen({ workspace: workspaceName })}</span
-            >
+            <span class="min-w-0 flex-1 text-muted-foreground">
+              {words.workspaceOpen({ workspace: workspaceName })}
+            </span>
             <Switch
               checked={isOpen}
               data-testid="share-open"
@@ -310,12 +310,14 @@
                     />
                   {:else}<span class="truncate">{name}</span>{/if}
                   {#if mine}<span class="shrink-0 text-muted-foreground">
-                      {m['ShareBoard.userPermissionsYouText']()}</span
-                    >{/if}
+                      {m['ShareBoard.userPermissionsYouText']()}
+                    </span>{/if}
                   {#if guest}<span
                       class="shrink-0 self-center rounded-full border px-1.5 text-xs text-muted-foreground"
-                      data-testid="share-guest-badge">{m.share_guest_badge()}</span
-                    >{/if}
+                      data-testid="share-guest-badge"
+                    >
+                      {m.share_guest_badge()}
+                    </span>{/if}
                 </span>
                 {#if progress}
                   <span

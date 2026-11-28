@@ -19,6 +19,7 @@
   import { setViewedFileSource, viewing } from '$lib/components/file-viewer/viewing.svelte.ts';
   import { daysLeft } from '$lib/features/account/account-deletion.ts';
   import SignInPage from '$lib/features/account/SignInPage.svelte';
+  import NextCardToast from '$lib/features/card/NextCardToast.svelte';
   import AppShell, { type PaneTools } from '$lib/features/shell/AppShell.svelte';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import {
@@ -46,6 +47,7 @@
   import { resendLink, startBackend } from './backend.ts';
   import { forgetInviteToken } from '$lib/fragment-token.ts';
   import { forgetUnscoped, forgetUser, lastWorkspace } from './last-workspace.ts';
+  import { forgetRecentPlaces } from './recent-places.ts';
   import {
     browserLocale,
     currentLocale,
@@ -54,6 +56,7 @@
     shownLanguage,
   } from './locale.ts';
   import LazyView from './LazyView.svelte';
+  import { favoritePlaces } from './places.ts';
   import Problems from './Problems.svelte';
   import { keepReturn, resume, takeReturn } from './return-to.ts';
   import { placeRoute, shownContainerId, workspaceIdOf, type Router } from './router.svelte.ts';
@@ -155,6 +158,11 @@
     return () => {
       workspace?.close();
     };
+  });
+
+  // A session that is over (401) forgets what was opened last, as signing out does.
+  $effect(() => {
+    if (workspace?.status === 'signedOut') forgetRecentPlaces();
   });
 
   // Leaving a board screen for any non-board route parks the open board immediately (§1.4.1).
@@ -424,6 +432,9 @@
       ? { active: router.route.kind === 'learningToday', onOpen: openLearningToday }
       : undefined}
     containerHref={(container: ContainerPlace) => router.href(placeRoute(container))}
+    favoritePlaces={workspace.backend.favorites
+      ? favoritePlaces(router, () => workspace?.info?.id)
+      : undefined}
     sharedHref={(containerId: string, readToken: string) =>
       router.href({ boardId: containerId, readToken })}
     onOpenContainer={openContainer}
@@ -479,5 +490,6 @@
     {/snippet}
   </AppShell>
   <Problems {workspace} />
+  <NextCardToast {workspace} />
   <FileViewerHost regional={workspace.regional} />
 {/if}

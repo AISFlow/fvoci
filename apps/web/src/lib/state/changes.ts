@@ -5,6 +5,7 @@ import type { AccountSettings, Attachment, CardSummary, Category, Comment } from
 import type { WikiPage } from './wiki-types.ts';
 import type { DiaryEntry } from './diary-types.ts';
 import type { CourseUnit } from './course-types.ts';
+import type { Reaction } from './reaction-types.ts';
 
 /**
  * A change that happened on the server, whoever made it: the reader in this
@@ -33,12 +34,16 @@ export type Change =
   /** Chapters and units of a course (`containerId`) that were made or changed, without their bodies. */
   | { kind: 'units'; containerId: string; units: CourseUnit[] }
   | { kind: 'members'; containerId: string; members: ContainerMember[] }
+  /** All the reactions to a block of the container as they are now (`reactionsChanged`). */
+  | { kind: 'reactions'; containerId: string; blockId: string; reactions: readonly Reaction[] }
   | { kind: 'categories'; categories: Category[] }
   | { kind: 'settings'; settings: AccountSettings }
   /** Somebody's name changed: whoever holds them reads them again. */
   | { kind: 'user'; userId: string }
   /** What the reader was told changed: whoever shows it reads it again. */
   | { kind: 'notifications' }
+  /** The reader's stars in the workspace changed, here or elsewhere: whoever shows them reads them again. */
+  | { kind: 'favorites'; workspaceId: string }
   /** Somebody's workspace role changed (`admin`, `member`, `guest`, or `''` on removal). */
   | { kind: 'workspaceRole'; workspaceId: string; userId: string; role: string }
   /**

@@ -1,7 +1,8 @@
 /**
  * Where a reference in a body leads, by the address bar: a card of the board
  * that is shown opens over the view that is shown, a card of another board
- * on that board's first view, and a page in its wiki. A reader by a link
+ * on that board's first view, a page in its wiki, and the view a board view
+ * shows on its board. A reader by a link
  * reads one board, and nothing else has an address there.
  */
 import { referenceAt } from '$lib/logic/reference-address.ts';
@@ -31,6 +32,9 @@ function routeOf(router: Router, linked: LinkedBlock): RouteTarget | undefined {
   if (linked.kind === 'unit') {
     return { workspaceId, courseId: linked.containerId, unitId: linked.id };
   }
+  // A view is shown on its board, by itself.
+  if (linked.kind === 'view')
+    return { workspaceId, boardId: linked.containerId, viewId: linked.id };
   return { workspaceId, boardId: linked.containerId, viewId: ANY_VIEW, cardId: linked.id };
 }
 

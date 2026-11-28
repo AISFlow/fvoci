@@ -34,10 +34,8 @@ async fn template(client: &Client, key: &str) -> Container {
 /// The date values of the cards of a board, by the title of the card: every value of a
 /// card's that has a `from`.
 async fn days_of(client: &Client, board_id: &str) -> BTreeMap<String, Vec<Value>> {
-    let blocks: Vec<Block> = client
-        .get(&format!("{ROOT_WS}/boards/{board_id}/blocks"))
-        .await
-        .ok_json();
+    let blocks =
+        crate::blocks::blocks_of_in(client, crate::common::ROOT_WORKSPACE_ID, board_id).await;
     days_among(&blocks)
 }
 

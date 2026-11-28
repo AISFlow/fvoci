@@ -1,6 +1,7 @@
 /** The pocket of screen state of a reader in memory, checked as the server checks it. */
 import { fail } from './refuse.ts';
 import { LIMITS, SCREEN_STATE_KEY } from './shapes.ts';
+import type { World } from './world.ts';
 
 /**
  * What a reader's screen state becomes: `current` without the keys of
@@ -37,4 +38,17 @@ export function nextScreenState(
     fail(400, 'too many keys', { limit: LIMITS.screenStateKeys });
   }
   return next;
+}
+
+/** Keeps what `nextScreenState` makes of the reader's screen state; a refusal changes nothing. */
+export function storeScreenState(
+  world: World,
+  userId: string,
+  updated: Readonly<Record<string, string>>,
+  deleted: readonly string[],
+): void {
+  world.screenState.set(
+    userId,
+    nextScreenState(world.screenState.get(userId) ?? {}, updated, deleted),
+  );
 }

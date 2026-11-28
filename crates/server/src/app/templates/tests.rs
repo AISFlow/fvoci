@@ -311,10 +311,16 @@ fn the_bodies_point_at_the_places_of_their_files() {
 /// The node types a body may hold that no template shows, each with why. Anything
 /// else the allowlist takes has to be in a template: a node that is added to the
 /// allowlist fails this test until a template shows it or it is listed here.
-const NODES_NOT_SHOWN: [(&str, &str); 1] = [(
-    "mention",
-    "names a user, and a template is copied to people it knows nothing of",
-)];
+const NODES_NOT_SHOWN: [(&str, &str); 2] = [
+    (
+        "mention",
+        "names a user, and a template is copied to people it knows nothing of",
+    ),
+    (
+        "boardView",
+        "shows a view by its identifier, and a template is written before any view is made",
+    ),
+];
 
 #[test]
 fn the_templates_show_every_node_a_body_may_hold() {

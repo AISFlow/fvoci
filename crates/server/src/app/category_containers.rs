@@ -10,7 +10,7 @@ use fvoci_model::{
 
 use super::App;
 use super::category::CATEGORY;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 
 /// The name of the category every user has, which collects the boards filed nowhere else.
 pub const DEFAULT_CATEGORY_CONTAINERS: &str = fvoci_model::DEFAULT_CATEGORY_NAME;
@@ -490,11 +490,11 @@ impl App {
     ) -> Result<(), AppError> {
         // The workspace named, which may be another than the handle's (a board filed
         // back in its own): compared here, not by `App::container`.
-        let container = match self.store().get_container(container_id).await {
-            Ok(container) => container,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found("board")),
-            Err(error) => return Err(error.into()),
-        };
+        let container = self
+            .store()
+            .get_container(container_id)
+            .await
+            .or_missing("board")?;
         if category_of_workspace_takes(&container, workspace_id) {
             Ok(())
         } else {

@@ -16,7 +16,7 @@ use crate::auth::limiter::RetryAfter;
 use crate::auth::now_millis;
 use crate::auth::password::{Verdict, hash_password, verify_against_no_account, verify_password};
 use crate::auth::secret::{new_secret, token_digest};
-use crate::error::{AppError, ErrorKind, Reason};
+use crate::error::{AppError, ErrorKind, OrMissing, Reason};
 use crate::metrics::{LoginOutcome, Metrics};
 
 impl App {
@@ -260,11 +260,9 @@ impl App {
             Lookup::Username(name) => self.store().account_by_username(name).await,
             Lookup::Email(email) => self.store().account_by_email(email).await,
         };
-        match found {
-            Ok(user) => Ok(Some(user)),
-            Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(AppError::from(error).context("looking up a user for login")),
-        }
+        found
+            .found()
+            .map_err(|error| error.context("looking up a user for login"))
     }
 
     /// Hashes the password a user just signed in with under the current parameters and

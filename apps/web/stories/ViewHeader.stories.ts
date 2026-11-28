@@ -78,3 +78,59 @@ export const ReadOnlyViews: Story = {
     await expect(menu.querySelectorAll('a[role="menuitem"]')).toHaveLength(1);
   },
 };
+/** A board that offers every quick filter: none on, then two, then none again. */
+export const QuickFilters: Story = {
+  args: { quick: true },
+  play: async ({ canvasElement }) => {
+    const row = await storyElement(canvasElement, '[data-testid="quick-filters"]');
+    const chips = [...row.querySelectorAll<HTMLElement>('[data-quick-filter]')];
+    await expect(chips.map((chip) => chip.dataset.quickFilter)).toEqual([
+      'mine',
+      'incomplete',
+      'overdue',
+      'dueThisWeek',
+    ]);
+    for (const chip of chips) await expect(chip).toHaveAttribute('aria-pressed', 'false');
+    await clickStory(canvasElement, '[data-quick-filter="incomplete"]');
+    await clickStory(canvasElement, '[data-quick-filter="overdue"]');
+    await expect(row.querySelector('[data-quick-filter="overdue"]')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(
+      await storyElement(canvasElement, '[data-quick-clear] [data-count]'),
+    ).toHaveTextContent('2');
+    await clickStory(canvasElement, '[data-quick-clear]');
+    await expect(row.querySelector('[data-quick-clear]')).toBeNull();
+  },
+};
+/** In a pane 390 pixels wide the chips are one line that scrolls sideways. */
+export const QuickFiltersNarrow: Story = {
+  args: { quick: true, narrow: true },
+  play: async ({ canvasElement }) => {
+    await clickStory(canvasElement, '[data-quick-filter="mine"]');
+    await clickStory(canvasElement, '[data-quick-filter="incomplete"]');
+    const row = await storyElement(canvasElement, '[data-testid="quick-filters"]');
+    const tops = new Set(
+      [...row.querySelectorAll('button')].map((each) =>
+        Math.round(each.getBoundingClientRect().top),
+      ),
+    );
+    await expect(tops.size).toBe(1);
+    await expect(row.getBoundingClientRect().width).toBeLessThanOrEqual(390);
+    await clickStory(canvasElement, '[data-quick-clear]');
+  },
+};
+/** A filter with a group of conditions, a date within a period and whether a card is done. */
+export const FilterGroups: Story = {
+  args: { quick: true, filtered: true },
+  play: async ({ canvasElement }) => {
+    await clickStory(canvasElement, '[data-tool="filter"]');
+    const editor = await visibleStoryElement(canvasElement, '[data-testid="filter-editor"]');
+    const group = await storyElement(canvasElement, '[data-filter-group]');
+    await expect(group.querySelectorAll('[data-filter-row]')).toHaveLength(2);
+    await expect(group.querySelector('[data-slot="filter-period"]')).not.toBeNull();
+    await expect(editor.querySelectorAll(':scope [data-filter-row]')).toHaveLength(3);
+    await expect(editor.querySelector('[data-tool="add-group"]')).not.toBeNull();
+  },
+};

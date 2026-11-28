@@ -44,9 +44,9 @@
 
 <div class="flex shrink-0 items-start gap-2 border-b px-3 py-3" data-testid="wiki-header">
   {#if wiki.wiki?.icon}
-    <span class="text-xl leading-7" aria-hidden="true" data-testid="wiki-header-icon"
-      >{wiki.wiki.icon}</span
-    >
+    <span class="text-xl leading-7" aria-hidden="true" data-testid="wiki-header-icon">
+      {wiki.wiki.icon}
+    </span>
   {/if}
   <div class="min-w-0 flex-1">
     <p class="truncate leading-7 font-semibold" data-testid="wiki-header-title">{title}</p>

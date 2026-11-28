@@ -43,8 +43,7 @@ pub(super) fn finish_operations(document: &mut Value) -> Result<(), ContractErro
     let schemes: BTreeSet<String> = document
         .pointer("/components/securitySchemes")
         .and_then(Value::as_object)
-        .map(|schemes| schemes.keys().cloned().collect())
-        .unwrap_or_default();
+        .map_or_default(|schemes| schemes.keys().cloned().collect());
     let refusal = json!({
         "description": REFUSAL,
         "content": {

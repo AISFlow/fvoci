@@ -15,6 +15,7 @@ import type { Container, ContainerVisibility, MemberRole } from '../logic/wire.t
 
 import type { BodyWrite, Comment, CommentVersion } from './backend.ts';
 import type { BodyVersions } from './body-versions.ts';
+import type { WithReactions } from './reaction-types.ts';
 import type { DeletedItem, Paging } from './trash-reads.ts';
 
 /** A page as the tree of its wiki lists it: without its body. */
@@ -93,7 +94,7 @@ export interface Wikis {
   createWiki(workspaceId: string, draft: WikiDraft): Promise<Container>;
   /** Every page of the wiki, in no promised order. For who reads it (an open one: who works there). */
   pages(wikiId: string): Promise<WikiPage[]>;
-  page(wikiId: string, pageId: string): Promise<WikiPageDetail>;
+  page(wikiId: string, pageId: string): Promise<WithReactions<WikiPageDetail>>;
   /** For the wiki's editors. A parent or `after` that is no such page is 400. */
   createPage(wikiId: string, draft: PageDraft): Promise<WikiPageDetail>;
   patchPage(wikiId: string, pageId: string, patch: PagePatch): Promise<WikiPageDetail>;
@@ -105,7 +106,7 @@ export interface Wikis {
 
   // The comments on a page, as a card's (`Backend.comments` and the rest).
   /** Oldest first. For who reads the wiki (an open one: who works there); a page that is not there is 404. */
-  comments(wikiId: string, pageId: string): Promise<Comment[]>;
+  comments(wikiId: string, pageId: string): Promise<WithReactions<Comment>[]>;
   /** For the wiki's commenters and up. A comment has a text: an empty one is 400. */
   createComment(wikiId: string, pageId: string, body: DocNode): Promise<Comment>;
   /**

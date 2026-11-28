@@ -39,8 +39,8 @@ describe('the cards in the trash, in memory', () => {
   it('lists the cards deleted by themselves, the last first, with who and when', async () => {
     const { backend, boardId, id } = await firstBoard();
     const meId = (await backend.me()).id;
-    await backend.deleteBlock(boardId, id('Alpha'));
-    await backend.deleteBlock(boardId, id('Beta'));
+    await backend.batchDeleteCards(boardId, [id('Alpha')]);
+    await backend.batchDeleteCards(boardId, [id('Beta')]);
     const listed = await backend.deletedCards(boardId);
     expect(listed.map((item) => item.title)).toEqual(['Beta', 'Alpha']);
     expect(listed.every((item) => item.deletedBy === meId)).toBe(true);
@@ -63,9 +63,9 @@ describe('the cards in the trash, in memory', () => {
     }
     // A comment deleted is no card of the trash.
     const [comment] = await backend.comments(boardId, id('Gamma'));
-    if (comment) await backend.deleteBlock(boardId, comment.id);
+    if (comment) await backend.deleteComment(boardId, id('Gamma'), comment.id);
     expect(await backend.deletedCards(boardId)).toHaveLength(2);
-    await backend.restoreBlock(boardId, id('Alpha'));
+    await backend.batchRestoreCards(boardId, [id('Alpha')]);
     expect((await backend.deletedCards(boardId)).map((item) => item.title)).toEqual(['Beta']);
   });
 
@@ -79,9 +79,9 @@ describe('the cards in the trash, in memory', () => {
 
   it('is brought back by editors only, and a private board is not there for a non-member', async () => {
     const { backend, other, world, boardId, otherId, id } = await firstBoard();
-    await backend.deleteBlock(boardId, id('Alpha'));
+    await backend.batchDeleteCards(boardId, [id('Alpha')]);
     await backend.setMemberRole(boardId, otherId, 'commenter');
-    expect((await rejection(other.restoreBlock(boardId, id('Alpha')))).status).toBe(403);
+    expect((await rejection(other.batchRestoreCards(boardId, [id('Alpha')]))).status).toBe(403);
     const strangerId = [...world.users.keys()].find(
       (userId) => !(world.members.get(boardId) ?? []).some((member) => member.userId === userId),
     );
@@ -159,7 +159,7 @@ describe('the list of a trash', () => {
     const made = await openFirstBoard();
     const { board, workspace, backend } = made;
     const cards = await backend.cards(board.boardId);
-    for (const card of cards) await backend.deleteBlock(board.boardId, card.id);
+    for (const card of cards) await backend.batchDeleteCards(board.boardId, [card.id]);
     const trash = cardTrash(board);
     const spy = vi.spyOn(backend, 'deletedCards');
     await trash.read();
@@ -173,7 +173,7 @@ describe('the list of a trash', () => {
     expect(board.cards.map((card) => card.id)).toContain(first?.id);
     // One that is not in the trash any more (gone meanwhile) leaves the list and is told.
     const [second] = trash.items;
-    await backend.restoreBlock(board.boardId, second?.id ?? '');
+    await backend.batchRestoreCards(board.boardId, [second?.id ?? '']);
     expect(await trash.restore(second?.id ?? '')).toBe(false);
     expect(trash.items.map((item) => item.id)).not.toContain(second?.id);
     expect(workspace.problems.length).toBeGreaterThan(0);

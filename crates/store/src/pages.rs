@@ -15,14 +15,46 @@ use serde_json::Value;
 use crate::db::{Dialect, Id, Scope};
 use crate::{Store, StoreError, blocks, comment_places, containers, page_places};
 
-/// What a write of the tree changed: the page it was about, and the siblings whose
-/// orders were made anew to leave it room.
+/// What a write of a tree (of a wiki's pages, of a course's chapters and units) stored:
+/// the block it was about, the siblings whose orders were made anew to leave it room,
+/// and what came with it below it (of a copy, or of a page or a chapter back from the
+/// trash).
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageWrite {
-    /// The page made or moved, as it is stored.
-    pub page: Block,
-    /// The pages numbered anew, as they are stored, in the order they are listed in.
+#[must_use = "a write of a tree is told to whoever reads the tree"]
+pub struct Written {
+    /// The block made, moved, copied or brought back, as it is stored.
+    pub first: Block,
+    /// The siblings numbered anew, as they are stored, in the order they are listed in.
     pub renumbered: Vec<Block>,
+    /// What came with it below it, as it is stored: a parent before what is below it,
+    /// and a comment after the block it is on.
+    pub below: Vec<Block>,
+}
+
+impl Written {
+    /// What was written about `first` alone, with the siblings numbered anew for it.
+    pub(crate) fn of(first: Block, renumbered: Vec<Block>) -> Self {
+        Self {
+            first,
+            renumbered,
+            below: Vec::new(),
+        }
+    }
+
+    /// The blocks written, in the order a reader of the tree takes them in: the
+    /// siblings numbered anew first, which leave the block its place, then the block,
+    /// then what is below it.
+    pub fn into_blocks(self) -> impl Iterator<Item = Block> {
+        let Self {
+            first,
+            renumbered,
+            below,
+        } = self;
+        renumbered
+            .into_iter()
+            .chain(std::iter::once(first))
+            .chain(below)
+    }
 }
 
 impl Store {
@@ -43,7 +75,7 @@ impl Store {
         new: &NewPage,
         limits: PageLimits,
         user_id: &str,
-    ) -> Result<PageWrite, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             let Some(kind) = containers::lock_container_of_kind(scope, wiki_id).await? else {
                 return Err(StoreError::not_found(format_args!("board ID={wiki_id}")));
@@ -84,7 +116,7 @@ impl Store {
                 .map_err(invalid)?;
             let renumbered = write_place(scope, &mut page, place).await?;
             blocks::insert_block(scope, &mut page, user_id).await?;
-            Ok(PageWrite { page, renumbered })
+            Ok(Written::of(page, renumbered))
         })
         .await
     }
@@ -107,7 +139,7 @@ impl Store {
         to: &PageMove,
         limits: PageLimits,
         user_id: &str,
-    ) -> Result<PageWrite, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             let not_found = || StoreError::not_found(format_args!("page ID={page_id}"));
             containers::lock_container_of_kind(scope, wiki_id)
@@ -133,10 +165,7 @@ impl Store {
                     .is_at(page_id, parent_id, to.after.as_deref())
                     .map_err(invalid)?
             {
-                return Ok(PageWrite {
-                    page,
-                    renumbered: Vec::new(),
-                });
+                return Ok(Written::of(page, Vec::new()));
             }
             let place = tree
                 .place(parent_id, to.after.as_deref(), page_id)
@@ -144,7 +173,7 @@ impl Store {
             parent_id.clone_into(&mut page.parent_id);
             let renumbered = write_place(scope, &mut page, place).await?;
             blocks::insert_block(scope, &mut page, user_id).await?;
-            Ok(PageWrite { page, renumbered })
+            Ok(Written::of(page, renumbered))
         })
         .await
     }

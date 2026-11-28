@@ -2,7 +2,7 @@
 //! confirmed, its link stored only as a digest, outside any organization, or one made
 //! at once where the server sends no mail.
 
-use crate::db::{Dialect, Id, Scope};
+use crate::db::{Id, LockRank, RowLock, Scope};
 use crate::signups::{self, SIGNUP_LIFETIME_MILLIS, SIGNUP_LINK_LIFETIME_MILLIS};
 use crate::{Store, StoreError, Taken, email_revert, password_reset};
 
@@ -82,11 +82,7 @@ impl Store {
         self.with_conn(async |scope| {
             let mut sql = scope.sql("SELECT new_email FROM email_changes WHERE user_id = ");
             sql.bind(Id(user_id)).push_bind(" AND expires_at > ", now);
-            scope
-                .fetch_optional(sql)
-                .await?
-                .map(|row| row.text(0))
-                .transpose()
+            scope.first(sql).await
         })
         .await
     }
@@ -173,7 +169,7 @@ impl Store {
                 .push_bind(" AND token_hash = ", digest)
                 .push_bind(" AND token_expires_at > ", now)
                 .push_bind(" AND expires_at > ", now);
-            Ok(scope.fetch_optional(sql).await?.is_some())
+            scope.exists(sql).await
         })
         .await
     }
@@ -291,11 +287,7 @@ async fn find_link(
     sql.bind(digest)
         .push_bind(" AND token_expires_at > ", now)
         .push_bind(" AND expires_at > ", now);
-    scope
-        .fetch_optional(sql)
-        .await?
-        .map(|row| Ok((row.id(0)?, row.text(1)?)))
-        .transpose()
+    scope.first(sql).await
 }
 
 /// What is read of an account that is held for a change of its address.
@@ -319,9 +311,7 @@ async fn hold_account(
         sql.push_bind(" AND password_hash = ", password_hash)
             .push_bind(" AND password_locked_at = ", 0_i64);
     }
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
+    sql.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::Update));
     scope
         .fetch_optional(sql)
         .await?
@@ -348,12 +338,12 @@ pub(crate) async fn is_held(
     if let Some(but) = but {
         account.push_bind(" AND id <> ", Id(but));
     }
-    if scope.fetch_optional(account).await?.is_some() {
+    if scope.exists(account).await? {
         return Ok(true);
     }
     let mut signup = scope.sql("SELECT 1 FROM signups WHERE lower(email) = lower(");
     signup.bind(email).push_bind(") AND expires_at > ", now);
-    if scope.fetch_optional(signup).await?.is_some() {
+    if scope.exists(signup).await? {
         return Ok(true);
     }
     email_revert::holds(scope, email, but, now).await

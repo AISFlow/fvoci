@@ -393,6 +393,56 @@
         "idempotentHint": true,
         "openWorldHint": false,
         "readOnlyHint": true,
+        "title": "Activity of a card"
+      },
+      "description": "What was done to a card, the newest first, a page at a time: its making, each change of its title, of a property's value (as the card stores it: option and person ids, dates), of its parent and of whether it is a template, and its coming back from the trash, each with who did it (actorId) and, for an agent, its token (actorTokenName). One person's changes of one thing within five minutes are one line. Its body's changes are not in it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "A card whose activity to read.",
+        "properties": {
+          "cardId": {
+            "description": "The card.",
+            "type": "string"
+          },
+          "page": {
+            "description": "The page, from 1.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "perPage": {
+            "description": "How many lines a page has, from 1 to 1000; 50 if left out.",
+            "format": "int32",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "cardId"
+        ],
+        "type": "object"
+      },
+      "name": "list_activity",
+      "title": "Activity of a card"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true,
         "title": "List files"
       },
       "description": "The files uploaded to a board or wiki, or those one card shows: their ids (fvoci-file://<fileId> in Markdown), names, types and sizes.",
@@ -459,7 +509,7 @@
         "readOnlyHint": false,
         "title": "Save a card"
       },
-      "description": "Make a card on boardId, or change cardId: title, icon, parent, property values, and the body, whole (bodyMarkdown, with readAt; refused while people type in it) or added to (appendMarkdown, which keeps what they type). Kept as a version by this token, and told to the card's people as the agent's.",
+      "description": "Make a card on boardId, or change cardId: title, icon, parent, property values, and the body, whole (bodyMarkdown, with readAt; refused while people type in it) or added to (appendMarkdown, which keeps what they type), and how it repeats (recurrence: completed, it makes its next card). Kept as a version by this token, and told to the card's people as the agent's.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "A card to make or change.",
@@ -531,6 +581,49 @@
               "null"
             ]
           },
+          "recurrence": {
+            "description": "How the card repeats: `{\"every\": 1, \"unit\": \"week\", \"anchor\": \"due\"}` (`every`\n1 to 365; `unit` `day`, `week`, `month` or `year`; counted from the due date,\n`due`, or from the day it is completed, `done`); `null` makes it stop. When a\ncard that repeats is completed, the server makes the next card, due one period\non. Only on a board with a rule of done and a named due date property\n(`recurrence_needs_board_rules`). Left out, a card that is changed keeps its own.",
+            "oneOf": [
+              {
+                "description": "How a card repeats.",
+                "properties": {
+                  "anchor": {
+                    "description": "What the next due date of a card that repeats is counted from.",
+                    "enum": [
+                      "due",
+                      "done"
+                    ],
+                    "type": "string"
+                  },
+                  "every": {
+                    "format": "int32",
+                    "maximum": 365,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "unit": {
+                    "description": "The unit a card repeats by.",
+                    "enum": [
+                      "day",
+                      "week",
+                      "month",
+                      "year"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "every",
+                  "unit",
+                  "anchor"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "description": "The title to give it; left out, a card that is changed keeps its own.",
             "type": [
@@ -550,6 +643,64 @@
       },
       "name": "save_card",
       "title": "Save a card"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false,
+        "title": "Change cards alike"
+      },
+      "description": "Set or clear the same property values of 1 to 200 cards of one board at once, all or none: each card changes as save_card with only properties and deletedProperties would change it. Answers the cards in short.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Cards of one board to change alike.",
+        "properties": {
+          "boardId": {
+            "description": "The board the cards are on.",
+            "type": "string"
+          },
+          "cardIds": {
+            "description": "The cards: 1 to 200 distinct identifiers of cards of the board that are no\ntemplates.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array"
+          },
+          "deletedProperties": {
+            "description": "Properties whose value the cards are to lose.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "properties": {
+            "description": "Values to set on each, by property identifier, as `save_card` takes them. The\ncards' other values stay.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "workspaceId": {
+            "description": "The workspace, as `list_workspaces` names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "boardId",
+          "cardIds"
+        ],
+        "type": "object"
+      },
+      "name": "save_cards",
+      "title": "Change cards alike"
     },
     {
       "annotations": {

@@ -243,8 +243,55 @@ fn what_only_the_servers_rules_refuse_is_refused_and_repaired() {
             left(1, 0, null),
         ),
     ];
-    vectors.extend(refused_tables(a));
+    vectors.extend(refused_tables(a.clone()));
+    vectors.extend(refused_toggles_and_callouts(a));
     assert_repairs_to("refused", vectors);
+}
+
+/// A toggle of a summary of one text and what it hides.
+fn toggle(summary: &str, hidden: &[Value]) -> Value {
+    json!({"type": "details", "content": [
+        {"type": "detailsSummary", "content": [{"type": "text", "text": summary}]},
+        {"type": "detailsContent", "content": hidden},
+    ]})
+}
+
+/// The refused vectors of toggles and callouts, in their order: a callout of a tone not
+/// on the list goes, as a heading of a level not on it does, and a table in a toggle is
+/// mended as one in the document.
+fn refused_toggles_and_callouts(a: Value) -> Vec<(&'static str, Left)> {
+    vec![
+        ("a callout of a tone not on the list", left(1, 0, a.clone())),
+        ("a callout whose tone is a number", left(1, 0, Value::Null)),
+        (
+            "a callout of a tone not on the list, in a toggle",
+            left(1, 0, doc(&[toggle("s", &[line("kept")])])),
+        ),
+        // A board view that names no view goes, as an image without its file does.
+        (
+            "a board view of a view that is no identifier",
+            left(1, 0, a.clone()),
+        ),
+        ("a board view without its view", left(1, 0, a)),
+        (
+            "in a toggle, one adds a column while the other adds a row",
+            left(
+                0,
+                1,
+                doc(&[
+                    line("before"),
+                    toggle(
+                        "s",
+                        &[table(&[
+                            &["a", "b", "new 0"],
+                            &["c", "d", "new 1"],
+                            &["e", "f", ""],
+                        ])],
+                    ),
+                ]),
+            ),
+        ),
+    ]
 }
 
 /// The refused vectors of tables, in their order: a table that does not fill its grid

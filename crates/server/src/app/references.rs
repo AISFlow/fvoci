@@ -1,4 +1,5 @@
-//! References: the card or the page a body names, as each reader sees it.
+//! References: the card or the page a body names, as each reader sees it, and the view
+//! of a board a board view of a body shows.
 //!
 //! A body holds the identifier of what it names and nothing else, and whoever wrote it
 //! was asked nothing about it. So everything is decided here, for the one who reads and
@@ -10,7 +11,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use fvoci_model::{Block, BlockType, Body, Container, LinkedBlock, PublicContainers, is_id};
+use fvoci_model::{
+    Block, BlockType, Body, Container, LinkedBlock, LinkedKind, PublicContainers, is_id,
+};
 
 use super::App;
 use super::list_page::ListPage;
@@ -30,11 +33,13 @@ const MAX_TITLE_TERM_CHARS: usize = 200;
 impl App {
     /// What the references to `ids` show the user: the cards and pages among them that
     /// are on a board or a wiki of this handle's workspace ([`App::in_workspace`]) the
-    /// user reads, each once, in the order they were first asked for.
+    /// user reads, each once, in the order they were first asked for; and the views of
+    /// those boards, as a board view of a body shows one ([`LinkedBlock::view_of`]).
     ///
     /// Whatever else an identifier names is left out and nothing says why: no block,
     /// one in the trash, one of another workspace or organization, one of a board the
-    /// user does not read, or a block that is neither a card nor a page. Access is
+    /// user does not read, or a block that is neither a card, a page, a unit nor a
+    /// view. A private board's view is told to its members alone, as its cards are. Access is
     /// asked once per distinct container (or once for an unknown identifier), caching
     /// the answer within this call so resolving many blocks on the same board does not
     /// repeat identical container access lookups.
@@ -83,6 +88,7 @@ impl App {
             }
             if let (Some(block), Some(container)) = (block, readable_containers.get(container_id))
                 && let Some(linked) = LinkedBlock::of(block, container)
+                    .or_else(|| LinkedBlock::view_of(block, container))
             {
                 told.push(linked);
             }
@@ -111,7 +117,8 @@ impl App {
         let told = self
             .resolve_references(user_id, &[block_id.to_owned()])
             .await?;
-        if told.is_empty() {
+        // What names a view is no reference: a view has no backlinks to show.
+        if told.iter().all(|linked| linked.kind == LinkedKind::View) {
             return Ok(None);
         }
         let paging = asked.paging();

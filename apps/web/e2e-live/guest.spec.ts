@@ -86,11 +86,16 @@ test('a guest comes in by a link from the share dialog, and opens and edits that
   ]) {
     await expect(guestPage.getByTestId(control)).toHaveCount(0);
   }
-  // What the board's menu in the sidebar has for a guest: saving it, and no more.
+  // What the board's menu in the sidebar has for a guest: a star of their own, and saving it
+  // (as an archive or as Markdown), and no more.
   await sidebar(guestPage)
     .getByRole('button', { name: 'Menu of the board Guest invitation' })
     .click();
-  await expect(guestPage.getByRole('menuitem')).toHaveText(['Export the board']);
+  await expect(guestPage.getByRole('menuitem')).toHaveText([
+    'Add to favorites',
+    'As a .fvoci archive',
+    'As Markdown (.zip)',
+  ]);
   await guestPage.keyboard.press('Escape');
   // The sidebar is not a guest's to arrange: its categories stay as they are.
   await expect(sidebar(guestPage).locator('[data-category-toggle]').first()).toBeDisabled();

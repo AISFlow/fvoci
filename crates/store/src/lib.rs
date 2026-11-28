@@ -18,7 +18,6 @@ mod account_erasure;
 mod accounts;
 mod api_tokens;
 mod audit;
-mod block_copies;
 mod block_derived;
 mod blocks;
 mod board_ops;
@@ -26,8 +25,10 @@ mod body_digest;
 mod body_docs;
 mod body_links;
 mod body_versions;
+mod card_events;
 mod card_hierarchy;
 mod card_numbers;
+mod card_recurrence;
 mod card_values;
 mod categories;
 mod category_containers;
@@ -56,6 +57,7 @@ mod directory;
 mod email_change;
 mod email_revert;
 mod error;
+mod favorites;
 mod file_refs;
 mod file_versions;
 mod files;
@@ -69,6 +71,7 @@ mod members;
 mod memberships_everywhere;
 mod notification_noting;
 mod notification_outbox;
+mod notification_triage;
 mod notifications;
 mod observe;
 mod oidc;
@@ -88,6 +91,7 @@ mod pages;
 mod password_reset;
 mod person_names;
 mod public_links;
+mod reactions;
 mod schema;
 mod search_docs;
 mod search_outbox;
@@ -145,13 +149,12 @@ pub use comment_versions::DEFAULT_COMMENT_VERSIONS_KEPT;
 pub use connect::DbType;
 pub use container_membership::Standing;
 pub use containers::{ContainerAccessFacts, Joined, MemberChange};
-pub use containers_and_blocks::{StreamBatch, StreamCreateError};
+pub use containers_and_blocks::{Creator, NewContainers, StreamBatch, StreamCreateError};
 pub use course_exams::{
     ExamPublishError, ExamScoreOutcome, ExamViewer, MIN_SCORER_DELTA_TO_REPUBLISH,
     MIN_SCORERS_TO_PUBLISH,
 };
 pub use course_meetings::{MeetingNotificationPlace, MeetingNotified};
-pub use courses::{UnitRestore, UnitWrite};
 pub use db::Dialect;
 pub use diaries::{DiaryMade, EntryMade};
 pub use directory::{
@@ -163,6 +166,7 @@ pub use email_change::{
 };
 pub use email_revert::{EMAIL_REVERT_LIFETIME_MILLIS, EmailRevert, EmailReverted};
 pub use error::{StoreError, Taken};
+pub use favorites::{FavoriteAdded, StoredFavorite};
 pub use file_refs::NewBodyFiles;
 pub use file_versions::{
     DEFAULT_FILE_VERSIONS_KEPT, KeptFileVersion, RestoredCopy, UnusableUpload, VersionAdded,
@@ -187,11 +191,10 @@ pub use oidc_identities::{LinkRefusal, Linked, LinkingSession, TiedIdentity, Unl
 pub use oidc_pending::{Applied, Binding, PendingProvider, PendingSettings, Trial, Tried};
 pub use org_admin::{Joining, OrgRoleChange, WorkspaceTrashing};
 pub use org_leaving::{Departure, DepartureRefused, MemberRemoval, RemovalRefused};
-pub use page_copies::PageCopies;
-pub use page_trash::PageRestore;
-pub use pages::PageWrite;
+pub use pages::Written;
 pub use password_reset::PASSWORD_RESET_LIFETIME_MILLIS;
 pub use person_names::ChangedName;
+pub use reactions::Reacted;
 pub use schema::SchemaCheck;
 pub use search_docs::SearchDocument;
 pub use search_outbox::{SearchChange, SearchIndexMark, SearchOutboxCounts, SearchTarget};
@@ -329,7 +332,7 @@ pub struct PoolStatus {
 pub struct Store {
     inner: Arc<Inner>,
     tenant: Tenant,
-    /// Whom what this handle writes notes to be told ([`Store::telling_nobody`], [`Store::quietly`]).
+    /// Whom what this handle writes notes to be told ([`Store::quietly`]).
     noting: db::Noting,
     /// The agent this handle writes for ([`Store::by_agent`]); `None` for a person.
     agent: Option<Arc<body_versions::AgentOfHandle>>,
@@ -472,17 +475,6 @@ impl Store {
     }
 
     /// A handle to the same database whose writes of blocks note nothing to tell
-    /// anybody, and make nobody watch anything: for a write that is not its writer's
-    /// own words (a version of a body brought back).
-    #[must_use]
-    pub fn telling_nobody(&self) -> Self {
-        Self {
-            noting: db::Noting::Nobody,
-            ..self.clone()
-        }
-    }
-
-    /// A handle to the same database whose writes of blocks note nothing to tell
     /// anybody, as their writer asked (`disableNotify`): what is written was said
     /// before, a copy or a change taken back or made again. Who writes a card, a page
     /// or a comment watches it all the same, as any writer does; nobody else comes to.
@@ -567,10 +559,7 @@ impl Store {
                 Dialect::Postgres => "SELECT current_setting('server_version')",
             };
             let sql = scope.sql(query);
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.text(0),
-                None => Ok(String::new()),
-            }
+            Ok(scope.first(sql).await?.unwrap_or_default())
         })
         .await
     }
@@ -629,10 +618,7 @@ impl Store {
                 "SELECT rolname::text FROM pg_roles \
                  WHERE rolname = current_user AND (rolsuper OR rolbypassrls)",
             );
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.text(0).map(Some),
-                None => Ok(None),
-            }
+            scope.first(sql).await
         })
         .await
     }
@@ -695,18 +681,15 @@ impl Store {
         visibility: &visibility::Writing<'_>,
         operation: impl AsyncFnOnce(&mut Scope<'_>) -> Result<T, StoreError>,
     ) -> (Result<T, StoreError>, Access) {
-        let kept = self.versions_kept();
         match &self.inner.pool {
             Pool::Sqlite(pool) => {
                 let mut conn = match Watch::acquire(watch, pool).await {
                     Ok(conn) => conn,
                     Err(error) => return (Err(error.into()), Access::Read),
                 };
-                let mut scope = Scope::new(ConnRef::Sqlite(&mut conn), self.tenant, kept)
-                    .with_clock(&self.inner.clock)
-                    .noting_for_search(&self.inner.search_outbox)
-                    .reporting_writes_to(watch.map(Watch::writes))
-                    .tracking_visibility(visibility);
+                let mut scope = self
+                    .scope(ConnRef::Sqlite(&mut conn), visibility)
+                    .reporting_writes_to(watch.map(Watch::writes));
                 let result = operation(&mut scope).await;
                 visibility.settled();
                 (result, Access::of(&scope))
@@ -720,11 +703,9 @@ impl Store {
                     Ok(tx) => tx,
                     Err(error) => return (Err(error.into()), Access::Read),
                 };
-                let mut scope = Scope::new(ConnRef::Postgres(&mut tx), self.tenant, kept)
-                    .with_clock(&self.inner.clock)
-                    .noting_for_search(&self.inner.search_outbox)
-                    .reporting_writes_to(watch.map(Watch::writes))
-                    .tracking_visibility(visibility);
+                let mut scope = self
+                    .scope(ConnRef::Postgres(&mut tx), visibility)
+                    .reporting_writes_to(watch.map(Watch::writes));
                 let result = operation(&mut scope).await;
                 let access = Access::of(&scope);
                 if access == Access::Write {
@@ -740,6 +721,23 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// A scope of this handle on `conn`, the same for a transaction and a lone
+    /// connection: the store's clock, its notes for the search server, whom the
+    /// handle's writes of blocks tell and whose writes they are, and `visibility`, which
+    /// they move.
+    fn scope<'c>(
+        &'c self,
+        conn: ConnRef<'c>,
+        visibility: &'c visibility::Writing<'c>,
+    ) -> Scope<'c> {
+        Scope::new(conn, self.tenant, self.versions_kept())
+            .with_clock(&self.inner.clock)
+            .noting_for_search(&self.inner.search_outbox)
+            .noting(self.noting)
+            .acting(self.agent.clone())
+            .tracking_visibility(visibility)
     }
 
     /// Runs `operation` in a transaction, committing if it succeeds and rolling back if
@@ -767,7 +765,6 @@ impl Store {
         visibility: &visibility::Writing<'_>,
         operation: impl AsyncFnOnce(&mut Scope<'_>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let kept = self.versions_kept();
         match &self.inner.pool {
             Pool::Sqlite(pool) => {
                 // One transaction at a time, in the order they come. SQLite has one
@@ -782,29 +779,14 @@ impl Store {
                 // the same, and no busy timeout can resolve that.
                 let mut conn = Watch::acquire(watch, pool).await?;
                 let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
-                let result = operation(
-                    &mut Scope::new(ConnRef::Sqlite(&mut tx), self.tenant, kept)
-                        .with_clock(&self.inner.clock)
-                        .noting_for_search(&self.inner.search_outbox)
-                        .noting(self.noting)
-                        .acting(self.agent.clone())
-                        .tracking_visibility(visibility),
-                )
-                .await;
+                let result = operation(&mut self.scope(ConnRef::Sqlite(&mut tx), visibility)).await;
                 finish(result, tx, visibility).await
             }
             Pool::Postgres(pool) => {
                 let mut conn = Watch::acquire(watch, pool).await?;
                 let mut tx = conn.begin_with(self.tenant.begin_on_postgres()).await?;
-                let result = operation(
-                    &mut Scope::new(ConnRef::Postgres(&mut tx), self.tenant, kept)
-                        .with_clock(&self.inner.clock)
-                        .noting_for_search(&self.inner.search_outbox)
-                        .noting(self.noting)
-                        .acting(self.agent.clone())
-                        .tracking_visibility(visibility),
-                )
-                .await;
+                let result =
+                    operation(&mut self.scope(ConnRef::Postgres(&mut tx), visibility)).await;
                 finish(result, tx, visibility).await
             }
         }

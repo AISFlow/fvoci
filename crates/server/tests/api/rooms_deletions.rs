@@ -11,27 +11,21 @@ use crate::common::{Setup, TEST_WORKSPACE_ID};
 use crate::rooms::{Incoming, Peer, QUIET, paragraphs, two_in_a_room};
 
 #[tokio::test]
-async fn deleting_cards_boards_and_batches_keeps_the_last_room_body_for_restore() {
-    for target in ["card", "board", "batch"] {
+async fn deleting_cards_and_boards_keeps_the_last_room_body_for_restore() {
+    for target in ["card", "board"] {
         let th = Setup::native().start().await.init_basic().await;
         let (table, mut writer, mut other) = two_in_a_room(&th, &paragraphs(&["first"])).await;
         writer.write_acked("last acknowledged edit").await;
         let wanted = writer.body();
         assert_ne!(body_of(&card(&th.client, &table.card_id).await), wanted);
         let base = format!("/w/{TEST_WORKSPACE_ID}");
-        let block = format!("{base}/boards/{}/blocks/{}", table.board_id, table.card_id);
         let board = format!("{base}/containers/{}", table.board_id);
-        match target {
-            "card" => th.client.delete(&block).await.check_no_content(),
-            "board" => th.client.delete(&board).await.check_no_content(),
-            _ => th
-                .client
-                .delete_json(
-                    &format!("{base}/containers-and-blocks"),
-                    &json!({"containers": [table.board_id], "blocks": [table.card_id]}),
-                )
+        if target == "card" {
+            crate::blocks::trash_card(&th.client, &table.board_id, &table.card_id)
                 .await
-                .check_no_content(),
+                .check_no_content();
+        } else {
+            th.client.delete(&board).await.check_no_content();
         }
         for peer in [&mut writer, &mut other] {
             assert_eq!(peer.text("docLeft").await["reason"], json!("not_found"));
@@ -51,11 +45,16 @@ async fn deleting_cards_boards_and_batches_keeps_the_last_room_body_for_restore(
                 .map(|body| body.document().clone()),
             wanted
         );
-        let restore = if target == "card" { &block } else { &board };
-        th.client
-            .post_empty(&format!("{restore}/restore"))
-            .await
-            .check_ok();
+        if target == "card" {
+            crate::blocks::restore_card(&th.client, &table.board_id, &table.card_id)
+                .await
+                .check_ok();
+        } else {
+            th.client
+                .post_empty(&format!("{board}/restore"))
+                .await
+                .check_ok();
+        }
         let mut reopened = Peer::connect(&th.client, 203).await;
         reopened.joined(TEST_WORKSPACE_ID, &table.card_id).await;
         assert_eq!(
@@ -79,13 +78,10 @@ async fn deletion_waits_for_a_projection_already_in_progress() {
         async move { app.collab().write_body(&app, &id).await }
     });
     waiting.notified().await;
-    let path = format!(
-        "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-        table.board_id, table.card_id
-    );
+    let path = (table.board_id.clone(), table.card_id.clone());
     let mut deletion = tokio::spawn({
         let client = th.client.clone();
-        async move { client.delete(&path).await }
+        async move { crate::blocks::trash_card(&client, &path.0, &path.1).await }
     });
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut deletion)
@@ -124,21 +120,17 @@ async fn a_deleted_rooms_late_input_cannot_reach_the_restored_cards_new_room() {
     let (table, mut old, _other) = two_in_a_room(&th, &paragraphs(&["first"])).await;
     old.write_acked("before deletion").await;
     let wanted = old.body();
-    let path = format!(
-        "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-        table.board_id, table.card_id
-    );
+    let path = (table.board_id.clone(), table.card_id.clone());
     let (waiting, go) = th
         .app
         .collab()
         .pause_next_deletion(DeletionStage::AfterRemoving);
     let deletion = tokio::spawn({
         let (client, path) = (th.client.clone(), path.clone());
-        async move { client.delete(&path).await }
+        async move { crate::blocks::trash_card(&client, &path.0, &path.1).await }
     });
     waiting.notified().await;
-    th.client
-        .post_empty(&format!("{path}/restore"))
+    crate::blocks::restore_card(&th.client, &path.0, &path.1)
         .await
         .check_ok();
     let mut fresh = Peer::connect(&th.client, 303).await;
@@ -207,17 +199,14 @@ async fn an_update_sent_during_a_deletion_is_refused_and_kept_out_of_the_trash()
     let (table, mut writer, mut other) = two_in_a_room(&th, &paragraphs(&["first"])).await;
     writer.write_acked("before the deletion").await;
     let wanted = writer.body();
-    let path = format!(
-        "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-        table.board_id, table.card_id
-    );
+    let path = (table.board_id.clone(), table.card_id.clone());
     let (waiting, go) = th
         .app
         .collab()
         .pause_next_deletion(DeletionStage::BeforeRemoving);
     let deletion = tokio::spawn({
         let client = th.client.clone();
-        async move { client.delete(&path).await }
+        async move { crate::blocks::trash_card(&client, &path.0, &path.1).await }
     });
     waiting.notified().await;
     writer.write("during the deletion").await;
@@ -236,10 +225,10 @@ async fn an_update_sent_during_a_deletion_is_refused_and_kept_out_of_the_trash()
     th.teardown().await;
 }
 
-/// A card below the block that is deleted goes to the trash with what its room held
-/// last, and comes back with it when the block is restored.
+/// A card below the card that is deleted goes to the trash with what its room held
+/// last, and comes back with it when the card is restored.
 #[tokio::test]
-async fn a_card_below_the_deleted_block_keeps_its_rooms_last_body() {
+async fn a_card_below_the_deleted_card_keeps_its_rooms_last_body() {
     let th = Setup::native().start().await.init_basic().await;
     let table = crate::rooms::table(&th, &paragraphs(&["parent"])).await;
     let child = Block {
@@ -258,15 +247,12 @@ async fn a_card_below_the_deleted_block_keeps_its_rooms_last_body() {
     writer.joined(TEST_WORKSPACE_ID, &child_id).await;
     writer.write_acked("typed below").await;
     let wanted = writer.body();
-    let parent = format!(
-        "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-        table.board_id, table.card_id
-    );
-    th.client.delete(&parent).await.check_no_content();
+    crate::blocks::trash_card(&th.client, &table.board_id, &table.card_id)
+        .await
+        .check_no_content();
     assert_eq!(writer.text("docLeft").await["reason"], json!("not_found"));
     assert_eq!(trashed_body(&th, &child_id).await, wanted);
-    th.client
-        .post_empty(&format!("{parent}/restore"))
+    crate::blocks::restore_card(&th.client, &table.board_id, &table.card_id)
         .await
         .check_ok();
     let mut reopened = Peer::connect(&th.client, 402).await;
@@ -282,21 +268,17 @@ async fn the_deleted_room_emptied_after_a_restore_leaves_the_new_room_alone() {
     let th = Setup::native().start().await.init_basic().await;
     let (table, mut old, mut other) = two_in_a_room(&th, &paragraphs(&["first"])).await;
     old.write_acked("before deletion").await;
-    let path = format!(
-        "/w/{TEST_WORKSPACE_ID}/boards/{}/blocks/{}",
-        table.board_id, table.card_id
-    );
+    let path = (table.board_id.clone(), table.card_id.clone());
     let (waiting, go) = th
         .app
         .collab()
         .pause_next_deletion(DeletionStage::AfterRemoving);
     let deletion = tokio::spawn({
         let (client, path) = (th.client.clone(), path.clone());
-        async move { client.delete(&path).await }
+        async move { crate::blocks::trash_card(&client, &path.0, &path.1).await }
     });
     waiting.notified().await;
-    th.client
-        .post_empty(&format!("{path}/restore"))
+    crate::blocks::restore_card(&th.client, &path.0, &path.1)
         .await
         .check_ok();
     let mut fresh = Peer::connect(&th.client, 503).await;

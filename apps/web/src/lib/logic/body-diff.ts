@@ -73,6 +73,7 @@ function familyOf(node: BodyNode, diagram: string | undefined): string | undefin
   switch (node.type) {
     case 'paragraph':
     case 'heading':
+    case 'detailsSummary':
       return 'text';
     case 'codeBlock':
       return diagram !== undefined && node.attrs?.language === diagram ? undefined : 'code';
@@ -83,6 +84,9 @@ function familyOf(node: BodyNode, diagram: string | undefined): string | undefin
     case 'blockquote':
     case 'listItem':
     case 'taskItem':
+    case 'details':
+    case 'detailsContent':
+    case 'callout':
       return node.type;
     case 'image':
       return `image ${String(node.attrs?.fileId)}`;

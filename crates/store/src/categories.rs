@@ -8,14 +8,14 @@ use std::collections::HashSet;
 use fvoci_model::{Category, CategoryPatch, CategoryType};
 
 use crate::Store;
-use crate::db::{Id, Row, Scope};
+use crate::db::{FromRow, Id, Row, Scope};
 use crate::error::StoreError;
 
 /// The distance between the sort orders of consecutive categories. Categories are listed
 /// by ascending sort order, so it is also how far a new category pushes the others down.
 const CATEGORY_SORT_ORDER_GAP: i64 = 10;
 
-/// The columns of a category, in the order [`category_from_row`] reads them.
+/// The columns of a category, in the order [`Category::from_row`] reads them.
 const CATEGORY_COLUMNS: &str = "id, name, user_id, workspace_id, created_at, updated_at, \
                                 collapsed, sort_order, type";
 
@@ -214,29 +214,28 @@ fn category_type_from_column(value: &str) -> Result<CategoryType, StoreError> {
         })
 }
 
-fn category_from_row(row: &Row) -> Result<Category, StoreError> {
-    Ok(Category {
-        id: row.id(0)?,
-        name: row.text(1)?,
-        user_id: row.id(2)?,
-        workspace_id: row.id(3)?,
-        created_at: row.int(4)?,
-        updated_at: row.int(5)?,
-        // A category that exists is not deleted.
-        deleted_at: None,
-        collapsed: row.bool(6)?,
-        sort_order: row.int(7)?,
-        category_type: category_type_from_column(&row.text(8)?)?,
-    })
+impl FromRow for Category {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(Category {
+            id: row.id(0)?,
+            name: row.text(1)?,
+            user_id: row.id(2)?,
+            workspace_id: row.id(3)?,
+            created_at: row.int(4)?,
+            updated_at: row.int(5)?,
+            // A category that exists is not deleted.
+            deleted_at: None,
+            collapsed: row.bool(6)?,
+            sort_order: row.int(7)?,
+            category_type: category_type_from_column(&row.text(8)?)?,
+        })
+    }
 }
 
 pub(crate) async fn get_category(scope: &mut Scope<'_>, id: &str) -> Result<Category, StoreError> {
     let mut sql = scope.sql(["SELECT ", CATEGORY_COLUMNS, " FROM categories WHERE id = "]);
     sql.bind(Id(id));
-    match scope.fetch_optional(sql).await? {
-        Some(row) => category_from_row(&row),
-        None => Err(StoreError::not_found(format_args!("category ID={id}"))),
-    }
+    scope.one(sql, format!("category ID={id}")).await
 }
 
 pub(crate) async fn get_user_categories(
@@ -252,12 +251,7 @@ pub(crate) async fn get_user_categories(
     sql.bind(Id(user_id))
         .push_bind(" AND workspace_id = ", Id(workspace_id))
         .push(" ORDER BY sort_order, created_at, id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(category_from_row)
-        .collect()
+    scope.all(sql).await
 }
 
 pub(crate) async fn create_category(

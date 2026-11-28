@@ -5,13 +5,36 @@
 //! never leaves the caller's own session.
 
 use fvoci_model::{
-    CompletionChange, CourseProgressSummary, JsonMap, UnitProgress, UnitProgressChange,
+    CompletionChange, Container, CourseProgressSummary, JsonMap, UnitProgress, UnitProgressChange,
     course_review_intervals, suggested_next_interval_days,
 };
 
-use super::App;
+use super::{App, ContainerAccess, Reached};
 use crate::error::AppError;
 use crate::metrics::UnitCompletionAction;
+use crate::permissions::ContainerPermission;
+
+/// What a member of the workspace who may not read the course is refused recording
+/// progress with.
+pub const PROGRESS_DENIED: &str = "access denied to update unit progress";
+
+/// Checks that the caller may record their own progress in the course `on` reached: a
+/// reader of it who is enrolled in it ([`ContainerAccess::has_membership`]). Gives the
+/// course.
+///
+/// # Errors
+///
+/// Returns [`PROGRESS_DENIED`] as [`Reached::require`] does, and 403 for a reader who has
+/// not joined the course.
+pub fn require_progress_recorder(on: &Reached) -> Result<&Container, AppError> {
+    let course = on.require(ContainerPermission::View, PROGRESS_DENIED)?;
+    if !on.access().is_some_and(ContainerAccess::has_membership) {
+        return Err(AppError::forbidden(
+            "join the course before recording progress",
+        ));
+    }
+    Ok(course)
+}
 
 impl App {
     /// Returns the caller's personal progress rows for live units of `course_id`,
@@ -47,21 +70,23 @@ impl App {
         Ok(rows)
     }
 
-    /// Creates or updates the caller's personal progress on a live unit of `course_id`,
-    /// populating `suggested_next_interval_days` when completed.
+    /// Creates or updates the caller's personal progress on a live unit of the course `on`
+    /// reached, for who may record it there ([`require_progress_recorder`]), populating
+    /// `suggested_next_interval_days` when completed.
     ///
     /// # Errors
     ///
-    /// Returns 404 if `unit_id` is not a live unit of `course_id`, and the store's error
-    /// if the write fails.
+    /// Returns what [`require_progress_recorder`] returns, 404 if `unit_id` is not a live
+    /// unit of the course, and the store's error if the write fails.
     pub async fn put_unit_progress(
         &self,
-        course_id: &str,
+        on: &Reached,
         unit_id: &str,
-        user_id: &str,
         change: &UnitProgressChange,
-        course_properties: &JsonMap,
     ) -> Result<UnitProgress, AppError> {
+        let course = require_progress_recorder(on)?;
+        let (course_id, user_id) = (on.container_id(), on.user_id());
+        let course_properties: &JsonMap = &course.properties;
         let mut progress = self
             .store()
             .upsert_unit_progress(course_id, unit_id, user_id, change)

@@ -8,7 +8,7 @@ export type ViewCardContext = Pick<
   SortContext,
   'usernameOf' | 'locale' | 'timeZone' | 'cardTitle'
 > &
-  Pick<FilterContext, 'meId' | 'now'>;
+  Pick<FilterContext, 'meId' | 'now' | 'today' | 'weekStart' | 'doneWhen'>;
 
 /**
  * Stage 1: cards of a view filtered by `view.filter` and sorted by `view.sort`

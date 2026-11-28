@@ -30,7 +30,7 @@ pub(super) fn refused(refused: &Refused, limits: &Limits) -> AppError {
         )
         .with_reason(Reason::DocumentTooLarge),
         Refusal::BodyTooLarge => AppError::too_large(
-            "with the update the body would be past the limits of a body (its size, its nodes, its depth)",
+            "with the update the body would be past the limits of a body (its size, its nodes, its depth, its board views)",
             limits.body_bytes,
         )
         .with_reason(Reason::DocumentTooLarge),

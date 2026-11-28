@@ -33,18 +33,29 @@ export function primaryModifier(
 }
 
 /**
+ * Whether a key press is the key of `letter` (a to z, in lower case). A
+ * layout of other letters than Latin ones (Hangul's gives `ㄴ` where S is,
+ * a syllable being composed `Process`) is read by where the key is; a Latin
+ * one by its letter, so that the key where S is on QWERTY is no S on
+ * another layout.
+ */
+export function isLetterKey(event: Pick<KeyboardEvent, 'key' | 'code'>, letter: string): boolean {
+  return /^[a-z]$/i.test(event.key)
+    ? event.key.toLowerCase() === letter
+    : event.code === `Key${letter.toUpperCase()}`;
+}
+
+/**
  * Whether a key press is the one that keeps a version of a body now: ⌘S on
- * Apple devices and Ctrl+S elsewhere, without Shift or Alt. A layout of
- * other letters than Latin ones (Hangul's gives `ㄴ`, a syllable being
- * composed `Process`) is read by where the key is; a Latin one by its
- * letter, so that the key where S is on QWERTY is no save on another layout.
+ * Apple devices and Ctrl+S elsewhere, without Shift or Alt, on any layout
+ * (`isLetterKey`).
  */
 export function isSaveKey(
   event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>,
   platform?: string,
 ): boolean {
   if (event.shiftKey || event.altKey || !primaryModifier(event, platform)) return false;
-  return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === 's' : event.code === 'KeyS';
+  return isLetterKey(event, 's');
 }
 
 type ShortcutOptions = { shift?: boolean; alt?: boolean };

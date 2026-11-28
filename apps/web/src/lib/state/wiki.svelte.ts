@@ -296,6 +296,9 @@ export class WikiStore {
         for (const block of change.blocks)
           if (isCommentBlock(block)) this.openPage?.comments.receive(block);
         break;
+      case 'reactions':
+        this.openPage?.comments.receiveReactions(change.blockId, change.reactions);
+        break;
       case 'blocksDeleted': {
         this.#writes.forget(change.blockIds, 'others');
         const remembered = this.workspace.rememberedWikiPage(this.wikiId);

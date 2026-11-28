@@ -11,7 +11,7 @@
 use fvoci_model::{NotificationKind, new_id};
 
 use crate::Store;
-use crate::db::{Dialect, Id, OptId, Param, Row, Scope, Sql};
+use crate::db::{Dialect, FromRow, Id, OptId, Param, Row, Scope, Sql};
 use crate::error::StoreError;
 use crate::notifications::kind_from_row;
 
@@ -107,12 +107,7 @@ impl Store {
                 " ORDER BY due_at, org_id, recipient_id, kind, source_id LIMIT ",
                 limit,
             );
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(event_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -122,13 +117,11 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StoreError::Database`] if the query fails.
+    #[cfg(any(test, feature = "test-util"))]
     pub async fn waiting_notification_events(&self) -> Result<i64, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql("SELECT COUNT(*) FROM notification_outbox");
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -136,7 +129,8 @@ impl Store {
     /// Tells the person of `event` at `now`: takes its row off the list and, in the
     /// same transaction, joins it to the line the person has of the same card or page
     /// and kind, made within [`NotificationLimits::same_within_millis`] (unless that
-    /// line counted its doer's doing of its source already), or makes a new line,
+    /// line counted its doer's doing of its source already), which makes that line
+    /// unread and brings it back into the inbox if it was put away, or makes a new line,
     /// unless its doer made [`NotificationLimits::most_made_by_one`] for the person
     /// already. Where the person then has more than
     /// [`NotificationLimits::most_of_a_person`], the oldest go, those that were read
@@ -181,7 +175,7 @@ impl Store {
                     Dialect::Sqlite => scope.sql("UPDATE notifications SET updated_at = MAX("),
                 };
                 sql.bind(now)
-                    .push(", updated_at + 1), times = times + 1, read_at = 0, actor_id = ")
+                    .push(", updated_at + 1), times = times + 1, read_at = 0, archived_at = 0, actor_id = ")
                     .bind(OptId(&event.actor_id))
                     .push_bind(
                         ", actor_token_name = ",
@@ -298,10 +292,7 @@ async fn made_by_one(
             " AND created_at > ",
             now.saturating_sub(limits.made_within_millis),
         );
-    match scope.fetch_optional(sql).await? {
-        Some(row) => row.int(0),
-        None => Ok(0),
-    }
+    Ok(scope.first(sql).await?.unwrap_or(0))
 }
 
 /// The doers of a line as it stores them (`doers`, a JSON list), with `doer` after
@@ -369,10 +360,7 @@ pub(crate) async fn keep_newest(
 ) -> Result<(), StoreError> {
     let mut sql = scope.sql("SELECT COUNT(*) FROM notifications WHERE recipient_id = ");
     sql.bind(Id(user_id));
-    let held = match scope.fetch_optional(sql).await? {
-        Some(row) => row.int(0)?,
-        None => 0,
-    };
+    let held: i64 = scope.first(sql).await?.unwrap_or(0);
     let over = held.saturating_sub(most);
     if over <= 0 {
         return Ok(());
@@ -392,19 +380,21 @@ pub(crate) async fn keep_newest(
     Ok(())
 }
 
-fn event_from_row(row: &Row) -> Result<NotificationEvent, StoreError> {
-    Ok(NotificationEvent {
-        org_id: row.id(0)?,
-        recipient_id: row.id(1)?,
-        kind: kind_from_row(row, 2)?,
-        source_id: row.id(3)?,
-        block_id: row.id(4)?,
-        container_id: row.id(5)?,
-        actor_id: row.id(6)?,
-        seq: row.int(7)?,
-        attempts: row.int(8)?,
-        actor_token_name: row.opt_text(9)?,
-    })
+impl FromRow for NotificationEvent {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(NotificationEvent {
+            org_id: row.id(0)?,
+            recipient_id: row.id(1)?,
+            kind: kind_from_row(row, 2)?,
+            source_id: row.id(3)?,
+            block_id: row.id(4)?,
+            container_id: row.id(5)?,
+            actor_id: row.id(6)?,
+            seq: row.int(7)?,
+            attempts: row.int(8)?,
+            actor_token_name: row.opt_text(9)?,
+        })
+    }
 }
 
 #[cfg(test)]

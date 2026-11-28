@@ -3,7 +3,7 @@
 //! trash may be named, and a card of a board the writer cannot see is answered as one
 //! that is not there.
 
-use fvoci_model::{Block, Card, Container, ContainerVisibility, new_id};
+use fvoci_model::{Card, Container, ContainerVisibility, new_id};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -125,18 +125,17 @@ async fn hidden_card(th: &TestServer) -> String {
 
 /// A view of the board: a block of it that is no card.
 async fn view_of(client: &Client, board_id: &str) -> String {
-    let created: Vec<Block> = client
+    let created: Value = client
         .post(
-            &format!("{TEST_WS}/boards/{board_id}/blocks"),
-            &json!([{
-                "id": "v", "containerId": board_id, "type": "view",
-                "title": "Table", "createdAt": 1, "updatedAt": 1,
-                "fields": {"viewType": "table"},
-            }]),
+            &format!("{TEST_WS}/boards/{board_id}/views"),
+            &json!({"title": "Table", "viewType": "table"}),
         )
         .await
         .created_json();
-    created[0].id.clone()
+    created["view"]["id"]
+        .as_str()
+        .expect("the view's identifier")
+        .to_owned()
 }
 
 fn link(card: &str) -> Value {
@@ -369,8 +368,7 @@ async fn a_card_in_the_trash_may_be_named_and_one_gone_for_good_may_not() {
     let Related { board, cards } = related_board(&th.client, 3).await;
     let (first, deleted, purged) = (&cards[0].id, &cards[1].id, &cards[2].id);
     for card in [deleted, purged] {
-        th.client
-            .delete(&format!("{TEST_WS}/boards/{}/blocks/{card}", board.id))
+        crate::blocks::trash_card(&th.client, &board.id, card)
             .await
             .check_no_content();
     }
@@ -378,11 +376,7 @@ async fn a_card_in_the_trash_may_be_named_and_one_gone_for_good_may_not() {
         .await
         .check_ok();
     // Gone for good: the purge removes what was deleted before now.
-    th.client
-        .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{deleted}/restore",
-            board.id
-        ))
+    crate::blocks::restore_card(&th.client, &board.id, deleted)
         .await
         .check_ok();
     th.app
@@ -420,100 +414,25 @@ async fn every_way_of_writing_a_card_checks_its_relations() {
         .await;
     check_refused(&created, REASON, "/properties");
 
-    let mut block = json!({
-        "id": "c", "containerId": "b", "type": "card", "title": "c",
-        "fields": {"properties": {RELATION: refused}},
-    });
-
-    let patched = th
-        .client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{card}", board.id),
-            &json!({"updatedFields": {"properties": {RELATION: refused}}}),
-        )
-        .await;
-    check_refused(&patched, REASON, "/updatedFields");
+    check_refused(
+        &patch_relation(&th.client, card, refused.clone()).await,
+        REASON,
+        "/updatedProperties",
+    );
 
     let batch = th
         .client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &json!({
-                "blockIds": [card],
-                "blockPatches": [{"updatedFields": {"properties": {RELATION: refused}}}],
-            }),
-        )
-        .await;
-    check_refused(&batch, REASON, "/blockPatches/0/updatedFields");
-
-    let both = th
-        .client
-        .patch(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containerIds": [board.id], "containerPatches": [{}],
-                "blockIds": [card],
-                "blockPatches": [{"updatedFields": {"properties": {RELATION: refused}}}],
-            }),
-        )
-        .await;
-    check_refused(&both, REASON, "/blockPatches/0/updatedFields");
-
-    block["containerId"] = json!("b");
-    block["parentId"] = json!("");
-    let new_board = th
-        .client
         .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{
-                    "id": "b", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private", "title": "new",
-                    "cardProperties": [{"id": RELATION, "type": "relation"}],
-                }],
-                "blocks": [block],
-            }),
+            &format!("{TEST_WS}/boards/{}/cards/batch-patch", board.id),
+            &json!({"cardIds": [card], "updatedProperties": {RELATION: refused}}),
         )
         .await;
-    check_refused(&new_board, REASON, "/blocks/0/fields");
+    check_refused(&batch, REASON, "/updatedProperties");
 
     assert_eq!(
         relation_of(&th.client, card).await,
         Value::Null,
         "nothing was stored"
-    );
-    th.teardown().await;
-}
-
-#[tokio::test]
-async fn new_cards_of_one_request_may_name_each_other() {
-    let th = Setup::native().start().await.init_basic().await;
-    let made: Value = th
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{
-                    "id": "nb", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private", "title": "new",
-                    "cardProperties": [{"id": RELATION, "type": "relation"}],
-                }],
-                "blocks": [
-                    {"id": "x", "containerId": "nb", "type": "card", "title": "x",
-                     "fields": {"properties": {RELATION: [{"card": "y", "kind": "sf", "lagDays": 4}]}}},
-                    {"id": "y", "containerId": "nb", "type": "card", "title": "y",
-                     "fields": {"properties": {RELATION: [{"card": "x"}]}}},
-                ],
-            }),
-        )
-        .await
-        .created_json();
-    let blocks = made["blocks"].as_array().expect("blocks");
-    assert_eq!(
-        blocks[0]["fields"]["properties"][RELATION],
-        json!([{"card": blocks[1]["id"], "kind": "sf", "lagDays": 4}])
-    );
-    assert_eq!(
-        blocks[1]["fields"]["properties"][RELATION],
-        json!([{"card": blocks[0]["id"], "kind": "fs", "lagDays": 0}])
     );
     th.teardown().await;
 }
@@ -639,69 +558,6 @@ async fn the_board_of_a_relation_is_the_board_of_the_card() {
         &patch_relation(&th.client, &card.id, json!([link(&cards[0].id)])).await,
         "relation_card_not_found",
         "/updatedProperties",
-    );
-    th.teardown().await;
-}
-
-/// A block that becomes a card has its relation values checked as written: nothing
-/// checked them while it was no card.
-#[tokio::test]
-async fn a_block_that_becomes_a_card_has_its_relations_checked() {
-    let th = Setup::native().start().await.init_basic().await;
-    let client = &th.client;
-    let Related { board, cards } = related_board(client, 1).await;
-    let blocks = format!("{TEST_WS}/boards/{}/blocks", board.id);
-    for (id, value) in [
-        ("odd", json!({RELATION: [link(&new_id())]})),
-        ("fine", json!({RELATION: [link(&cards[0].id)]})),
-    ] {
-        client
-            .post(
-                &blocks,
-                &json!([{
-                    "id": id, "containerId": board.id, "parentId": cards[0].id, "type": "attachment",
-                    "title": id,
-                    "fields": {"properties": value},
-                }]),
-            )
-            .await
-            .check_created();
-    }
-    let created: Vec<Block> = client.get(&blocks).await.ok_json();
-    let id_of = |title: &str| {
-        created
-            .iter()
-            .find(|block| block.title == title)
-            .map(|block| block.id.clone())
-            .expect("the attachment")
-    };
-    let to_card = json!({"type": "card"});
-    let odd = client
-        .patch(&format!("{blocks}/{}", id_of("odd")), &to_card)
-        .await;
-    odd.check_bad_request();
-    assert_eq!(odd.refused_at(), "/type", "{}", odd.text());
-    let fine = client
-        .patch(&format!("{blocks}/{}", id_of("fine")), &to_card)
-        .await;
-    fine.check_bad_request();
-    assert_eq!(fine.refused_at(), "/type", "{}", fine.text());
-    let after: Vec<Block> = client.get(&blocks).await.ok_json();
-    let type_of = |title: &str| {
-        after
-            .iter()
-            .find(|block| block.title == title)
-            .map(|block| block.block_type)
-    };
-    assert_eq!(
-        type_of("odd"),
-        Some(fvoci_model::BlockType::Attachment),
-        "odd stays attachment"
-    );
-    assert_eq!(
-        type_of("fine"),
-        Some(fvoci_model::BlockType::Attachment),
-        "fine stays attachment"
     );
     th.teardown().await;
 }

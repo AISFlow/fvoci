@@ -42,11 +42,11 @@ async fn impostor_template(client: &Client) -> Container {
 /// The titles of the cards of a board.
 async fn card_titles(ts: &TestServer, client: &Client, board_id: &str) -> Vec<String> {
     let _ = ts;
-    let blocks: Vec<Block> = client
-        .get(&format!("{ROOT_WS}/boards/{board_id}/blocks?type=card"))
+    let cards: Vec<fvoci_model::Card> = client
+        .get(&format!("{ROOT_WS}/boards/{board_id}/cards"))
         .await
         .ok_json();
-    blocks.into_iter().map(|block| block.title).collect()
+    cards.into_iter().map(|card| card.title).collect()
 }
 
 /// The built-in template that carries the onboarding mark, in the language the

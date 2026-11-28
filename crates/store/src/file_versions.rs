@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 
 use crate::Store;
 use crate::containers;
-use crate::db::{Dialect, Id, OptId, Row, Scope, SqlFragment};
+use crate::db::{Id, LockRank, OptId, Row, RowLock, Scope, SqlFragment};
 use crate::error::StoreError;
 use crate::files::check_new_path;
 use crate::loose_objects::{self, LooseState};
@@ -347,10 +347,11 @@ async fn hold(
     }
     let names: Vec<&str> = std::iter::once(stored_name).chain(upload).collect();
     let mut sql = Head::select(scope, container_id, &names);
-    sql.push(" ORDER BY id");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
+    sql.push(" ORDER BY id").push_lock(scope.row_lock(
+        LockRank::Container,
+        container_id,
+        RowLock::Update,
+    ));
     let (mut file, mut source) = (None, None);
     for row in scope.fetch_all(sql).await? {
         let (name, head) = Head::from_row(&row, scope)?;
@@ -378,7 +379,7 @@ async fn unusable(
     sql.bind(Id(container_id))
         .push_bind(" AND name = ", upload)
         .push(" LIMIT 1");
-    if scope.fetch_optional(sql).await?.is_some() {
+    if scope.exists(sql).await? {
         return Ok(Some(UnusableUpload::Shown));
     }
     if source.version != 1 || has_row(scope, &source.id, None).await? {
@@ -399,7 +400,7 @@ async fn has_row(
         sql.push_bind(" AND version = ", version);
     }
     sql.push(" LIMIT 1");
-    Ok(scope.fetch_optional(sql).await?.is_some())
+    scope.exists(sql).await
 }
 
 /// The versions kept of a file, the newest first: its rows, or its record alone while

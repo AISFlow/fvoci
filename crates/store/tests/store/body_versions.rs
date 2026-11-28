@@ -129,10 +129,7 @@ async fn texts(store: &Store, card_id: &str) -> Vec<(i64, String)> {
             .await
             .expect("read")
             .expect("a listed version is there");
-        texts.push((
-            kept.version,
-            body.map(|body| body.text()).unwrap_or_default(),
-        ));
+        texts.push((kept.version, body.map_or_default(|body| body.text())));
     }
     texts
 }
@@ -524,7 +521,7 @@ async fn the_body_of_a_page_is_kept_as_that_of_a_card() {
         )
         .await
         .expect("the page is made")
-        .page
+        .first
         .id;
     assert_eq!(texts(store, &page_id).await, [], "a page as it was made");
 

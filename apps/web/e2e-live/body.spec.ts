@@ -356,12 +356,12 @@ test('a card duplicated right after typing copies what was typed', async ({ page
   // the copy asked for at once: the room writes the card 2 s after the last change.
   await expect(page.getByTestId('card-save-state')).toHaveAttribute('data-state', 'saved');
   const copied = await api.post(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${cardId}/duplicate`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/duplicate`,
   );
   expect(copied.ok()).toBe(true);
-  const [copy] = (await copied.json()) as Schemas['Card'][];
+  const copy = (await copied.json()) as Schemas['Card'];
   await api.dispose();
-  expect(JSON.stringify(copy?.body ?? null)).toContain('Typed just now');
+  expect(JSON.stringify(copy.body ?? null)).toContain('Typed just now');
   expect(errors).toEqual([]);
 });
 
@@ -385,11 +385,14 @@ test('a board copied right after typing copies what was typed', async ({ page, b
   );
   expect(copied.ok()).toBe(true);
   const copyId = ((await copied.json()) as Schemas['ContainersAndBlocks']).containers[0]?.id ?? '';
-  const blocks = (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${copyId}/blocks`)
-  ).json()) as Schemas['Block'][];
-  const card = blocks.find((block) => block.type === 'card' && block.title === 'Original');
+  const cards = (await (
+    await api.get(`/api/v1/w/${board.workspaceId}/boards/${copyId}/cards`)
+  ).json()) as Schemas['Card'][];
+  const original = cards.find((one) => one.title === 'Original');
+  const card = (await (
+    await api.get(`/api/v1/w/${board.workspaceId}/cards/${original?.id ?? ''}`)
+  ).json()) as Schemas['Card'];
   await api.dispose();
-  expect(JSON.stringify(card?.body ?? null)).toContain('Typed just now');
+  expect(JSON.stringify(card.body ?? null)).toContain('Typed just now');
   expect(errors).toEqual([]);
 });

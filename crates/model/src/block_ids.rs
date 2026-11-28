@@ -99,7 +99,8 @@ pub(crate) fn renew_block_ids_told(
 
 /// Collects every non-empty block identifier that `block` references (its board, its
 /// parent, its `cardOrder`/`contentOrder`/`defaultTemplateId` fields, its card relation
-/// values under `relations`, and references inside its body) into `out`.
+/// values under `relations`, and the references and board views inside its body) into
+/// `out`.
 ///
 /// Matches [`renew_block_ids`]: when `contentOrder` is present and not a JSON array,
 /// collection stops before inspecting `defaultTemplateId`, as renewing does.
@@ -119,7 +120,7 @@ pub fn collect_block_references<S: BuildHasher>(
     insert(&block.container_id);
     insert(&block.parent_id);
     if let Some(body) = &block.body {
-        for id in body.reference_ids() {
+        for id in body.linked_ids() {
             insert(id);
         }
     }
@@ -214,12 +215,13 @@ fn rewrite_block_non_relation_ids<S: BuildHasher>(
         renamed_or_same(template_id);
     }
     if let Some(body) = block.body.as_mut() {
-        body.rename_references(|id| renamed.get(id).cloned());
+        body.rename_links(|id| renamed.get(id).cloned());
     }
 }
 
 /// What the blocks refer to by identifier ([`generate_block_ids`]): boards, parents,
-/// what the order and template fields and card relations name, and what bodies name.
+/// what the order and template fields and card relations name, and what bodies name and
+/// show ([`Body::linked_ids`](crate::Body::linked_ids)).
 fn referenced_ids<'b>(blocks: &'b [Block], relations: &RelationProperties) -> HashSet<&'b str> {
     let mut referenced: HashSet<&str> = HashSet::new();
     for block in blocks {
@@ -227,7 +229,7 @@ fn referenced_ids<'b>(blocks: &'b [Block], relations: &RelationProperties) -> Ha
         referenced.insert(&block.container_id);
         referenced.insert(&block.parent_id);
         if let Some(body) = &block.body {
-            referenced.extend(body.reference_ids());
+            referenced.extend(body.linked_ids());
         }
         // A view's card order names cards that nothing else may refer to: a card whose
         // content is its body has no blocks below it.

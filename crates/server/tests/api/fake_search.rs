@@ -283,8 +283,7 @@ impl FakeSearch {
         let indices = self.state.indices.lock().expect("the indices");
         indices
             .get(name)
-            .map(|index| index.documents.clone())
-            .unwrap_or_default()
+            .map_or_default(|index| index.documents.clone())
     }
 
     /// Every request so far, the first first.

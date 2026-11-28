@@ -98,9 +98,7 @@ async function ganttViews(
   board: { workspaceId: string; boardId: string },
 ): Promise<Schemas['Block'][]> {
   const views = (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-      params: { type: 'view' },
-    })
+    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`)
   ).json()) as Schemas['Block'][];
   return views.filter((view) => view.fields.viewType === 'gantt');
 }
@@ -208,8 +206,9 @@ test('the dependencies and the zoom chosen on the page are kept by the server, a
       { card: scrapped, kind: 'fs', lagDays: 0 },
     ],
   });
-  const deleted = await api.delete(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${scrapped}`,
+  const deleted = await api.post(
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/batch-delete`,
+    { data: { cardIds: [scrapped] } },
   );
   expect(deleted.ok(), await deleted.text()).toBe(true);
   await page.reload();
@@ -279,29 +278,24 @@ test('"display by" chosen for a view that named no date can be taken back on the
     start: { from: '2026-11-03' },
   });
   // A view as another client may have stored it: a Gantt chart that names no date.
-  const made = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        type: 'view',
-        title: 'Bare Gantt',
-        createdAt: 1,
-        updatedAt: 1,
-        fields: {
-          viewType: 'gantt',
-          sort: [],
-          shownProperties: ['__title'],
-          visibleGroups: [],
-          hiddenGroups: [],
-          collapsedGroups: [],
-          cardOrder: [],
-          filter: { operation: 'and', filters: [] },
-        },
+  const made = await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`, {
+    data: {
+      title: 'Bare Gantt',
+      viewType: 'gantt',
+      fields: {
+        viewType: 'gantt',
+        sort: [],
+        shownProperties: ['__title'],
+        visibleGroups: [],
+        hiddenGroups: [],
+        collapsedGroups: [],
+        cardOrder: [],
+        filter: { operation: 'and', filters: [] },
       },
-    ],
+    },
   });
   expect(made.ok(), await made.text()).toBe(true);
-  const viewId = ((await made.json()) as Schemas['Block'][])[0]?.id ?? '';
+  const viewId = ((await made.json()) as Schemas['BoardViewWrite']).view.id;
   const fields = (): Promise<Record<string, unknown>> => storedFields(api, board, viewId);
 
   await page.clock.setFixedTime(new Date('2026-11-10T00:00:00Z'));

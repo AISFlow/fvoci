@@ -16,6 +16,7 @@ import { TableMap } from '@tiptap/pm/tables';
 
 import { m } from '$lib/i18n/paraglide/messages.js';
 
+import { takesDocumentBlocks } from './details.ts';
 import type { SlashEntry } from './slash-menu.ts';
 import { MAX_TABLE_COLUMNS, MAX_TABLE_ROWS } from './table-grid.ts';
 
@@ -38,7 +39,9 @@ export function tableEntries(editor: Editor): SlashEntry[] {
   const { selection } = editor.state;
   const around = tableAround(selection);
   if (!around) {
-    if (selection.$from.depth !== 1) return [];
+    // A table stands only where a toggle does: on a line of the document or of a toggle's content.
+    const { $from } = selection;
+    if ($from.depth < 1 || !takesDocumentBlocks($from.node($from.depth - 1))) return [];
     return [
       {
         value: 'table',

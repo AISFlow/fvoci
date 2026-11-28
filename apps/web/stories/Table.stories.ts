@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/svelte';
 import { expect, waitFor } from 'storybook/test';
 import ViewSample from './ViewSample.svelte';
-import { clickStory, storyElement } from './interactions.ts';
+import { clickStory, selectTwo, storyElement } from './interactions.ts';
 
 const meta = {
   title: 'Views/Table',
@@ -34,4 +34,28 @@ export const OpenCard: Story = {
       ),
     );
   },
+};
+
+export const Selected: Story = {
+  play: async ({ canvasElement }) => {
+    await selectTwo(canvasElement, {
+      first: '[data-row="example-card-1"] [data-kind="title"]',
+      menu: '[data-more="example-card-1"]',
+      second: '[data-row="example-card-2"] [data-kind="title"]',
+    });
+  },
+};
+export const SelectedNarrow: Story = {
+  args: { narrow: true },
+  play: Selected.play,
+};
+/** A whom, a status and a due date: three buttons beside the menu and ✕, on the narrowest phone. */
+export const SelectedNarrowest: Story = {
+  args: { quick: true, width: 320 },
+  play: Selected.play,
+};
+/** Just wide enough for the words, which give way to keep ✕ in view. */
+export const SelectedMiddle: Story = {
+  args: { quick: true, width: 720 },
+  play: Selected.play,
 };

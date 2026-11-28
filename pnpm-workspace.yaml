@@ -27,9 +27,12 @@ peerDependencyRules:
   allowedVersions:
     openapi-typescript>typescript: '6'
 
-# typescript-eslint 8.72.2 pulls minimatch <11.0.1 through @typescript-eslint/typescript-estree
-# (GHSA-g3hv-75wg-m249 affects >=7.0.0 <11.0.1): upgrade only that vulnerable range so older
-# CJS/default-export consumers on minimatch 3 and 5 stay compatible.
+# @sveltejs/mcp 0.1.31, whose autofixer web `check` runs, lints with ESLint 9 of its own
+# (upstream names eslint ^9), and eslint 9 is marked deprecated. Accepted for that one
+# version, not overridden: an ESLint 10 under the autofixer could change what it
+# reports unseen. Remove this once a release of @sveltejs/mcp takes ESLint 10.
+allowedDeprecatedVersions:
+  eslint: '9.39.5'
+
 overrides:
   katex: '0.19.1'
-  minimatch@>=7.0.0 <11.0.1: '>=11.0.1'

@@ -109,6 +109,18 @@ describe('the menu of a row', () => {
 
   it('offers a reader who may only look the card and its link', () => {
     expect(ids(rowMenu(row({ canEdit: false })))).toEqual(['open', 'copyLink']);
+    expect(ids(rowMenu(row({ canEdit: false, onSelect: vi.fn() })))).toEqual(['open', 'copyLink']);
+  });
+
+  it('selects the row before deleting, and says when it is selected', () => {
+    const onSelect = vi.fn();
+    const actions = rowMenu(row({ onSelect }));
+    expect(ids(actions)).toEqual(['open', 'duplicate', 'copyLink', 'select', 'delete']);
+    expect(actions.find((action) => action.id === 'select')?.label).toBe('Select');
+    run(actions, 'select');
+    expect(onSelect).toHaveBeenCalledOnce();
+    const again = rowMenu(row({ onSelect, selected: true }));
+    expect(again.find((action) => action.id === 'select')?.label).toBe('Deselect');
   });
 
   it('tells the caller what was chosen', () => {

@@ -88,8 +88,10 @@
         type="button"
         class="underline underline-offset-4 roomy:py-3"
         data-testid="sso-open-linked"
-        onclick={onOpenLinked}>{m.account_linked_open()}</button
+        onclick={onOpenLinked}
       >
+        {m.account_linked_open()}
+      </button>
     </p>
     {#if others.length > 0}
       <nav class="grid gap-1 border-t pt-3 text-sm" aria-labelledby="{uid}-others">
@@ -102,8 +104,10 @@
                 href={other.href}
                 onclick={(event) => {
                   follow(event, other.id);
-                }}>{nameOfWorkspace(other, m.account_sso_other_unnamed)}</a
+                }}
               >
+                {nameOfWorkspace(other, m.account_sso_other_unnamed)}
+              </a>
             </li>
           {/each}
         </ul>

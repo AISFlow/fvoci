@@ -8,25 +8,26 @@
 use axum::body::Bytes;
 use axum::extract::Path;
 use fvoci_model::{
-    Block, BlockError, Container, ContainerKind, ContainerVisibility, DeletedUnit, MinimumRole,
-    NewUnit, Unit, UnitKind, UnitMove, UnitNode, UnitPatch,
+    Block, Container, ContainerKind, ContainerVisibility, DeletedUnit, MinimumRole, NewUnit, Unit,
+    UnitMove, UnitNode, UnitPatch, UnitWithReactions,
 };
 use serde::Deserialize;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use super::cards::{BodyFormatValue, BodyQuery};
 use super::contract::params::Page as PageNumber;
-use super::contract::params::{CourseId, MemberWorkspaceId, PerPage, UnitId};
+use super::contract::params::{BodyFormat, CourseId, MemberWorkspaceId, PerPage, UnitId};
 use super::contract::tag;
 use super::query::{PagingQuery, QueryParams};
 use super::workspace::{InCourse, InWorkspace};
-use super::{
-    ApiResult, created, decode_object, decode_with_document, json_response, no_content,
-    require_container_permission,
-};
+use super::{ApiResult, created, decode_object, decode_with_document, json_response, no_content};
 use super::{Delegated, Read, Write};
-use crate::app::{App, ChangeNotification};
+use crate::app::{
+    App, CREATE_UNIT_DENIED, DELETE_UNIT_DENIED, MOVE_UNIT_DENIED, PATCH_UNIT_DENIED, Reached,
+    UNIT_TRASH_DENIED,
+};
 use crate::error::AppError;
 use crate::permissions::ContainerPermission;
 
@@ -145,23 +146,39 @@ pub(super) async fn unit_with_permission(
     permission: ContainerPermission,
     denial: &str,
 ) -> Result<Block, AppError> {
-    require_container_permission(&ws.app, &ws.caller.user_id, course_id, permission, denial)
-        .await?;
-    ws.app.unit_of(course_id, unit_id).await
+    let (_, unit) = unit_reached(ws, course_id, unit_id, permission, denial).await?;
+    Ok(unit)
 }
 
-/// Returns the unit (not a chapter) of the course for a handler that applies only to units
-/// with bodies (comments, body versions), if the user has the permission on the course.
-pub(super) async fn content_unit_with_permission(
+/// The course as the caller reached it and its unit or chapter, as
+/// [`unit_with_permission`] finds them: for a route that writes the unit, which the
+/// course's [`Reached`] is asked for.
+pub(super) async fn unit_reached(
     ws: &InWorkspace,
     course_id: &str,
     unit_id: &str,
     permission: ContainerPermission,
     denial: &str,
-) -> Result<Block, AppError> {
-    require_container_permission(&ws.app, &ws.caller.user_id, course_id, permission, denial)
-        .await?;
-    ws.app.content_unit_of(course_id, unit_id).await
+) -> Result<(Reached, Block), AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    on.require(permission, denial)?;
+    let unit = ws.app.unit_of(course_id, unit_id).await?;
+    Ok((on, unit))
+}
+
+/// Returns the unit (not a chapter) of the course for a handler that applies only to units
+/// with bodies (comments, body versions), if the user has the permission on the course.
+pub(super) async fn content_unit_reached(
+    ws: &InWorkspace,
+    course_id: &str,
+    unit_id: &str,
+    permission: ContainerPermission,
+    denial: &str,
+) -> Result<(Reached, Block), AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    on.require(permission, denial)?;
+    let unit = ws.app.content_unit_of(course_id, unit_id).await?;
+    Ok((on, unit))
 }
 
 /// The outline of a course
@@ -196,14 +213,8 @@ pub(super) async fn unit_tree_read(
     ws: &InWorkspace,
     course_id: &str,
 ) -> Result<Vec<UnitNode>, AppError> {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        course_id,
-        ContainerPermission::View,
-        "access denied to fetch units",
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    on.require(ContainerPermission::View, "access denied to fetch units")?;
     ws.app.unit_tree(course_id).await
 }
 
@@ -246,6 +257,45 @@ async fn handle_create_unit(
     Ok(created(&create_unit_from(&ws, &course_id, &body).await?))
 }
 
+/// Makes the unit or chapter `new` describes in the course `course_id`, as `createUnit`
+/// does with the body it read: for what writes as the route does.
+///
+/// # Errors
+///
+/// As `createUnit` answers.
+pub(super) async fn create_unit_with(
+    ws: &InWorkspace,
+    course_id: &str,
+    new: &NewUnit,
+) -> Result<Unit, AppError> {
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    let unit = ws.app.create_unit(&on, new).await?;
+    tracing::debug!(course_id, unit_id = %unit.id, user_id = on.user_id(), "CreateUnit");
+    Ok(unit)
+}
+
+/// Changes the unit or chapter `unit_id` of the course `course_id` as `patch` says, as
+/// `patchUnit` does with the body it read: for what writes as the route does.
+///
+/// # Errors
+///
+/// As `patchUnit` answers.
+pub(super) async fn patch_unit_with(
+    ws: &InWorkspace,
+    course_id: &str,
+    unit_id: &str,
+    patch: UnitPatch,
+) -> Result<Unit, AppError> {
+    let editing = ContainerPermission::ManageCards;
+    let (on, unit) = unit_reached(ws, course_id, unit_id, editing, PATCH_UNIT_DENIED).await?;
+    let patched = ws
+        .app
+        .patch_unit(&on, &unit, patch, ws.caller.agent())
+        .await?;
+    tracing::debug!(course_id, unit_id, user_id = on.user_id(), "PatchUnit");
+    Ok(patched)
+}
+
 /// Makes the unit or chapter `body` describes, as `createUnit` takes it, in the course
 /// `course_id`.
 ///
@@ -257,37 +307,31 @@ pub(super) async fn create_unit_from(
     course_id: &str,
     body: &Bytes,
 ) -> Result<Unit, AppError> {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        course_id,
-        ContainerPermission::ManageCards,
-        "access denied to create unit",
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, course_id).await?;
+    // Asked before the body is read, as every route asks.
+    on.require(ContainerPermission::ManageCards, CREATE_UNIT_DENIED)?;
     let new: NewUnit = decode_object(body)?;
-    new.check_request()?;
-    let unit = ws.app.create_unit(course_id, &new, user_id).await?;
-    tracing::debug!(course_id, unit_id = %unit.id, user_id, "CreateUnit");
+    let unit = ws.app.create_unit(&on, &new).await?;
+    tracing::debug!(course_id, unit_id = %unit.id, user_id = on.user_id(), "CreateUnit");
     Ok(unit)
 }
 
 /// A unit or chapter
 ///
 /// The unit with its body, or the chapter (`body` is `null`), for whoever reads its
-/// course.
+/// course; a unit with its `reactions` where it has any.
 #[utoipa::path(
     get,
     path = "/w/{workspaceId}/courses/{courseId}/units/{unitId}",
     operation_id = "getUnit",
     tag = tag::COURSES,
-    params(MemberWorkspaceId, CourseId, UnitId),
-    responses((status = 200, description = "The unit or chapter.", body = Unit)),
+    params(MemberWorkspaceId, CourseId, UnitId, BodyFormat),
+    responses((status = 200, description = "The unit or chapter.", body = UnitWithReactions)),
 )]
 async fn handle_get_unit(
     Delegated(InCourse(ws), ..): Delegated<Read, InCourse>,
     Path((_, course_id, unit_id)): Path<(String, String, String)>,
+    QueryParams(query): QueryParams<BodyQuery>,
 ) -> ApiResult {
     let block = unit_with_permission(
         &ws,
@@ -297,7 +341,14 @@ async fn handle_get_unit(
         READ_DENIED,
     )
     .await?;
-    Ok(json_response(&Unit::from(block)))
+    let reactions = ws.app.reactions_to(&block.id).await?;
+    let mut unit = Unit::from(block);
+    if query.format == BodyFormatValue::Markdown {
+        ws.app
+            .put_unit_in_markdown(ws.markdown_reader(), &mut unit)
+            .await?;
+    }
+    Ok(json_response(&UnitWithReactions { unit, reactions }))
 }
 
 /// Change a unit or chapter
@@ -341,37 +392,16 @@ pub(super) async fn patch_unit_from(
     unit_id: &str,
     body: &Bytes,
 ) -> Result<Unit, AppError> {
-    let user_id = ws.caller.user_id.as_str();
-    let unit = unit_with_permission(
-        ws,
-        course_id,
-        unit_id,
-        ContainerPermission::ManageCards,
-        "access denied to patch unit",
-    )
-    .await?;
+    let editing = ContainerPermission::ManageCards;
+    let (on, unit) = unit_reached(ws, course_id, unit_id, editing, PATCH_UNIT_DENIED).await?;
     let (mut patch, document): (UnitPatch, _) = decode_with_document(body)?;
     patch.body = document;
-    let kind = UnitKind::of_block(&unit.block_type).unwrap_or_default();
-    if kind == UnitKind::Chapter && !patch.body.is_keep() {
-        return Err(AppError::from(BlockError::BodyNotAllowed));
-    }
-    patch.check_request_for(kind)?;
-    ws.app
-        .check_body_files(course_id, patch.body.new_body())
-        .await?;
     let patched = ws
         .app
-        .patch_block_as(
-            &unit.id,
-            &patch.into_block_patch(),
-            user_id,
-            ChangeNotification::Send,
-            ws.caller.agent(),
-        )
+        .patch_unit(&on, &unit, patch, ws.caller.agent())
         .await?;
-    tracing::debug!(course_id, unit_id, user_id, "PatchUnit");
-    Ok(Unit::from(patched))
+    tracing::debug!(course_id, unit_id, user_id = on.user_id(), "PatchUnit");
+    Ok(patched)
 }
 
 /// Move a unit or chapter
@@ -401,18 +431,11 @@ async fn handle_move_unit(
     Path((_, course_id, unit_id)): Path<(String, String, String)>,
     body: Bytes,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let unit = unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::ManageCards,
-        "access denied to move unit",
-    )
-    .await?;
+    let editing = ContainerPermission::ManageCards;
+    let (on, unit) = unit_reached(&ws, &course_id, &unit_id, editing, MOVE_UNIT_DENIED).await?;
     let to: UnitMove = decode_object(&body)?;
-    let moved = ws.app.move_unit(&course_id, &unit.id, &to, user_id).await?;
-    tracing::debug!(course_id, unit_id, user_id, "MoveUnit");
+    let moved = ws.app.move_unit(&on, &unit, &to).await?;
+    tracing::debug!(course_id, unit_id, user_id = on.user_id(), "MoveUnit");
     Ok(json_response(&moved))
 }
 
@@ -433,19 +456,11 @@ async fn handle_delete_unit(
     InCourse(ws): InCourse,
     Path((_, course_id, unit_id)): Path<(String, String, String)>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let unit = unit_with_permission(
-        &ws,
-        &course_id,
-        &unit_id,
-        ContainerPermission::ManageCards,
-        "access denied to delete unit",
-    )
-    .await?;
-    ws.app
-        .delete_block(&unit.id, user_id, ChangeNotification::Send)
-        .await?;
-    tracing::debug!(course_id, unit_id, user_id, "DeleteUnit");
+    let editing = ContainerPermission::ManageCards;
+    let denial = DELETE_UNIT_DENIED;
+    let (on, unit) = unit_reached(&ws, &course_id, &unit_id, editing, denial).await?;
+    ws.app.delete_unit(&on, &unit).await?;
+    tracing::debug!(course_id, unit_id, user_id = on.user_id(), "DeleteUnit");
     Ok(no_content())
 }
 
@@ -470,18 +485,11 @@ async fn handle_get_deleted_units(
     Path((_, course_id)): Path<(String, String)>,
     QueryParams(query): QueryParams<PagingQuery>,
 ) -> ApiResult {
-    require_container_permission(
-        &ws.app,
-        &ws.caller.user_id,
-        &course_id,
-        ContainerPermission::ManageCards,
-        "access denied to the trash of the course",
-    )
-    .await?;
+    let on = ws.app.reach(&ws.caller.user_id, &course_id).await?;
+    // Asked before the query is read, as every route asks.
+    on.require(ContainerPermission::ManageCards, UNIT_TRASH_DENIED)?;
     let page = query.into_list_page()?;
-    Ok(json_response(
-        &ws.app.deleted_units(&course_id, page).await?,
-    ))
+    Ok(json_response(&ws.app.deleted_units(&on, page).await?))
 }
 
 /// Bring back a unit or chapter
@@ -508,16 +516,8 @@ async fn handle_restore_unit(
     InCourse(ws): InCourse,
     Path((_, course_id, unit_id)): Path<(String, String, String)>,
 ) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    require_container_permission(
-        &ws.app,
-        user_id,
-        &course_id,
-        ContainerPermission::ManageCards,
-        "access denied to undelete unit",
-    )
-    .await?;
-    let unit = ws.app.undelete_unit(&course_id, &unit_id, user_id).await?;
-    tracing::debug!(course_id, unit_id, user_id, "UndeleteUnit");
+    let on = ws.app.reach(&ws.caller.user_id, &course_id).await?;
+    let unit = ws.app.undelete_unit(&on, &unit_id).await?;
+    tracing::debug!(course_id, unit_id, user_id = on.user_id(), "UndeleteUnit");
     Ok(json_response(&unit))
 }

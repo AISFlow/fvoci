@@ -98,9 +98,9 @@
       <ul class="grid gap-2">
         {#each organizations as organization (organization.orgId)}
           <li class="flex min-h-8 items-center gap-3 roomy:min-h-touch">
-            <span class="min-w-0 flex-1 truncate" title={organization.name}
-              >{organization.name}</span
-            >
+            <span class="min-w-0 flex-1 truncate" title={organization.name}>
+              {organization.name}
+            </span>
             <Button
               variant="outline"
               class="roomy:min-h-touch"

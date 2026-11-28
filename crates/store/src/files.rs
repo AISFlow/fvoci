@@ -7,7 +7,7 @@
 use fvoci_model::FileRecord;
 
 use crate::Store;
-use crate::db::{Dialect, Id, OptId, Row, Scope, SqlFragment};
+use crate::db::{Dialect, FromRow, Id, LockRank, OptId, Row, RowLock, Scope, SqlFragment};
 use crate::error::StoreError;
 
 pub(crate) const FILE_COLUMNS: &str =
@@ -32,11 +32,7 @@ impl Store {
             let mut sql = scope.sql(["SELECT ", FILE_COLUMNS, " FROM files WHERE container_id = "]);
             sql.bind(Id(container_id))
                 .push_bind(" AND name = ", stored_name);
-            let row = scope
-                .fetch_optional(sql)
-                .await?
-                .ok_or_else(|| StoreError::not_found("file"))?;
-            file_from_row(&row)
+            scope.one(sql, "file").await
         })
         .await
     }
@@ -53,12 +49,7 @@ impl Store {
         self.with_conn(async |scope| {
             let mut sql = scope.sql(["SELECT ", FILE_COLUMNS, " FROM files WHERE container_id = "]);
             sql.bind(Id(container_id)).push(" ORDER BY created_at, id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(file_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -77,11 +68,7 @@ impl Store {
                  ON w.id = c.workspace_id WHERE c.id = ",
             );
             sql.bind(Id(container_id));
-            let row = scope
-                .fetch_optional(sql)
-                .await?
-                .ok_or_else(|| StoreError::not_found("board"))?;
-            row.id(0)
+            scope.one(sql, "board").await
         })
         .await
     }
@@ -154,10 +141,7 @@ impl Store {
                     sql
                 }
             };
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -206,12 +190,7 @@ impl Store {
                 .bind(after)
                 .push_bind(" ORDER BY path LIMIT ", limit)
                 .push_bind(") AS versions) AS recorded ORDER BY path LIMIT ", limit);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.text(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -332,31 +311,27 @@ pub(crate) async fn files_of_container(
     container_id: &str,
 ) -> Result<Vec<FileRecord>, StoreError> {
     let mut sql = scope.sql(["SELECT ", FILE_COLUMNS, " FROM files WHERE container_id = "]);
-    sql.bind(Id(container_id)).push(" ORDER BY created_at, id");
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR UPDATE");
-    }
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(file_from_row)
-        .collect()
+    sql.bind(Id(container_id))
+        .push(" ORDER BY created_at, id")
+        .push_lock(scope.row_lock(LockRank::Container, container_id, RowLock::Update));
+    scope.all(sql).await
 }
 
-pub(crate) fn file_from_row(row: &Row) -> Result<FileRecord, StoreError> {
-    Ok(FileRecord {
-        id: row.id(0)?,
-        container_id: row.id(1)?,
-        stored_name: row.text(2)?,
-        name: row.text(3)?,
-        extension: row.text(4)?,
-        size: row.int(5)?,
-        path: row.text(6)?,
-        created_at: row.int(7)?,
-        version: row.int(8)?,
-        created_by: row.id(9)?,
-    })
+impl FromRow for FileRecord {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(FileRecord {
+            id: row.id(0)?,
+            container_id: row.id(1)?,
+            stored_name: row.text(2)?,
+            name: row.text(3)?,
+            extension: row.text(4)?,
+            size: row.int(5)?,
+            path: row.text(6)?,
+            created_at: row.int(7)?,
+            version: row.int(8)?,
+            created_by: row.id(9)?,
+        })
+    }
 }
 
 #[cfg(test)]

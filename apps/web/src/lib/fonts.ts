@@ -14,10 +14,16 @@
 /** The Latin family lists a handful of ranges: part of the main style sheet. */
 import.meta.glob('../styles/fonts/faces-noto-sans.css', { eager: true });
 
-const lazySheets = import.meta.glob<unknown>([
-  '../styles/fonts/faces-*.css',
-  '!../styles/fonts/faces-noto-sans.css',
-]);
+/**
+ * The other families' sheets, by their addresses: linked when wanted, not
+ * imported as modules. The Korean sheet is the frames' too (viewer-frame,
+ * editor-frame), and imported from here as well it would come as a script of
+ * its own before the sheet.
+ */
+const lazySheets = import.meta.glob<string>(
+  ['../styles/fonts/faces-*.css', '!../styles/fonts/faces-noto-sans.css'],
+  { query: '?url', import: 'default', eager: true },
+);
 
 type Region = 'kr' | 'jp' | 'sc' | 'tc';
 
@@ -33,8 +39,13 @@ export function regionOf(language: string): Region | undefined {
 }
 
 function load(id: string): void {
-  // A failed request leaves system fonts in place; there is nothing to recover.
-  lazySheets[`../styles/fonts/faces-${id}.css`]?.().catch(() => undefined);
+  const href = lazySheets[`../styles/fonts/faces-${id}.css`];
+  if (href === undefined) return;
+  // A sheet that fails to load leaves system fonts in place; there is nothing to recover.
+  const sheet = document.createElement('link');
+  sheet.rel = 'stylesheet';
+  sheet.href = href;
+  document.head.append(sheet);
 }
 
 function whenIdle(task: () => void): void {

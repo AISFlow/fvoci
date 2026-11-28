@@ -630,6 +630,12 @@ impl<'doc> WireBuilder<'doc> {
                             enc.write_u8(if truth { 120 } else { 121 });
                         });
                     }
+                    Fallback::Text(text) => {
+                        self.writer.emit_item(attr_spec, |enc| {
+                            enc.write_len(1);
+                            Any::from(text).encode(enc);
+                        });
+                    }
                 },
             }
         }

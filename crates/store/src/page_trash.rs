@@ -12,20 +12,9 @@ use fvoci_model::{
 
 use crate::blocks::Paging;
 use crate::db::{Id, Scope};
-use crate::pages::{page_tree, write_place};
+use crate::pages::{Written, page_tree, write_place};
 use crate::trash::{block_from_json, block_not_in_trash, take_blocks_out_of_trash};
 use crate::{Store, StoreError, containers};
-
-/// What bringing a page back changed: the pages that came back, a parent before what is
-/// below it, the page asked for first; and the pages numbered anew to leave it room.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PageRestore {
-    /// The pages brought back, as they are stored, and the comments on them that went
-    /// with them.
-    pub pages: Vec<Block>,
-    /// The pages numbered anew, as they are stored.
-    pub renumbered: Vec<Block>,
-}
 
 impl Store {
     /// The pages of the wiki in the trash at the top of what was deleted with them, the
@@ -108,7 +97,7 @@ impl Store {
         page_id: &str,
         limits: PageLimits,
         user_id: &str,
-    ) -> Result<PageRestore, StoreError> {
+    ) -> Result<Written, StoreError> {
         self.transaction(async |scope| {
             // The wiki first, then the trash read under its lock: a page restored
             // meanwhile is not in it any more.
@@ -192,7 +181,7 @@ async fn undelete(
     deletion: Deletion,
     limits: PageLimits,
     user_id: &str,
-) -> Result<PageRestore, StoreError> {
+) -> Result<Written, StoreError> {
     let invalid = |source| StoreError::InvalidBlock {
         id: page_id.to_owned(),
         source,
@@ -237,10 +226,6 @@ async fn undelete(
         }
     })
     .await?;
-    // Emptied of it meanwhile (`purge_trash` takes no lock): nothing is written.
-    if !pages.iter().any(|block| block.id == page_id) {
-        return Err(block_not_in_trash());
-    }
     // The page asked for first, then parents before what is below them: a comment is
     // one below its page.
     pages.sort_by_key(|block| {
@@ -251,7 +236,16 @@ async fn undelete(
         };
         (block.id != page_id, depth)
     });
-    Ok(PageRestore { pages, renumbered })
+    // Emptied of it meanwhile (`purge_trash` takes no lock): nothing is written.
+    let mut pages = pages.into_iter();
+    let Some(first) = pages.next().filter(|block| block.id == page_id) else {
+        return Err(block_not_in_trash());
+    };
+    Ok(Written {
+        first,
+        renumbered,
+        below: pages.collect(),
+    })
 }
 
 /// Where a block coming back below its parent goes when a sibling has taken its order

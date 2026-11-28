@@ -47,8 +47,10 @@
       <Button
         class="roomy:min-h-touch"
         data-testid="revert-email-submit"
-        onclick={() => (reverting = revert(token))}>{m.revert_email_submit()}</Button
+        onclick={() => (reverting = revert(token))}
       >
+        {m.revert_email_submit()}
+      </Button>
     {/snippet}
     {#if !token}
       <p role="alert">{m.revert_email_invalid()}</p>
@@ -69,9 +71,13 @@
           {/if}
         </div>
         {#if email}
-          <Button href={resetHref(email)} class="roomy:min-h-touch" data-testid="revert-email-reset"
-            >{m.revert_email_reset()}</Button
+          <Button
+            href={resetHref(email)}
+            class="roomy:min-h-touch"
+            data-testid="revert-email-reset"
           >
+            {m.revert_email_reset()}
+          </Button>
         {/if}
       {:catch error}
         {#if linkRefused(error)}
@@ -83,8 +89,8 @@
         {/if}
       {/await}
     {/if}
-    <a href={homeHref} class="text-center text-sm underline underline-offset-4"
-      >{m.reset_sign_in()}</a
-    >
+    <a href={homeHref} class="text-center text-sm underline underline-offset-4">
+      {m.reset_sign_in()}
+    </a>
   </div>
 </main>

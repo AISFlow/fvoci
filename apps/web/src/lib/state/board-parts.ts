@@ -1,11 +1,13 @@
 /**
  * What the board store is built on besides the backend: a board of the
  * workspace shown, a member's effective role, adding a member,
- * the place of a drop, the card a copy is made as.
+ * the place of a drop, the card a copy is made as, the cards a view shows.
  */
-import { cardsOfView, filteredCardsOfView, narrowCardsBySearch } from '../logic/card-list.ts';
+import { filteredCardsOfView, narrowCardsBySearch } from '../logic/card-list.ts';
 import { getVisibleAndHiddenGroups, type BoardGroups, type NoValueLabel } from '../logic/group.ts';
 import { propertyBehavior } from '../logic/properties.ts';
+import { applyQuickFilters } from '../logic/quick-filter.ts';
+import type { Weekday } from '../logic/regional.ts';
 import {
   viewGrouping,
   viewQuery,
@@ -20,6 +22,8 @@ import {
 } from '../logic/wire.ts';
 
 import type { Backend, CardSummary } from './backend.ts';
+import { quickFilters } from './board-quick.svelte.ts';
+import { DeviceToday } from './device-today.svelte.ts';
 import { BackendError } from './problems.ts';
 
 /**
@@ -146,6 +150,9 @@ export function groupsOfView(
 
 /** What a board view needs from a board store to filter and order its cards. */
 export interface BoardCardsSource {
+  readonly boardId: string;
+  /** Counts the visits to the board (board-quick.svelte.ts). */
+  readonly visit?: number;
   readonly realCards: readonly CardSummary[];
   readonly board: Container | undefined;
   readonly cardsById: ReadonlyMap<string, CardSummary>;
@@ -153,23 +160,58 @@ export interface BoardCardsSource {
     userName(userId: string): string | undefined;
     readonly me?: { readonly id: string } | undefined;
     readonly locale: string;
-    readonly regional: { readonly timeZone: string };
+    readonly regional: { readonly timeZone: string; readonly weekStart: Weekday };
   };
 }
 
-/** Stage 1: cards of a view filtered and sorted, independent of search text (§1.2.4). */
+type Reader = BoardCardsSource['workspace'];
+
+/** Today on the device of each reader, read again at their midnight. */
+const todays = new WeakMap<Reader, DeviceToday>();
+
+function todayOf(workspace: Reader): DeviceToday {
+  let today = todays.get(workspace);
+  if (!today) {
+    today = new DeviceToday(() => workspace.regional.timeZone);
+    todays.set(workspace, today);
+  }
+  return today;
+}
+
+/**
+ * Stage 1: cards of a view filtered by the view's filter and sorted, then
+ * narrowed by the reader's quick filters (lib/logic/quick-filter.ts),
+ * independent of search text (§1.2.4). A card the reader made while the
+ * chips are on stays whatever they are (board-quick.svelte.ts). Today is the
+ * device's, so that the periods and "Overdue" move on at midnight.
+ */
 export function filteredCardsOfBoardView(source: BoardCardsSource, view: BoardView): Card[] {
-  return filteredCardsOfView(
+  const { workspace, board } = source;
+  const meId = workspace.me?.id;
+  const context = {
+    usernameOf: (userId: string) => workspace.userName(userId),
+    locale: workspace.locale,
+    timeZone: workspace.regional.timeZone,
+    weekStart: workspace.regional.weekStart,
+    today: todayOf(workspace).date,
+    meId,
+    doneWhen: board?.doneWhen,
+    cardTitle: (cardId: string) => source.cardsById.get(cardId)?.title,
+  };
+  const filtered = filteredCardsOfView(
     source.realCards,
-    source.board?.cardProperties ?? [],
+    board?.cardProperties ?? [],
     viewQuery(view),
-    {
-      usernameOf: (userId) => source.workspace.userName(userId),
-      locale: source.workspace.locale,
-      timeZone: source.workspace.regional.timeZone,
-      meId: source.workspace.me?.id,
-      cardTitle: (cardId) => source.cardsById.get(cardId)?.title,
-    },
+    context,
+  );
+  // A public link's reader has an empty identifier: nobody is signed in to own a card or make one.
+  const reader = meId || undefined;
+  return applyQuickFilters(
+    filtered,
+    quickFilters.chosen(source.boardId, reader),
+    board,
+    { ...context, meId: reader },
+    quickFilters.made(source, reader),
   );
 }
 
@@ -184,23 +226,11 @@ export function narrowBoardCards(
     : (filtered as Card[]);
 }
 
-/** The cards a view shows, in its order, for a search text. */
+/** The cards a view shows, in its order, for a search text: both stages. */
 export function cardsOfBoardView(
   source: BoardCardsSource,
   view: BoardView,
   searchText = '',
 ): Card[] {
-  return cardsOfView(
-    source.realCards,
-    source.board?.cardProperties ?? [],
-    viewQuery(view),
-    searchText,
-    {
-      usernameOf: (userId) => source.workspace.userName(userId),
-      locale: source.workspace.locale,
-      timeZone: source.workspace.regional.timeZone,
-      meId: source.workspace.me?.id,
-      cardTitle: (cardId) => source.cardsById.get(cardId)?.title,
-    },
-  );
+  return narrowBoardCards(source, filteredCardsOfBoardView(source, view), searchText);
 }

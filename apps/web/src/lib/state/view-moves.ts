@@ -13,7 +13,7 @@ import { movedTo } from '../logic/list-places.ts';
 import type { BoardView } from '../logic/wire.ts';
 
 import { isBackendError, type BoardViewWriteResult, type ViewDraft } from './backend.ts';
-import { deleteBlockForUndo, performBoardAction } from './board-sync.ts';
+import { deleteViewForUndo, performBoardAction } from './board-sync.ts';
 import type { BoardStore } from './board.svelte.ts';
 import { placesOf } from './order.ts';
 import { put, take } from './write.ts';
@@ -180,7 +180,7 @@ export function addViewAtEnd(board: BoardStore, draft: ViewDraft): Promise<Board
       return takeViewWrite(board, written);
     },
     async (created) => {
-      await deleteBlockForUndo(board, created.id);
+      await deleteViewForUndo(board, created.id);
       board.views = board.views.filter((existing) => existing.id !== created.id);
     },
     'createView',
@@ -207,7 +207,7 @@ export function duplicateView(
     },
     async (copied) => {
       try {
-        await deleteBlockForUndo(board, copied.id);
+        await deleteViewForUndo(board, copied.id);
       } catch (error) {
         if (!isBackendError(error) || error.status !== 404) throw error;
       }

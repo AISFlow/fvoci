@@ -3,7 +3,7 @@
 //! A card has no storage of its own. It is created, read and patched as its block, so
 //! every change is announced the way block changes are.
 
-use fvoci_model::{Block, BlockType, Card, CardError, CardPatch, new_id};
+use fvoci_model::{Block, BlockType, Card, CardError, CardEvent, CardPatch, new_id};
 use fvoci_store::{BlockFilter, ByAgent, Previews};
 
 use super::list_page::ListPage;
@@ -44,7 +44,7 @@ impl App {
     /// Returns a not-found error if the board does not exist and
     /// a bad request if the title or the properties are too large, both
     /// with the message prefixed by `cannot create card`.
-    pub async fn create_card(
+    pub(in crate::app) async fn create_card(
         &self,
         card: Card,
         board_id: &str,
@@ -112,9 +112,9 @@ impl App {
     ///
     /// Returns a bad request if the patch is not valid (an icon of more than one
     /// grapheme), an internal error if the patched block is no card, and otherwise the
-    /// errors of [`App::patch_block_as`] with the message prefixed by `cannot patch
+    /// errors of `App::patch_block_as` with the message prefixed by `cannot patch
     /// card {id}`; written by `user_id`, or by an agent through a token of theirs.
-    pub async fn patch_card(
+    pub(in crate::app) async fn patch_card(
         &self,
         patch: &CardPatch,
         card_id: &str,
@@ -141,6 +141,20 @@ impl App {
     pub async fn card(&self, card_id: &str) -> Result<Card, AppError> {
         let block = self.block(card_id).await?;
         self.card_of_block(&block).await
+    }
+
+    /// One page of the activity of the card `card_id`, the newest first
+    /// ([`fvoci_model::CardEvent`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the store's error if the lines cannot be read.
+    pub async fn card_activity(
+        &self,
+        card_id: &str,
+        page: ListPage,
+    ) -> Result<Vec<CardEvent>, AppError> {
+        Ok(self.store().card_events(card_id, page.paging()).await?)
     }
 
     /// Returns the block of the card of the board that has `number`, if there is one.

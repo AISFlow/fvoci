@@ -14,7 +14,7 @@ use fvoci_model::{
 use crate::Store;
 use crate::containers::inherited_members_source;
 use crate::course_cleanup::{self, PersonalCourseTable};
-use crate::db::{Dialect, Id, LockRank, Param, Row, Scope};
+use crate::db::{Dialect, FromRow, Id, LockRank, Param, Row, RowLock, Scope};
 use crate::error::StoreError;
 
 impl Store {
@@ -56,12 +56,7 @@ impl Store {
                 .push(" AND o.deleted_at IS NULL")
                 .push(&scope.same_organization(&[("up", "b"), ("b", "c"), ("c", "w")]))
                 .push(" ORDER BY up.unit_id");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(progress_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -152,7 +147,6 @@ pub(crate) async fn require_live_unit(
     user_id: &str,
     org: Param,
 ) -> Result<(), StoreError> {
-    scope.record_lock(LockRank::Block, unit_id);
     let mut sql = scope.sql(
         "SELECT c.workspace_id \
          FROM blocks AS b \
@@ -169,38 +163,28 @@ pub(crate) async fn require_live_unit(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("b", "c"), ("c", "w")]));
-    if scope.dialect() == Dialect::Postgres {
-        sql.push(" FOR KEY SHARE OF b");
-    }
-    let Some(row) = scope.fetch_optional(sql).await? else {
-        return Err(StoreError::not_found("unit"));
-    };
-    let workspace_id = row.id(0)?;
+    sql.push_lock(scope.row_lock(LockRank::Block, unit_id, RowLock::KeyShare.of("b")));
+    let workspace_id: String = scope.one(sql, "unit").await?;
 
-    scope.record_lock(
-        LockRank::WorkspaceMembers,
-        &format!("{workspace_id}:{user_id}"),
-    );
     let mut member = scope.sql("SELECT 1 FROM workspace_members WHERE workspace_id = ");
     member
         .bind(Id(&workspace_id))
         .push_bind(" AND user_id = ", Id(user_id));
-    if scope.dialect() == Dialect::Postgres {
-        member.push(" FOR SHARE");
-    }
-    if scope.fetch_optional(member).await?.is_none() {
+    member.push_lock(scope.row_lock(
+        LockRank::WorkspaceMembers,
+        &format!("{workspace_id}:{user_id}"),
+        RowLock::Share,
+    ));
+    if !scope.exists(member).await? {
         return Err(StoreError::not_found("unit"));
     }
 
-    scope.record_lock(LockRank::Users, user_id);
     let mut user = scope.sql("SELECT 1 FROM users WHERE id = ");
     user.bind(Id(user_id))
         .push(" AND deleted_at IS NULL")
         .push_bind(" AND erased_at = ", 0_i64);
-    if scope.dialect() == Dialect::Postgres {
-        user.push(" FOR KEY SHARE");
-    }
-    if scope.fetch_optional(user).await?.is_none() {
+    user.push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::KeyShare));
+    if !scope.exists(user).await? {
         return Err(StoreError::not_found("unit"));
     }
     crate::course_meetings::require_active_course_member(scope, course_id, user_id, org)
@@ -280,8 +264,7 @@ async fn upsert_row(
         .push(updated_expr)
         .push(org_guard)
         .push(" RETURNING unit_id, completed_at, planned_date, last_position, updated_at");
-    let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-    progress_from_row(&row)
+    scope.first(sql).await?.ok_or(StoreError::NoRows)
 }
 
 /// Fetches `(user_id, completed_units, total_units)` for every active course member in
@@ -389,22 +372,21 @@ async fn count_live_units(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("b", "c"), ("c", "w")]));
-    let count = scope
-        .fetch_optional(sql)
-        .await?
-        .map_or(Ok(0), |row| row.int(0))?;
+    let count = scope.first(sql).await?.unwrap_or(0);
     Ok(count_u32(count))
 }
 
-pub(crate) fn progress_from_row(row: &Row) -> Result<UnitProgress, StoreError> {
-    Ok(UnitProgress {
-        unit_id: row.id(0)?,
-        completed_at: row.opt_int(1)?,
-        planned_date: row.opt_text(2)?,
-        last_position: row.opt_text(3)?,
-        updated_at: row.int(4)?,
-        suggested_next_interval_days: None,
-    })
+impl FromRow for UnitProgress {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(UnitProgress {
+            unit_id: row.id(0)?,
+            completed_at: row.opt_int(1)?,
+            planned_date: row.opt_text(2)?,
+            last_position: row.opt_text(3)?,
+            updated_at: row.int(4)?,
+            suggested_next_interval_days: None,
+        })
+    }
 }
 
 fn count_u32(value: i64) -> u32 {

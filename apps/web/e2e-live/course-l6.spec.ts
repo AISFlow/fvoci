@@ -139,7 +139,8 @@ test('built-in course template -> duplicate -> export/import preserves amounts &
   await sidebar(page)
     .getByRole('button', { name: 'Menu of the course Live L6 Study', exact: true })
     .click();
-  await page.getByRole('menuitem', { name: 'Export the course' }).click();
+  // Under the heading of what it saves, the archive's line, beside the Markdown's.
+  await page.getByRole('menuitem', { name: 'As a .fvoci archive' }).click();
   const archive = testInfo.outputPath('live-course-l6.fvoci');
   await (await saving).saveAs(archive);
 

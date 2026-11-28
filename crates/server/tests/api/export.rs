@@ -10,6 +10,46 @@ use fvoci_model::{Block, BlockType, Container, ContainerVisibility, new_id};
 use reqwest::{Method, StatusCode};
 use sha2::{Digest as _, Sha256};
 
+/// The identifier of the first card of `board_id` of the test workspace.
+async fn first_card_id(client: &Client, board_id: &str) -> String {
+    let cards: Vec<serde_json::Value> = client
+        .get(&format!("{TEST_WS}/boards/{board_id}/cards"))
+        .await
+        .ok_json();
+    cards[0]["id"]
+        .as_str()
+        .expect("a card has an id")
+        .to_owned()
+}
+
+/// The cards of `board_id` of the test workspace, each as `getCard` answers, its body
+/// with it.
+async fn cards_with_bodies(client: &Client, board_id: &str) -> Vec<serde_json::Value> {
+    let listed: Vec<serde_json::Value> = client
+        .get(&format!("{TEST_WS}/boards/{board_id}/cards"))
+        .await
+        .ok_json();
+    let mut cards = Vec::new();
+    for card in listed {
+        let id = card["id"].as_str().expect("a card has an id");
+        cards.push(client.get(&format!("{TEST_WS}/cards/{id}")).await.ok_json());
+    }
+    cards
+}
+
+/// `blocks` stored by the application layer as they are, as an older server may have
+/// left them: an attachment route takes only a file recorded on the board.
+async fn stored_as_they_are(ts: &TestServer, blocks: &mut [Block]) {
+    ts.app
+        .insert_blocks_unchecked(
+            blocks,
+            &ts.stranger().await,
+            fvoci_server::app::ChangeNotification::Suppress,
+        )
+        .await
+        .expect("the blocks are stored");
+}
+
 /// `GET /containers/{id}/archive/export` for a board.
 async fn export_board(client: &Client, board: &Container) -> ApiResponse {
     client
@@ -411,12 +451,7 @@ async fn import_of_a_traversing_entry_is_harmless() {
 async fn export_of_a_board_whose_blocks_share_a_file() {
     let ts = Setup::native().start().await.init_basic().await;
     let board = board_with_card(&ts, TEST_WORKSPACE_ID).await;
-    let cards: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks?type=card", board.id))
-        .await
-        .ok_json();
-    let card_id = cards[0].id.clone();
+    let card_id = first_card_id(&ts.client, &board.id).await;
     let upload = async |name: &str| {
         crate::files::uploaded_id(&crate::files::upload(&ts.client, &board.id, name, b"x").await)
     };
@@ -439,14 +474,11 @@ async fn export_of_a_board_whose_blocks_share_a_file() {
             ..fvoci_model::Block::default()
         }
     };
-    ts.client
-        .insert_blocks(&board.id, &[attachment(&shared)])
-        .await
-        .check_created();
+    crate::blocks::insert_one(&ts.client, &attachment(&shared)).await;
     // Another block shares the file, and a third has one that only it shows.
     let mut others = [attachment(&shared), attachment(&own)];
     ts.app
-        .insert_blocks(
+        .insert_blocks_unchecked(
             &mut others,
             &ts.stranger().await,
             fvoci_server::app::ChangeNotification::Send,
@@ -706,10 +738,7 @@ async fn an_archive_carries_the_files_of_bodies(kind: &str) {
         updated_at: 1,
         ..Block::default()
     };
-    ts.client
-        .insert_blocks(&board.id, std::slice::from_ref(&without_file))
-        .await
-        .check_created();
+    stored_as_they_are(&ts, &mut [without_file]).await;
 
     let exported = export_board(&ts.client, &board).await;
     exported.check_ok();
@@ -737,14 +766,7 @@ async fn an_archive_carries_the_files_of_bodies(kind: &str) {
         .into_iter()
         .find(|other| other.id != board.id)
         .expect("the imported board");
-    let blocks: Vec<serde_json::Value> = ts
-        .client
-        .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=card",
-            imported.id
-        ))
-        .await
-        .ok_json();
+    let blocks = cards_with_bodies(&ts.client, &imported.id).await;
     let new_file = blocks[0]["body"]["content"][0]["attrs"]["fileId"]
         .as_str()
         .expect("the image names a file")
@@ -806,9 +828,12 @@ async fn an_imported_comment_with_an_image_is_not_edited() {
     ]});
     ts.client
         .post(
-            &format!("{TEST_WS}/boards/{}/blocks", board.id),
-            &serde_json::json!([{"containerId": board.id, "parentId": card["id"], "type": "comment",
-                                 "createdAt": 1, "updatedAt": 1, "body": body}]),
+            &format!(
+                "{TEST_WS}/boards/{}/cards/{}/comments",
+                board.id,
+                card["id"].as_str().expect("card id")
+            ),
+            &serde_json::json!({ "body": body }),
         )
         .await
         .check_created();
@@ -823,10 +848,11 @@ async fn an_imported_comment_with_an_image_is_not_edited() {
         .into_iter()
         .find(|other| other.id != board.id)
         .expect("the imported board");
+    let imported_card = first_card_id(&ts.client, &imported.id).await;
     let comments: Vec<serde_json::Value> = ts
         .client
         .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=comment",
+            "{TEST_WS}/boards/{}/cards/{imported_card}/comments",
             imported.id
         ))
         .await
@@ -842,7 +868,7 @@ async fn an_imported_comment_with_an_image_is_not_edited() {
     let versions = ts
         .client
         .get(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/versions",
+            "{TEST_WS}/boards/{}/cards/{imported_card}/comments/{}/versions",
             imported.id,
             comment["id"].as_str().expect("an id")
         ))
@@ -956,12 +982,7 @@ async fn an_archive_with_a_broken_entry_stores_nothing() {
 async fn an_archive_reads_back_whatever_an_attachment_names() {
     let ts = Setup::native().start().await.init_basic().await;
     let board = board_with_card(&ts, TEST_WORKSPACE_ID).await;
-    let cards: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks?type=card", board.id))
-        .await
-        .ok_json();
-    let card_id = cards[0].id.clone();
+    let card_id = first_card_id(&ts.client, &board.id).await;
     let image = |file: &str| {
         let mut fields = fvoci_model::JsonMap::new();
         fields.insert(
@@ -979,17 +1000,15 @@ async fn an_archive_reads_back_whatever_an_attachment_names() {
             ..Block::default()
         }
     };
-    ts.client
-        .insert_blocks(
-            &board.id,
-            &[
-                image("container.jsonl"),
-                image("x/container.jsonl"),
-                image("version.json"),
-            ],
-        )
-        .await
-        .check_created();
+    stored_as_they_are(
+        &ts,
+        &mut [
+            image("container.jsonl"),
+            image("x/container.jsonl"),
+            image("version.json"),
+        ],
+    )
+    .await;
 
     let exported = export_board(&ts.client, &board).await;
     exported.check_ok();
@@ -1161,10 +1180,7 @@ async fn a_large_file_is_whole_in_the_archive() {
         updated_at: 1,
         ..Block::default()
     };
-    ts.client
-        .insert_blocks(&board.id, std::slice::from_ref(&attachment))
-        .await
-        .check_created();
+    crate::blocks::insert_one(&ts.client, &attachment).await;
 
     let exported = export_board(&ts.client, &board).await;
     exported.check_ok();
@@ -1263,10 +1279,7 @@ async fn board_with_large_archive(ts: &TestServer) -> Container {
             ..Block::default()
         });
     }
-    ts.client
-        .insert_blocks(&board.id, &attachments)
-        .await
-        .check_created();
+    crate::blocks::insert(&ts.client, &board.id, &attachments).await;
     board
 }
 
@@ -1478,10 +1491,7 @@ async fn board_with_missing_files(ts: &TestServer) -> MissingFiles {
         updated_at: 1,
         ..Block::default()
     };
-    ts.client
-        .insert_blocks(&board.id, std::slice::from_ref(&attachment))
-        .await
-        .check_created();
+    stored_as_they_are(ts, &mut [attachment]).await;
 
     MissingFiles {
         board,
@@ -1503,14 +1513,7 @@ async fn imported_without(ts: &TestServer, archive: &[u8], missing: [&str; 2]) {
         .into_iter()
         .find(|other| !before.contains(&other.id))
         .expect("the imported board");
-    let cards: Vec<serde_json::Value> = ts
-        .client
-        .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=card",
-            imported.id
-        ))
-        .await
-        .ok_json();
+    let cards = cards_with_bodies(&ts.client, &imported.id).await;
     let content = &cards[0]["body"]["content"];
     assert_eq!(content[0]["type"], "image", "the present file: {content}");
     let new_present = content[0]["attrs"]["fileId"].as_str().expect("a file");
@@ -1528,8 +1531,9 @@ async fn imported_without(ts: &TestServer, archive: &[u8], missing: [&str; 2]) {
     let attachments: Vec<serde_json::Value> = ts
         .client
         .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=attachment",
-            imported.id
+            "{TEST_WS}/boards/{}/cards/{}/attachments",
+            imported.id,
+            cards[0]["id"].as_str().expect("a card has an id")
         ))
         .await
         .ok_json();

@@ -5,7 +5,7 @@ use fvoci_model::{
     Block, BlockError, BlockType, Body, CHAPTERS_PER_COURSE, Container, ContainerKind,
     ContainerVisibility, CourseLimits, NewUnit, UNITS_PER_COURSE, UnitKind, UnitMove, new_id,
 };
-use fvoci_store::{DbType, Store, StoreError};
+use fvoci_store::{DbType, Store, StoreError, Written};
 use serde_json::json;
 
 use crate::boards::new_board;
@@ -44,7 +44,15 @@ async fn add_item(
         .create_unit(course_id, &new, CourseLimits::DEFAULT, user_id)
         .await
         .expect("unit or chapter stored")
-        .unit
+        .first
+}
+
+/// The identifiers of the blocks that came back from the trash, the asked-for block first.
+fn came_back(restored: &Written) -> Vec<&str> {
+    std::iter::once(&restored.first)
+        .chain(&restored.below)
+        .map(|block| block.id.as_str())
+        .collect()
 }
 
 fn outline_titles(nodes: &[fvoci_model::UnitNode]) -> Vec<(&str, UnitKind, &str)> {
@@ -276,7 +284,7 @@ async fn course_comments_restore_order_and_sharing_rules_hold() {
         .undelete_unit(&course.id, &ch1.id, CourseLimits::DEFAULT, &user_id)
         .await
         .expect("undelete chapter with commented unit");
-    let restored_ids: Vec<&str> = restored.units.iter().map(|b| b.id.as_str()).collect();
+    let restored_ids = came_back(&restored);
     assert_eq!(
         restored_ids,
         [ch1.id.as_str(), u1.id.as_str(), unit_comment.id.as_str()],
@@ -335,28 +343,30 @@ async fn moving_units_and_chapters_preserves_children_and_refuses_bad_targets() 
     let u2 = add(UnitKind::Unit, &ch1.id, "U2").await;
 
     // Move U1 into Ch 2, then move Ch 1 after Ch 2: U2 stays inside Ch 1.
-    test.move_unit(
-        &course.id,
-        &u1.id,
-        &UnitMove {
-            parent_id: ch2.id.clone(),
-            after: None,
-        },
-        &user_id,
-    )
-    .await
-    .expect("move unit into ch2");
-    test.move_unit(
-        &course.id,
-        &ch1.id,
-        &UnitMove {
-            parent_id: String::new(),
-            after: Some(ch2.id.clone()),
-        },
-        &user_id,
-    )
-    .await
-    .expect("move ch1 after ch2");
+    let _ = test
+        .move_unit(
+            &course.id,
+            &u1.id,
+            &UnitMove {
+                parent_id: ch2.id.clone(),
+                after: None,
+            },
+            &user_id,
+        )
+        .await
+        .expect("move unit into ch2");
+    let _ = test
+        .move_unit(
+            &course.id,
+            &ch1.id,
+            &UnitMove {
+                parent_id: String::new(),
+                after: Some(ch2.id.clone()),
+            },
+            &user_id,
+        )
+        .await
+        .expect("move ch1 after ch2");
 
     let tree = test.get_unit_tree(&course.id).await.expect("tree");
     let top: Vec<&str> = tree
@@ -379,17 +389,18 @@ async fn moving_units_and_chapters_preserves_children_and_refuses_bad_targets() 
     );
 
     // Move U2 to top level.
-    test.move_unit(
-        &course.id,
-        &u2.id,
-        &UnitMove {
-            parent_id: String::new(),
-            after: Some(String::new()),
-        },
-        &user_id,
-    )
-    .await
-    .expect("move u2 to top");
+    let _ = test
+        .move_unit(
+            &course.id,
+            &u2.id,
+            &UnitMove {
+                parent_id: String::new(),
+                after: Some(String::new()),
+            },
+            &user_id,
+        )
+        .await
+        .expect("move u2 to top");
     let tree = test.get_unit_tree(&course.id).await.expect("tree");
     assert_eq!(
         outline_titles(&tree)
@@ -502,7 +513,7 @@ async fn deleting_and_undeleting_chapters_and_orphaned_units_behave_consistently
         .undelete_unit(&course.id, &ch.id, CourseLimits::DEFAULT, &user_id)
         .await
         .expect("chapter restored");
-    assert_eq!(restored.units.len(), 3);
+    assert_eq!(restored.below.len(), 2);
     let tree = test.get_unit_tree(&course.id).await.expect("tree");
     assert_eq!(tree.len(), 3);
     assert_eq!(
@@ -521,7 +532,7 @@ async fn deleting_and_undeleting_chapters_and_orphaned_units_behave_consistently
         .undelete_unit(&course.id, &u1.id, CourseLimits::DEFAULT, &user_id)
         .await
         .expect("u1 restored to top");
-    assert_eq!(orphan.units[0].parent_id, "");
+    assert_eq!(orphan.first.parent_id, "");
     let tree = test.get_unit_tree(&course.id).await.expect("tree");
     assert_eq!(tree.len(), 1);
     assert_eq!(
@@ -765,7 +776,7 @@ async fn concurrent_unit_creations_keep_distinct_orders_and_respect_limit() {
         results.0, results.1, results.2, results.3, results.4, results.5,
     ]
     .into_iter()
-    .map(|r| r.expect("concurrent create succeeds").unit)
+    .map(|r| r.expect("concurrent create succeeds").first)
     .collect();
     assert_eq!(created.len(), 6);
     let tree = test.get_unit_tree(&course.id).await.expect("tree");

@@ -12,7 +12,7 @@
 
   Its editors find the board's deleted cards here ("Deleted cards").
 
-  A narrow pane (a phone) has room for the title only if undo, redo, the
+  A narrow pane (a phone) has room for the title only if undo, redo, the star, the
   description and the deleted cards are lines of a menu ("…"); a phone seldom has a keyboard for
   their keys, which work all the same; so is sharing, which a board's admins seldom need there. From
   where two kanban columns fit they are buttons of their own. The bell (`search`) stays a button of
@@ -38,11 +38,19 @@
 
   import { shortcutKeys, shortcutLabel } from '$lib/keys.ts';
   import PresenceRoster from './PresenceRoster.svelte';
+  import { favoriteAction } from '$lib/components/favorite-toggle/favorite-action.ts';
+  import FavoriteToggle from '$lib/components/favorite-toggle/FavoriteToggle.svelte';
   import IconButton from '$lib/components/icon-button/IconButton.svelte';
   import ActionMenu from '$lib/components/menu/ActionMenu.svelte';
   import type { MenuAction } from '$lib/components/menu/actions.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
-  import { cardTrash, isOwnSpace, type Trash, type Workspace } from '$lib/state/index.ts';
+  import {
+    cardTrash,
+    isOwnSpace,
+    workspaceFavorites,
+    type Trash,
+    type Workspace,
+  } from '$lib/state/index.ts';
 
   import { Button } from '$lib/ui/button/index.js';
 
@@ -146,7 +154,17 @@
     return undefined;
   });
 
-  /** The narrow pane's menu: the same undo, redo and trash as the buttons it stands for. */
+  const stars = $derived(workspaceFavorites(workspace));
+  /** Whether the container takes a star: a diary and a template take none. */
+  const starrable = $derived(
+    container !== undefined && container.kind !== 'diary' && !container.isTemplate,
+  );
+  /** The star's line of the narrow pane's menu, once the stars are read. */
+  const starLine = $derived(
+    starrable && container ? favoriteAction(stars, container.id) : undefined,
+  );
+
+  /** The narrow pane's menu: the same undo, redo, star and trash as the buttons it stands for. */
   const narrowActions = $derived.by<MenuAction[]>(() => {
     const list: MenuAction[] = [
       {
@@ -164,6 +182,7 @@
         run: () => void workspace.redoLast(),
       },
     ];
+    if (starLine) list.push({ ...starLine, separated: true });
     if (container?.description || describe) {
       list.push({
         id: 'description',
@@ -287,6 +306,14 @@
           </span>
         {/if}
       </h1>
+      {#if starrable}
+        <!-- The title keeps the room: in a narrow pane the star is a line of "…", and it has its
+             button where a view's header has one row (from 704 pixels); between, the board's line
+             of the sidebar stars it. -->
+        <span class="hidden shrink-0 @view-row/pane:flex">
+          <FavoriteToggle {stars} targetId={container.id} />
+        </span>
+      {/if}
     </div>
     {#if container.description || describe}
       {#key container.id}

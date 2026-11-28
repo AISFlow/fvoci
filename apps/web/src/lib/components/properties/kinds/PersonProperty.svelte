@@ -8,6 +8,7 @@
   user: the value still says someone is there, and that someone can be taken out.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import XIcon from '@lucide/svelte/icons/x';
 
   import PickList from '$lib/components/pick-list/PickList.svelte';
@@ -35,6 +36,21 @@
     placeholder: string;
     presentation?: Presentation;
     startOpen?: boolean;
+    /**
+     * Draws what opens the picker, in place of the value: a button of the bar
+     * of a selection. `props` are spread on it, before its own attributes.
+     */
+    opener?: Snippet<[{ props: Record<string, unknown> }]>;
+    /**
+     * Where the focus goes once the picker closes, in place of an `opener`
+     * that is not to be seen (`PickerSurface`); its own otherwise.
+     */
+    returnFocus?: () => HTMLElement | null | undefined;
+    /**
+     * The value stands for several cards whose values differ: none is shown
+     * as chosen, and clearing is offered all the same (it clears them all).
+     */
+    mixed?: boolean;
     /** One identifier (or `''`) for a single person, a list for several. */
     onChange?: (value: string | string[]) => void;
   }
@@ -49,6 +65,9 @@
     placeholder,
     presentation = 'popover',
     startOpen = false,
+    opener,
+    returnFocus,
+    mixed = false,
     onChange,
   }: Props = $props();
 
@@ -95,8 +114,9 @@
 
 {#snippet people()}
   {#each ids as id (id)}
-    <span data-slot="person-chip" class={chipClass}><span class="truncate">{nameOf(id)}</span></span
-    >
+    <span data-slot="person-chip" class={chipClass}>
+      <span class="truncate">{nameOf(id)}</span>
+    </span>
   {/each}
   {#if ids.length === 0 && placeholder !== ''}
     <span data-slot="property-empty" class="text-muted-foreground">{placeholder}</span>
@@ -108,20 +128,25 @@
     bind:open
     {presentation}
     title={name}
+    {returnFocus}
     onOpenChange={(next) => {
       if (!next) search = '';
     }}
   >
     {#snippet trigger({ props }: { props: Record<string, unknown> })}
-      <button
-        {...props}
-        type="button"
-        data-slot="property-person"
-        class="flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1 rounded-md px-2 py-1 text-left hover:bg-muted aria-expanded:bg-muted roomy:min-h-touch"
-      >
-        <span class="sr-only">{name}</span>
-        {@render people()}
-      </button>
+      {#if opener}
+        {@render opener({ props })}
+      {:else}
+        <button
+          {...props}
+          type="button"
+          data-slot="property-person"
+          class="flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1 rounded-md px-2 py-1 text-left hover:bg-muted aria-expanded:bg-muted roomy:min-h-touch"
+        >
+          <span class="sr-only">{name}</span>
+          {@render people()}
+        </button>
+      {/if}
     {/snippet}
 
     <div class="flex flex-col gap-1">
@@ -163,7 +188,7 @@
           <span class="truncate">{nameOf(user.id)}</span>
         {/snippet}
       </PickList>
-      {#if ids.length > 0}
+      {#if ids.length > 0 || mixed}
         <Button
           variant="ghost"
           class="justify-start group-data-[presentation=sheet]/surface:min-h-touch"

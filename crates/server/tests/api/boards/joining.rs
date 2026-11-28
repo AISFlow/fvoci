@@ -247,7 +247,7 @@ async fn a_member_below_the_minimum_role_has_the_role_they_were_given() {
     add_member(&th, &viewer(&board.id, &user2.id)).await;
 
     th.client2
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
+        .get(&format!("{TEST_WS}/boards/{}/cards", board.id))
         .await
         .check_ok();
     th.client2

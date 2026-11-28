@@ -23,7 +23,7 @@ use super::contract::params::{
     MemberWorkspaceId, Page, PerPage, UserId, UserSearch, WorkerWorkspaceId, WorkspaceId,
 };
 use super::contract::tag;
-use super::delegated::{Admits, Wall, sessions_only};
+use super::delegated::{Admits, NotAWall, Wall, sessions_only};
 use super::query::{PagingQuery, QueryParams};
 use super::session::caller_of;
 use super::{ApiResult, MAX_USER_IDS, RequiredSession, decode_json, json_response};
@@ -245,103 +245,120 @@ impl InWorkspace {
     }
 }
 
-/// A workspace as an operation on a wiki and its pages enters it: [`InWorkspace`] that reaches
-/// wikis and no board. A board named where a wiki is meant is not there.
-#[derive(Debug)]
-pub(crate) struct InWiki(pub(crate) InWorkspace);
+/// Declares a wall a personal API token may be let through: a [`Wall`], which
+/// [`super::Delegated`] wraps, entering the workspace as [`InWorkspace`] does and reaching
+/// the containers of `$kinds` alone. On its own it takes a session alone
+/// (`sessions_only!`).
+macro_rules! delegable_wall {
+    ($(#[$doc:meta])* $name:ident => $kinds:ident) => {
+        $(#[$doc])*
+        #[derive(Debug)]
+        pub(crate) struct $name(pub(crate) InWorkspace);
 
-impl Wall for InWiki {
-    async fn enter(parts: &mut Parts, app: &App, admits: Admits) -> Result<Self, AppError> {
-        let ws = InWorkspace::enter(parts, app, admits).await?;
-        Ok(Self(ws.reaching(ContainerKinds::WIKIS)))
-    }
-}
-
-/// A workspace as an operation on a diary and its entries enters it: [`InWorkspace`]
-/// that reaches diaries and nothing else, and only the workspace of the user's own
-/// space, which alone has diaries. Any other workspace is not there to it.
-#[derive(Debug)]
-pub(crate) struct InDiary(pub(crate) InWorkspace);
-
-impl FromRequestParts<App> for InDiary {
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let ws = InWorkspace::from_request_parts(parts, app).await?;
-        if ws.kind != OrgKind::Personal {
-            return Err(workspace_not_found());
+        impl Wall for $name {
+            async fn enter(parts: &mut Parts, app: &App, admits: Admits) -> Result<Self, AppError> {
+                let ws = InWorkspace::enter(parts, app, admits).await?;
+                Ok(Self(ws.reaching(ContainerKinds::$kinds)))
+            }
         }
-        Ok(Self(ws.reaching(ContainerKinds::DIARIES)))
-    }
+
+        sessions_only!($name);
+
+        impl From<$name> for InWorkspace {
+            fn from(wall: $name) -> Self {
+                wall.0
+            }
+        }
+    };
 }
 
-/// A workspace as an operation on a course and its chapters and units enters it:
-/// [`InWorkspace`] that reaches courses and nothing else.
-#[derive(Debug)]
-pub(crate) struct InCourse(pub(crate) InWorkspace);
+/// Declares a wall that takes a session alone, entering the workspace as
+/// [`InWorkspace`] does and reaching the containers of `$kinds` alone; with `only`, a
+/// workspace of an organization of another kind is not there. It is no [`Wall`], so
+/// that no `Delegated` of it compiles: no token gets through it.
+macro_rules! session_wall {
+    ($(#[$doc:meta])* $name:ident => $kinds:ident $(, only $org:path)?) => {
+        $(#[$doc])*
+        #[derive(Debug)]
+        pub(crate) struct $name(pub(crate) InWorkspace);
 
-impl Wall for InCourse {
-    async fn enter(parts: &mut Parts, app: &App, admits: Admits) -> Result<Self, AppError> {
-        let ws = InWorkspace::enter(parts, app, admits).await?;
-        Ok(Self(ws.reaching(ContainerKinds::COURSES)))
-    }
+        impl FromRequestParts<App> for $name {
+            type Rejection = AppError;
+
+            async fn from_request_parts(
+                parts: &mut Parts,
+                app: &App,
+            ) -> Result<Self, Self::Rejection> {
+                let ws = InWorkspace::from_request_parts(parts, app).await?;
+                $(if ws.kind != $org {
+                    return Err(workspace_not_found());
+                })?
+                Ok(Self(ws.reaching(ContainerKinds::$kinds)))
+            }
+        }
+
+        impl From<$name> for InWorkspace {
+            fn from(wall: $name) -> Self {
+                wall.0
+            }
+        }
+    };
 }
 
-/// A workspace as an operation enters it that is about the people of a shared container
-/// (members, joining, leaving, groups, invitations): [`InWorkspace`] that reaches boards,
-/// wikis and courses. A diary, which is its owner's alone, is not there to it.
-#[derive(Debug)]
-pub(crate) struct InShared(pub(crate) InWorkspace);
+sessions_only!(InWorkspace);
 
-impl FromRequestParts<App> for InShared {
-    type Rejection = AppError;
+delegable_wall!(
+    /// A workspace as an operation on a wiki and its pages enters it: [`InWorkspace`]
+    /// that reaches wikis and no board. A board named where a wiki is meant is not there.
+    InWiki => WIKIS
+);
 
-    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let ws = InWorkspace::from_request_parts(parts, app).await?;
-        Ok(Self(ws.reaching(ContainerKinds::SHARED)))
-    }
-}
+session_wall!(
+    /// A workspace as an operation on a diary and its entries enters it: [`InWorkspace`]
+    /// that reaches diaries and nothing else, and only the workspace of the user's own
+    /// space, which alone has diaries. Any other workspace is not there to it.
+    InDiary => DIARIES, only OrgKind::Personal
+);
 
-/// A workspace as an operation enters it that reaches publicly linkable or referenceable
-/// containers: boards, wikis and courses. Diaries are never there to it.
-#[derive(Debug)]
-pub(crate) struct InLinked(pub(crate) InWorkspace);
+delegable_wall!(
+    /// A workspace as an operation on a course and its chapters and units enters it:
+    /// [`InWorkspace`] that reaches courses and nothing else.
+    InCourse => COURSES
+);
 
-impl Wall for InLinked {
-    async fn enter(parts: &mut Parts, app: &App, admits: Admits) -> Result<Self, AppError> {
-        let ws = InWorkspace::enter(parts, app, admits).await?;
-        Ok(Self(ws.reaching(ContainerKinds::LINKED)))
-    }
-}
+session_wall!(
+    /// A workspace as an operation enters it that is about the people of a shared
+    /// container (members, joining, leaving, groups, invitations): [`InWorkspace`] that
+    /// reaches boards, wikis and courses. A diary, which is its owner's alone, is not
+    /// there to it.
+    InShared => SHARED
+);
 
-/// A workspace as an operation enters it that duplicates a container whole: boards,
-/// wikis and courses. Diaries are not there to it.
-#[derive(Debug)]
-pub(crate) struct InCopied(pub(crate) InWorkspace);
+delegable_wall!(
+    /// A workspace as an operation enters it that reaches publicly linkable or
+    /// referenceable containers: boards, wikis and courses. Diaries are never there to it.
+    InLinked => LINKED
+);
 
-impl FromRequestParts<App> for InCopied {
-    type Rejection = AppError;
+session_wall!(
+    /// A workspace as an operation enters it that duplicates a container whole: boards,
+    /// wikis and courses. Diaries are not there to it.
+    InCopied => COPIED
+);
 
-    async fn from_request_parts(parts: &mut Parts, app: &App) -> Result<Self, Self::Rejection> {
-        let ws = InWorkspace::from_request_parts(parts, app).await?;
-        Ok(Self(ws.reaching(ContainerKinds::COPIED)))
-    }
-}
+// No `Wall` of these: no token gets through a wall that a diary is behind, or that
+// works on the people of a container or copies it whole, however their declarations
+// are changed.
+const _: () = <InDiary as NotAWall<_>>::CHECKED;
+const _: () = <InShared as NotAWall<_>>::CHECKED;
+const _: () = <InCopied as NotAWall<_>>::CHECKED;
 
-/// A workspace as an operation enters it that is the same for every container kind (the
-/// container itself, its files, its place in the sidebar and in the trash, what is
-/// searched and exported): [`InWorkspace`] that reaches every kind.
-#[derive(Debug)]
-pub(crate) struct InContainer(pub(crate) InWorkspace);
-
-impl Wall for InContainer {
-    async fn enter(parts: &mut Parts, app: &App, admits: Admits) -> Result<Self, AppError> {
-        let ws = InWorkspace::enter(parts, app, admits).await?;
-        Ok(Self(ws.reaching(ContainerKinds::EVERY)))
-    }
-}
-
-sessions_only!(InWorkspace, InWiki, InCourse, InLinked, InContainer,);
+delegable_wall!(
+    /// A workspace as an operation enters it that is the same for every container kind
+    /// (the container itself, its files, its place in the sidebar and in the trash, what
+    /// is searched and exported): [`InWorkspace`] that reaches every kind.
+    InContainer => EVERY
+);
 
 fn workspace_not_found() -> AppError {
     AppError::not_found("workspace")

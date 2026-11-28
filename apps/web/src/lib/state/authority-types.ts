@@ -1,11 +1,12 @@
 /**
  * Server-authority types and backend surface extensions: caller-scoped
- * `ContainerPermissions`, atomic board view/card operations, cross-workspace
+ * `ContainerPermissions`, atomic board view/card operations (one property
+ * value on many cards among them), cross-workspace
  * container copy, and the account/workspace `'Today'` hub.
  */
 import type { BoardView, Container, MemberRole, PropertyValue } from '../logic/wire.ts';
 
-import type { CardSummary, CardTelling, Comment, ViewDraft } from './backend.ts';
+import type { CardPatch, CardSummary, CardTelling, Comment, ViewDraft } from './backend.ts';
 import type { LearningTodayItem, TodayReviewItem } from './course-types.ts';
 
 /** Effective permissions of the current caller on a single container (`my-permissions`). */
@@ -72,6 +73,12 @@ export interface CardMovesOutput {
   view: BoardView;
   cards: CardSummary[];
 }
+
+/** The most cards one request of the board's batch routes takes (`batchPatchCards`, `batchDeleteCards`, card moves). */
+export const CARD_BATCH_LIMIT = 200;
+
+/** What `batchPatchCards` sets and clears on every card it is given alike: property values only. */
+export type CardPropertiesPatch = Pick<CardPatch, 'updatedProperties' | 'deletedProperties'>;
 
 /** Request and response for `POST /w/{ws}/containers/{containerId}/copy-to-workspace`. */
 export interface CopyToWorkspaceInput {
@@ -181,6 +188,18 @@ export interface ServerAuthorityOfBackend {
     move: CardMovesInput,
     telling?: CardTelling,
   ): Promise<CardMovesOutput>;
+  /**
+   * Sets and clears the same property values on `1..=200` distinct cards of
+   * a board, all or none (`POST /boards/{boardId}/cards/batch-patch`): each
+   * card as `patchCard` with only those values would change it. The cards as
+   * they are then, in the order of `cardIds`.
+   */
+  batchPatchCards(
+    boardId: string,
+    cardIds: readonly string[],
+    patch: CardPropertiesPatch,
+    telling?: CardTelling,
+  ): Promise<CardSummary[]>;
   /** Deletes up to 200 cards in a single transaction as individually restorable entries. */
   batchDeleteCards(boardId: string, cardIds: readonly string[]): Promise<void>;
   /** Restores up to 200 deleted cards in a single transaction. */

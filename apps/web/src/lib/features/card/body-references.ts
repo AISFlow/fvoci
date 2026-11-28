@@ -39,12 +39,14 @@ export function bodyReferences(place: BodiesPlace, around?: string): BodyReferen
     shown: (id) => {
       const linked = titles.of(id);
       if (!linked) return linked;
+      // No reference names a view: one that holds a view's identifier names nothing.
+      if (linked.kind === 'view') return null;
       const { title, icon, kind } = linked;
       return { title, icon, kind, href: titles.places?.href(linked) };
     },
     open: (id) => {
       const linked = titles.of(id);
-      if (linked) titles.places?.open(linked);
+      if (linked && linked.kind !== 'view') titles.places?.open(linked);
     },
     search: async (query) => {
       const found = await titles.search(query, board);
@@ -60,6 +62,7 @@ export function bodyReferences(place: BodiesPlace, around?: string): BodyReferen
           .map((linked) => ({ value: linked.id, label: offered(place, linked) })),
     }),
     named: (address) => titles.places?.named(address),
-    seen: (id) => titles.seen(id),
+    // What a pasted address names becomes a reference only if it is no view.
+    seen: async (id) => (await titles.seen(id)) && titles.of(id)?.kind !== 'view',
   };
 }

@@ -13,6 +13,22 @@ interface Jumpable {
   deletedAt?: number | undefined;
 }
 
+/**
+ * The reader's stars the search offers at its head: all of them before
+ * anything is typed, then the first `JUMPS_SHOWN` whose title holds it.
+ */
+export function favoriteJumps<T>(
+  favorites: readonly T[],
+  query: string,
+  titleOf: (favorite: T) => string,
+): T[] {
+  const words = query.trim().toLocaleLowerCase();
+  if (words === '') return [...favorites];
+  return favorites
+    .filter((favorite) => titleOf(favorite).toLocaleLowerCase().includes(words))
+    .slice(0, JUMPS_SHOWN);
+}
+
 export function searchJumps<T extends Jumpable>(
   containers: readonly T[],
   query: string,

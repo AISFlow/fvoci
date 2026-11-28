@@ -354,7 +354,7 @@ pub(super) fn decompress(
     out: &mut impl io::Write,
 ) -> Result<u64, AppError> {
     let mut entry = zip.by_index(index).map_err(|error| zip_error(&error))?;
-    let name = entry.name().map(Cow::into_owned).unwrap_or_default();
+    let name = entry.name().map_or_default(Cow::into_owned);
     let read = io::copy(&mut entry.by_ref().take(limit.saturating_add(1)), out)
         .map_err(|_| AppError::bad_request("cannot read archive entry"))?;
     if read > limit {

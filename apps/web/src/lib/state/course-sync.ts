@@ -63,6 +63,9 @@ export function applyCourseChange(host: CourseSyncHost, change: Change): void {
         if (isCommentBlock(block)) store.openUnit?.comments.receive(block);
       }
       break;
+    case 'reactions':
+      store.openUnit?.comments.receiveReactions(change.blockId, change.reactions);
+      break;
     case 'blocksDeleted': {
       const hadUnit = store.units.some((unit) => change.blockIds.includes(unit.id));
       writes.forget(change.blockIds, 'others');

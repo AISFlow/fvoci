@@ -96,9 +96,9 @@ test('a member writes versions of a file and goes back to one; the public link s
 
   // Elsewhere, a third version is written; the list here still has two.
   const attached = (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-      params: { parentId: cardId, type: 'attachment' },
-    })
+    await api.get(
+      `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/attachments`,
+    )
   ).json()) as { fields: { fileId?: string } }[];
   const fileId = attached[0]?.fields.fileId ?? '';
   expect(fileId).not.toBe('');

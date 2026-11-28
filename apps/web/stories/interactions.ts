@@ -52,3 +52,36 @@ export async function visibleStoryElement(
   await waitFor(() => expect(element).toBeVisible());
   return element;
 }
+
+/**
+ * Selects two cards of a view the way a finger can: "Select" in the menu of
+ * the first (`menu` opens it, once `first` has the focus: the button waits
+ * for it under a mouse), then a plain press on the second. Resolves with the
+ * bar of the selection, once it counts both, and checks that the bar fits
+ * its view across.
+ */
+export async function selectTwo(
+  canvas: HTMLElement,
+  { first, menu, second }: { first: string; menu: string; second: string },
+): Promise<HTMLElement> {
+  (await storyElement(canvas, first)).focus();
+  await clickStory(canvas, menu);
+  await clickStory(canvas, '[data-action="select"]');
+  // A menu that closes holds the page's pointer until it has gone.
+  const body = canvas.ownerDocument.body;
+  await waitFor(() => expect(getComputedStyle(body).pointerEvents).not.toBe('none'));
+  await clickStory(canvas, second);
+  const bar = await storyElement(canvas, '[data-testid="selection-bar"]');
+  await waitFor(() => expect(bar).toHaveTextContent('2'));
+  await expect(bar.scrollWidth).toBeLessThanOrEqual(bar.clientWidth);
+  const view = canvas.querySelector<HTMLElement>('[data-testid="view-example"]');
+  if (view) {
+    const [box, room] = [bar.getBoundingClientRect(), view.getBoundingClientRect()];
+    await expect(box.left).toBeGreaterThanOrEqual(room.left);
+    await expect(box.right).toBeLessThanOrEqual(room.right);
+    // The button that lets the selection go is always in view.
+    const clear = await storyElement(canvas, '[data-bulk-clear]');
+    await expect(clear.getBoundingClientRect().right).toBeLessThanOrEqual(room.right);
+  }
+  return bar;
+}

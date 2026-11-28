@@ -53,11 +53,8 @@ async fn named_board(th: &TestServer) -> Named {
 
 /// The blocks of a board that have a body.
 async fn with_bodies(client: &Client, board_id: &str) -> Vec<Block> {
-    let blocks: Vec<Block> = client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks?all=true"))
+    crate::blocks::blocks_of(client, board_id)
         .await
-        .ok_json();
-    blocks
         .into_iter()
         .filter(|block| block.body.is_some())
         .collect()
@@ -66,10 +63,7 @@ async fn with_bodies(client: &Client, board_id: &str) -> Vec<Block> {
 /// What the cards of a board name, by the title of the card that names: each card of
 /// the board that is named by its title, anything else by its identifier.
 async fn named_by_title(client: &Client, board_id: &str) -> HashMap<String, Vec<String>> {
-    let blocks: Vec<Block> = client
-        .get(&format!("{TEST_WS}/boards/{board_id}/blocks?all=true"))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(client, board_id).await;
     let titles: HashMap<&str, &str> = blocks
         .iter()
         .filter(|block| block.block_type == BlockType::Card)
@@ -125,8 +119,8 @@ async fn check_names_its_own(th: &TestServer, source: &Named, copy_id: &str, wha
     };
     let copy_of_a = id_of("A").expect("the copy of A");
     assert!(copy_of_a != source.a, "{what}");
-    let cards: Vec<Block> = user
-        .get(&format!("{TEST_WS}/boards/{copy_id}/blocks?type=card"))
+    let cards: Vec<fvoci_model::Card> = user
+        .get(&format!("{TEST_WS}/boards/{copy_id}/cards"))
         .await
         .ok_json();
     let copy_of_b = cards
@@ -212,12 +206,9 @@ async fn an_imported_archive_names_the_imported_cards_in_its_bodies() {
         .filter(|block| block.block_type == BlockType::Comment)
         .collect();
     let named = references_in(&serde_json::to_value(&comments[0].body).expect("JSON"));
-    let cards: Vec<Block> = th
+    let cards: Vec<fvoci_model::Card> = th
         .client
-        .get(&format!(
-            "{TEST_WS}/boards/{}/blocks?type=card",
-            imported.id
-        ))
+        .get(&format!("{TEST_WS}/boards/{}/cards", imported.id))
         .await
         .ok_json();
     let copy_of_a = cards.iter().find(|card| card.title == "A");
@@ -284,15 +275,14 @@ async fn an_imported_archive_of_boards_names_the_copies_on_its_other_boards() {
 async fn a_copy_of_a_card_names_itself_and_what_its_source_named() {
     let th = Setup::native().start().await.init_basic().await;
     let source = named_board(&th).await;
-    let copies: Vec<Block> = th
+    let copy: fvoci_model::Card = th
         .client
         .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
+            "{TEST_WS}/boards/{}/cards/{}/duplicate",
             source.board, source.a
         ))
         .await
         .created_json();
-    let copy = &copies[0];
     let elsewhere = &source.elsewhere;
     let body = th
         .client
@@ -312,39 +302,5 @@ async fn a_copy_of_a_card_names_itself_and_what_its_source_named() {
         naming(&th.client, &source.b).await,
         [source.a.as_str(), copy.id.as_str()]
     );
-    th.teardown().await;
-}
-
-/// Blocks that are made in one request and name each other by the identifiers the
-/// request gave them name each other by the identifiers the server gave them.
-#[tokio::test]
-async fn blocks_made_together_name_each_other_by_their_new_identifiers() {
-    let th = Setup::native().start().await.init_basic().await;
-    let source = named_board(&th).await;
-    let (first, second) = (fvoci_model::new_id(), fvoci_model::new_id());
-    let reference = |id: &str| json!({"type": "reference", "attrs": {"id": id}});
-    let body = json!({"type": "doc", "content": [{"type": "paragraph", "content": [
-        reference(&second), reference(&source.b),
-    ]}]});
-    let created: serde_json::Value = th
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{"id": "nb", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private", "title": "Together"}],
-                "blocks": [
-                    {"id": first, "containerId": "nb", "type": "card", "title": "first",
-                        "body": body},
-                    {"id": second, "containerId": "nb", "type": "card", "title": "second"},
-                ],
-            }),
-        )
-        .await
-        .created_json();
-    let made: Vec<Block> = serde_json::from_value(created["blocks"].clone()).expect("blocks");
-    assert!(made[0].id != first && made[1].id != second);
-    assert_eq!(naming(&th.client, &made[1].id).await, [made[0].id.as_str()]);
-    let of_b = naming(&th.client, &source.b).await;
-    assert!(of_b.contains(&made[0].id), "{of_b:?}");
     th.teardown().await;
 }

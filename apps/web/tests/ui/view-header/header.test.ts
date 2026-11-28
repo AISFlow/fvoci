@@ -831,9 +831,12 @@ describe('the filter', () => {
     expect(within(editor).getByLabelText('Value for Note')).toHaveValue('z');
   });
 
-  it('keeps a group of conditions inside it through adding, changing and removing', async () => {
+  /** A group in the filter with one deeper than the editor goes in it, as another client can write it. */
+  const wrapper: FilterGroup = { operation: 'and', filters: [nested] };
+
+  it('keeps a group deeper than it goes through adding, changing and removing', async () => {
     const { view, board, workspace } = await mount('List');
-    await board.setViewFields(view().id, { filter: { operation: 'and', filters: [nested] } });
+    await board.setViewFields(view().id, { filter: { operation: 'and', filters: [wrapper] } });
     workspace.undo.clear();
     const stored = view().fields.filter.filters[0];
     expect(toolButton('filter')).toHaveAccessibleName('Filter (2)');
@@ -846,41 +849,113 @@ describe('the filter', () => {
 
     await add(editor);
     expect(view().fields.filter.filters).toEqual([
-      nested,
-      // The group's conditions are not lines: the first free property is still the first one.
+      wrapper,
+      // The group's conditions are not the filter's: the first free property is still the first one.
       { propertyId: STATUS, condition: 'includes', values: [] },
     ]);
     expect(view().fields.filter.filters[0]).toEqual(stored);
 
     // With two parts there is a choice between all and any.
-    await fireEvent.click(within(editor).getByText('Any condition'));
+    // The first "Any condition" is the filter's own; the group's comes after it.
+    const [any] = within(editor).getAllByText('Any condition');
+    if (!any) throw new Error('no "Any condition"');
+    await fireEvent.click(any);
     await settled();
     expect(view().fields.filter).toEqual({
       operation: 'or',
-      filters: [nested, { propertyId: STATUS, condition: 'includes', values: [] }],
+      filters: [wrapper, { propertyId: STATUS, condition: 'includes', values: [] }],
     });
 
     await openMenu(slot(rows(editor)[0], 'filter-condition'));
     await choose('is empty');
     await settled();
-    expect(view().fields.filter.filters[0]).toEqual(nested);
+    expect(view().fields.filter.filters[0]).toEqual(wrapper);
     expect(rows(editor)[0]?.querySelector('[data-slot="property-select"]')).toBeNull();
 
     const remove = rows(editor)[0]?.querySelector<HTMLElement>('[data-remove]');
     if (!remove) throw new Error('no button to remove the condition');
     await fireEvent.click(remove);
     await settled();
-    expect(view().fields.filter).toEqual({ operation: 'or', filters: [nested] });
+    expect(view().fields.filter).toEqual({ operation: 'or', filters: [wrapper] });
     // The focus is not left on the button that went away with its line.
     expect(editor.querySelector('[data-tool="add-filter"]')).toHaveFocus();
 
     // Undo, step by step, back to the filter as it was, the group whole at every step.
     for (let step = 0; step < 4; step += 1) {
       await workspace.undoLast();
-      expect(view().fields.filter.filters[0]).toEqual(nested);
+      expect(view().fields.filter.filters[0]).toEqual(wrapper);
     }
-    expect(view().fields.filter).toEqual({ operation: 'and', filters: [nested] });
+    expect(view().fields.filter).toEqual({ operation: 'and', filters: [wrapper] });
     expect(workspace.canUndo).toBe(false);
+  });
+
+  it('makes a group, asks all of it, adds to it, takes it apart and deletes one', async () => {
+    const { view } = await mount('List');
+    const editor = await openFilter();
+    await add(editor);
+    const addGroup = editor.querySelector<HTMLElement>('[data-tool="add-group"]');
+    if (!addGroup) throw new Error('no button to add a group');
+    await fireEvent.click(addGroup);
+    await settled();
+    // The group asks the other of what the filter asks, with one condition to begin with.
+    const condition = { propertyId: STATUS, condition: 'includes', values: [] };
+    expect(view().fields.filter).toEqual({
+      operation: 'and',
+      filters: [condition, { operation: 'or', filters: [condition] }],
+    });
+    const box = (): HTMLElement => {
+      // The one group there is: second at first, last after the filter has more parts.
+      const found = editor.querySelector<HTMLElement>('[data-filter-group]');
+      if (!found) throw new Error('no box of the group');
+      return found;
+    };
+    expect(rows(box())).toHaveLength(1);
+    expect(rows(editor)).toHaveLength(2);
+    // One condition: nothing to choose between yet.
+    expect(box().querySelector('[role="radiogroup"]')).toBeNull();
+
+    await fireEvent.click(slot(box(), 'add-to-group'));
+    await settled();
+    expect(rows(box())).toHaveLength(2);
+    const group = (): FilterGroup => view().fields.filter.filters[1] as FilterGroup;
+    expect(group().filters).toHaveLength(2);
+    expect(group().filters[1]).not.toEqual(condition);
+    await fireEvent.click(within(box()).getByText('All conditions'));
+    await settled();
+    expect(group().operation).toBe('and');
+    expect(view().fields.filter.operation).toBe('and');
+
+    // A condition of the group is changed where it is.
+    await openMenu(slot(rows(box())[0], 'filter-condition'));
+    await choose('is empty');
+    await settled();
+    expect(group().filters[0]).toEqual({ ...condition, condition: 'isEmpty' });
+    expect(view().fields.filter.filters[0]).toEqual(condition);
+
+    await openMenu(slot(box(), 'group-menu'));
+    await choose('Ungroup');
+    await settled();
+    expect(view().fields.filter.filters).toHaveLength(3);
+    expect(editor.querySelector('[data-filter-group]')).toBeNull();
+    expect(editor.querySelector('[data-tool="add-filter"]')).toHaveFocus();
+
+    await fireEvent.click(addGroup);
+    await settled();
+    await openMenu(slot(box(), 'group-menu'));
+    await choose('Delete the group');
+    await settled();
+    expect(view().fields.filter.filters).toHaveLength(3);
+    expect(editor.querySelector('[data-filter-group]')).toBeNull();
+
+    // The group goes with its last condition.
+    await fireEvent.click(addGroup);
+    await settled();
+    expect(view().fields.filter.filters).toHaveLength(4);
+    const removeLast = rows(box())[0]?.querySelector<HTMLElement>('[data-remove]');
+    if (!removeLast) throw new Error('no button to remove the condition');
+    await fireEvent.click(removeLast);
+    await settled();
+    expect(view().fields.filter.filters).toHaveLength(3);
   });
 });
 

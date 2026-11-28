@@ -209,12 +209,12 @@ test('a card carried to another column and a place in it is moved on the server'
     .toEqual({ status: board.options.Done });
   await expect
     .poll(async () => {
-      const [view] = (await (
-        await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-          params: { blockId: board.viewId },
-        })
-      ).json()) as Schemas['Block'][];
-      const order = (view?.fields.cardOrder ?? []) as string[];
+      const view = (await (
+        await api.get(
+          `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views/${board.viewId}`,
+        )
+      ).json()) as Schemas['Block'];
+      const order = (view.fields.cardOrder ?? []) as string[];
       return order.includes(sweep) && order.indexOf(sweep) < order.indexOf(dust);
     })
     .toBe(true);
@@ -227,12 +227,12 @@ test('a card carried to another column and a place in it is moved on the server'
   await expect.poll(() => titlesIn('Done')).toEqual(['Dust', 'Sweep']);
   await expect
     .poll(async () => {
-      const [view] = (await (
-        await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-          params: { blockId: board.viewId },
-        })
-      ).json()) as Schemas['Block'][];
-      const order = (view?.fields.cardOrder ?? []) as string[];
+      const view = (await (
+        await api.get(
+          `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views/${board.viewId}`,
+        )
+      ).json()) as Schemas['Block'];
+      const order = (view.fields.cardOrder ?? []) as string[];
       return order.includes(dust) && order.indexOf(dust) < order.indexOf(sweep);
     })
     .toBe(true);

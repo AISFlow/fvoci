@@ -11,7 +11,7 @@ use serde_json::Value;
 use super::App;
 use super::blocks::ChangeNotification;
 use super::files::FILE;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 
 /// What a request misses that asks for a version a file has not, or has no more.
 const VERSION: &str = "version";
@@ -111,11 +111,10 @@ impl App {
         container_id: &str,
         file_id: &str,
     ) -> Result<Vec<KeptFileVersion>, AppError> {
-        match self.store().file_versions(container_id, file_id).await {
-            Ok(kept) => Ok(kept),
-            Err(error) if error.is_not_found() => Err(AppError::not_found(FILE)),
-            Err(error) => Err(error.into()),
-        }
+        self.store()
+            .file_versions(container_id, file_id)
+            .await
+            .or_missing(FILE)
     }
 
     /// Makes the uploaded file `upload` of the board the new version of its file
@@ -140,18 +139,16 @@ impl App {
             .store()
             .add_file_version(container_id, file_id, base, upload, user_id)
             .await;
-        match added {
-            Ok(VersionAdded::Written(kept)) => {
+        match added.or_missing(FILE)? {
+            VersionAdded::Written(kept) => {
                 self.resize_attachments(container_id, file_id, user_id)
                     .await;
                 Ok(described(kept))
             }
-            Ok(VersionAdded::Stale { current }) => Err(stale(base, current)),
-            Ok(VersionAdded::Unusable(why)) => {
+            VersionAdded::Stale { current } => Err(stale(base, current)),
+            VersionAdded::Unusable(why) => {
                 Err(AppError::bad_request(unusable(why)).with_pointer("/fileId"))
             }
-            Err(error) if error.is_not_found() => Err(AppError::not_found(FILE)),
-            Err(error) => Err(error.into()),
         }
     }
 

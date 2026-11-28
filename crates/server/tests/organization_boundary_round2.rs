@@ -193,8 +193,8 @@ fn read_paths(board: &Container, card_id: &str, file_id: &str) -> Vec<(String, S
             format!("{ROOT_WS}/containers/{UNKNOWN_ID}"),
         ),
         (
-            format!("{ROOT_WS}/boards/{}/blocks", board.id),
-            format!("{ROOT_WS}/boards/{UNKNOWN_ID}/blocks"),
+            format!("{ROOT_WS}/boards/{}/views", board.id),
+            format!("{ROOT_WS}/boards/{UNKNOWN_ID}/views"),
         ),
         (
             format!("{ROOT_WS}/boards/{}/cards", board.id),

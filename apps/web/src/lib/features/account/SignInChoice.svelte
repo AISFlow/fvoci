@@ -83,8 +83,10 @@
         class="h-auto min-h-9 py-2 whitespace-normal roomy:min-h-touch"
         disabled={working}
         data-testid="held-carry-over"
-        onclick={() => void go(onCarryOver)}>{m.account_held_carry_over()}</Button
+        onclick={() => void go(onCarryOver)}
       >
+        {m.account_held_carry_over()}
+      </Button>
       <p class="text-xs text-muted-foreground">{m.account_held_carry_over_hint()}</p>
     </div>
     <div class="grid gap-1.5">
@@ -93,8 +95,10 @@
         class="roomy:min-h-touch"
         disabled={working}
         data-testid="held-start-anew"
-        onclick={() => void go(onStartAnew)}>{m.account_held_start_anew()}</Button
+        onclick={() => void go(onStartAnew)}
       >
+        {m.account_held_start_anew()}
+      </Button>
       <p class="text-xs text-muted-foreground">{m.account_held_start_anew_hint()}</p>
     </div>
 
@@ -102,8 +106,8 @@
       <p class="text-sm text-destructive" role="alert">{problem}</p>
     {/if}
 
-    <Button variant="link" class="roomy:min-h-touch" disabled={working} onclick={onCancel}
-      >{m.account_held_cancel()}</Button
-    >
+    <Button variant="link" class="roomy:min-h-touch" disabled={working} onclick={onCancel}>
+      {m.account_held_cancel()}
+    </Button>
   </section>
 </main>

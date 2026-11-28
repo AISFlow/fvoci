@@ -188,7 +188,8 @@ test('a wiki saved as an archive is made again in another workspace', async ({
   await sidebar(page)
     .getByRole('button', { name: 'Menu of the wiki Handbook to archive', exact: true })
     .click();
-  await page.getByRole('menuitem', { name: 'Export the wiki' }).click();
+  // Under the heading of what it saves, the archive's line, beside the Markdown's.
+  await page.getByRole('menuitem', { name: 'As a .fvoci archive' }).click();
   const archive = testInfo.outputPath('wiki.fvoci');
   await (await saving).saveAs(archive);
 

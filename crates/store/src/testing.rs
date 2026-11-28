@@ -472,12 +472,41 @@ pub const GLOBAL_TABLES: [&str; 14] = crate::schema::GLOBAL_TABLES;
 
 /// The tables that hold rows of organizations, and the organizations themselves, each
 /// behind the wall on PostgreSQL.
-pub const ORG_TABLES: [&str; 51] = crate::schema::ORG_TABLES;
+pub const ORG_TABLES: [&str; 54] = crate::schema::ORG_TABLES;
+
+/// Takes away again, as the owner of the schema `database_connection` connects to, what
+/// the migrations after the baseline made, newest first: the schema is the baseline's.
+/// Their record is left as it is.
+///
+/// # Panics
+///
+/// Panics if the database cannot be reached or a statement fails.
+pub async fn undo_the_migrations_after_the_baseline(db_type: DbType, database_connection: &str) {
+    let store = Store::open(db_type, database_connection)
+        .await
+        .unwrap_or_else(|error| panic!("connecting to the test database: {error}"));
+    store
+        .with_write_conn(undo_after_the_baseline)
+        .await
+        .unwrap_or_else(|error| panic!("undoing the migrations after the baseline: {error}"));
+    store.close().await;
+}
+
+/// The statements of [`crate::schema::UNDONE_FOR_TESTS`], in their order.
+async fn undo_after_the_baseline(scope: &mut crate::db::Scope<'_>) -> Result<(), StoreError> {
+    for (_, statements) in crate::schema::UNDONE_FOR_TESTS {
+        for statement in statements {
+            scope.execute(scope.sql(*statement)).await?;
+        }
+    }
+    Ok(())
+}
 
 /// Replaces the record of the migrations of the schema `database_connection` connects
 /// to, as its owner, with the record the last server before the baseline wrote, every
-/// migration of its chain applied: the database as that server left it, whose schema is
-/// the baseline's.
+/// migration of its chain applied, and takes away what the migrations after the
+/// baseline made ([`undo_the_migrations_after_the_baseline`]): the database as that
+/// server left it, whose schema is the baseline's.
 ///
 /// # Panics
 ///
@@ -489,6 +518,7 @@ pub async fn write_the_record_before_the_baseline(db_type: DbType, database_conn
     let record = crate::schema::record_before_the_baseline(store.dialect());
     store
         .with_write_conn(async |scope| {
+            undo_after_the_baseline(scope).await?;
             scope
                 .execute(scope.sql("DELETE FROM _sqlx_migrations"))
                 .await?;
@@ -516,6 +546,17 @@ pub async fn write_the_record_before_the_baseline(db_type: DbType, database_conn
 }
 
 impl Store {
+    /// A handle to the same database whose writes of blocks note nothing to tell
+    /// anybody, and make nobody watch anything, not even their writer: for a fixture
+    /// that sets the scene of a test, whose writes are nobody's words.
+    #[must_use]
+    pub fn telling_nobody(&self) -> Self {
+        Self {
+            noting: crate::db::Noting::Nobody,
+            ..self.clone()
+        }
+    }
+
     /// What the idle connections of a PostgreSQL store carry of an organization, read
     /// past the store's own transactions: for each connection the settings `fvoci.org`
     /// and `fvoci.system` as it has them, empty for none. Empty on SQLite.
@@ -580,10 +621,7 @@ impl Store {
             let wall = crate::directory::open_wall(scope).await?;
             crate::directory::is_the_instances_organization(scope).await?;
             let sql = scope.sql("SELECT current_setting('fvoci.system', true)");
-            let reach = match scope.fetch_optional(sql).await? {
-                Some(row) => row.text(0)?,
-                None => String::new(),
-            };
+            let reach: String = scope.first(sql).await?.unwrap_or_default();
             crate::directory::close_wall(scope, wall).await?;
             Ok(reach)
         })
@@ -613,10 +651,7 @@ impl Store {
     pub async fn count_rows(&self, table: &str) -> Result<i64, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql_unchecked(&format!("SELECT count(*) FROM {table}"));
-            match scope.fetch_optional(sql).await? {
-                Some(row) => row.int(0),
-                None => Ok(0),
-            }
+            Ok(scope.first(sql).await?.unwrap_or(0))
         })
         .await
     }
@@ -631,12 +666,7 @@ impl Store {
     pub async fn texts_unchecked(&self, query: &str) -> Result<Vec<String>, StoreError> {
         self.with_conn(async |scope| {
             let sql = scope.sql_unchecked(query);
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.text(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }

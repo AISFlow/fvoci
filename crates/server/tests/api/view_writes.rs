@@ -1,56 +1,41 @@
-//! Stale writes of view blocks: a PATCH whose `readAt` predates the view's current
-//! `updatedAt` is rejected with 409 Conflict (single and batch), while two editors moving
-//! different views concurrently both succeed and two editors moving the same view from
-//! the same `readAt` let exactly one win.
+//! Stale writes of views (`patchBoardView`): a patch whose `readAt` predates the view's
+//! current `updatedAt` is rejected with 409 Conflict, while two editors moving different
+//! views concurrently both succeed and two editors moving the same view from the same
+//! `readAt` let exactly one win.
 
 use std::sync::Arc;
 
-use fvoci_model::{Block, BlockType, ContainerVisibility, JsonMap, new_id};
+use fvoci_model::{Block, ContainerVisibility};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 
-use crate::common::{Setup, TEST_WORKSPACE_ID, TEST_WS};
+use crate::board_views::{add_view, views_of};
+use crate::common::{Setup, TEST_WORKSPACE_ID};
 
-/// Creates an open board with `count` view blocks and returns `(board_id, views)`.
+/// Creates an open board with `count` views, the second user an editor of it, and returns
+/// `(board_id, views)`.
 async fn board_with_views(ts: &crate::common::TestServer, count: usize) -> (String, Vec<Block>) {
     let board = ts
         .create_board(TEST_WORKSPACE_ID, ContainerVisibility::Open)
         .await;
     let user2_id = ts.client2.me().await.id;
     crate::rooms::give(ts, &board.id, &user2_id, "editor").await;
-    let views: Vec<Block> = (0..count)
-        .map(|i| Block {
-            id: new_id(),
-            container_id: board.id.clone(),
-            block_type: BlockType::View,
-            title: format!("View {i}"),
-            fields: JsonMap::from_iter([
-                ("viewType".to_owned(), json!("board")),
-                ("order".to_owned(), json!(format!("V{}", i + 1))),
-            ]),
-            ..Block::default()
-        })
-        .collect();
-    let stored: Vec<Block> = ts
-        .client
-        .insert_blocks(&board.id, &views)
-        .await
-        .created_json();
-    assert_eq!(stored.len(), count, "expected {count} views stored");
-    (board.id, stored)
+    let mut views = Vec::new();
+    for i in 0..count {
+        views.push(add_view(&ts.client, &board.id, &format!("View {i}")).await);
+    }
+    (board.id, views)
 }
 
-/// Reads a single view block back from the board.
+/// The path of the view `view_id` of `board_id`.
+fn view_path(board_id: &str, view_id: &str) -> String {
+    format!("{}/{view_id}", views_of(board_id))
+}
+
+/// Reads a single view back from the board.
 async fn read_view(client: &crate::common::Client, board_id: &str, view_id: &str) -> Block {
-    let blocks: Vec<Block> = client
-        .get(&format!(
-            "{TEST_WS}/boards/{board_id}/blocks?blockId={view_id}"
-        ))
-        .await
-        .ok_json();
-    assert_eq!(blocks.len(), 1, "expected one view: {blocks:?}");
-    blocks.into_iter().next().expect("one view")
+    client.get(&view_path(board_id, view_id)).await.ok_json()
 }
 
 /// Patching a view with a `readAt` older than its current `updatedAt` returns 409 Conflict
@@ -60,7 +45,7 @@ async fn patching_a_view_with_a_stale_read_at_returns_409() {
     let ts = Setup::native().start().await.init_basic().await;
     let (board_id, views) = board_with_views(&ts, 1).await;
     let view = &views[0];
-    let path = format!("{TEST_WS}/boards/{board_id}/blocks/{}", view.id);
+    let path = view_path(&board_id, &view.id);
 
     // First write advances updatedAt.
     let first = ts
@@ -73,7 +58,7 @@ async fn patching_a_view_with_a_stale_read_at_returns_409() {
             }),
         )
         .await;
-    first.check_no_content();
+    first.check_ok();
     let after_first = read_view(&ts.client, &board_id, &view.id).await;
     assert_eq!(
         after_first.fields["order"],
@@ -122,7 +107,7 @@ async fn patching_a_view_with_a_stale_read_at_returns_409() {
             }),
         )
         .await
-        .check_no_content();
+        .check_ok();
     let updated = read_view(&ts.client, &board_id, &view.id).await;
     assert_eq!(
         updated.fields["order"],
@@ -132,69 +117,9 @@ async fn patching_a_view_with_a_stale_read_at_returns_409() {
     ts.teardown().await;
 }
 
-/// A batch PATCH carrying a stale `readAt` on one view returns 409 and leaves every view
-/// in the batch unchanged.
-#[tokio::test]
-async fn batch_patching_views_with_one_stale_read_at_returns_409_and_changes_none() {
-    let ts = Setup::native().start().await.init_basic().await;
-    let (board_id, views) = board_with_views(&ts, 2).await;
-    let (first, second) = (&views[0], &views[1]);
-
-    // Advance the second view so its initial updatedAt becomes stale.
-    ts.client
-        .patch(
-            &format!("{TEST_WS}/boards/{board_id}/blocks/{}", second.id),
-            &json!({
-                "readAt": second.updated_at,
-                "updatedFields": {"order": "W5"},
-            }),
-        )
-        .await
-        .check_no_content();
-    let second_after = read_view(&ts.client, &board_id, &second.id).await;
-    assert!(
-        second_after.updated_at > second.updated_at,
-        "second view updatedAt advanced"
-    );
-
-    // Batch patch updates first (fresh readAt) and second (stale readAt): whole batch 409s.
-    let batch = ts
-        .client2
-        .patch(
-            &format!("{TEST_WS}/boards/{board_id}/blocks"),
-            &json!({
-                "blockIds": [first.id, second.id],
-                "blockPatches": [
-                    {"readAt": first.updated_at, "updatedFields": {"order": "V5"}},
-                    {"readAt": second.updated_at, "updatedFields": {"order": "Z9"}},
-                ],
-            }),
-        )
-        .await;
-    batch.check_status(StatusCode::CONFLICT);
-    assert_eq!(
-        batch.value()["detail"],
-        json!("the block has changed since it was read"),
-        "{}",
-        batch.text()
-    );
-
-    assert_eq!(
-        read_view(&ts.client, &board_id, &first.id).await.fields["order"],
-        json!("V1"),
-        "first view rolled back with the batch"
-    );
-    assert_eq!(
-        read_view(&ts.client, &board_id, &second.id).await.fields["order"],
-        json!("W5"),
-        "second view kept its earlier order"
-    );
-    ts.teardown().await;
-}
-
 /// Two users moving two different views on the same board at the same moment both succeed,
 /// whereas two users moving the same view from the same `readAt` at the same moment let
-/// one succeed (204) and reject the other (409).
+/// one succeed (200) and reject the other (409).
 #[tokio::test]
 async fn two_users_moving_views_concurrently_succeed_on_distinct_views_and_conflict_on_the_same() {
     let ts = Setup::native().start().await.init_basic().await;
@@ -204,8 +129,8 @@ async fn two_users_moving_views_concurrently_succeed_on_distinct_views_and_confl
     // User 1 moves view_a while User 2 moves view_b at the same moment.
     let gate = Arc::new(Barrier::new(2));
     let (path_a, path_b) = (
-        format!("{TEST_WS}/boards/{board_id}/blocks/{}", view_a.id),
-        format!("{TEST_WS}/boards/{board_id}/blocks/{}", view_b.id),
+        view_path(&board_id, &view_a.id),
+        view_path(&board_id, &view_b.id),
     );
     let body_a = json!({"readAt": view_a.updated_at, "updatedFields": {"order": "V8"}});
     let body_b = json!({"readAt": view_b.updated_at, "updatedFields": {"order": "W8"}});
@@ -219,8 +144,8 @@ async fn two_users_moving_views_concurrently_succeed_on_distinct_views_and_confl
             ts.client2.patch(&path_b, &body_b).await
         },
     );
-    res_a.check_no_content();
-    res_b.check_no_content();
+    res_a.check_ok();
+    res_b.check_ok();
     assert_eq!(
         read_view(&ts.client, &board_id, &view_a.id).await.fields["order"],
         json!("V8"),
@@ -234,7 +159,7 @@ async fn two_users_moving_views_concurrently_succeed_on_distinct_views_and_confl
 
     // User 1 and User 2 move the same view concurrently with the same readAt.
     let gate = Arc::new(Barrier::new(2));
-    let shared_path = format!("{TEST_WS}/boards/{board_id}/blocks/{}", shared.id);
+    let shared_path = view_path(&board_id, &shared.id);
     let move_1 = json!({"readAt": shared.updated_at, "updatedFields": {"order": "Y1"}});
     let move_2 = json!({"readAt": shared.updated_at, "updatedFields": {"order": "Y2"}});
     let (first, second) = tokio::join!(
@@ -251,12 +176,12 @@ async fn two_users_moving_views_concurrently_succeed_on_distinct_views_and_confl
     statuses.sort_unstable();
     assert_eq!(
         statuses,
-        [204, 409],
+        [200, 409],
         "one concurrent move wins and the other gets 409: first={} second={}",
         first.text(),
         second.text()
     );
-    let winner_order: Value = if first.status.as_u16() == 204 {
+    let winner_order: Value = if first.status.as_u16() == 200 {
         json!("Y1")
     } else {
         json!("Y2")

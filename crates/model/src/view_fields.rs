@@ -153,7 +153,7 @@ impl FromStr for GanttZoom {
     }
 }
 
-const FILTER_CONDITIONS: [&str; 15] = [
+const FILTER_CONDITIONS: [&str; 16] = [
     "includes",
     "notIncludes",
     "isEmpty",
@@ -169,6 +169,22 @@ const FILTER_CONDITIONS: [&str; 15] = [
     "notEndsWith",
     "isBefore",
     "isAfter",
+    "isWithin",
+];
+
+/// Relative periods a date filter value may name besides a calendar day and
+/// [`FILTER_DATE_TODAY`], for the `isWithin` condition. Each reader's client works out
+/// the days of one from their own time zone and first day of the week; the server only
+/// checks that the token is one of these.
+const FILTER_DATE_PERIODS: [&str; 8] = [
+    "thisWeek",
+    "nextWeek",
+    "lastWeek",
+    "thisMonth",
+    "next7Days",
+    "next30Days",
+    "last7Days",
+    "last30Days",
 ];
 
 /// Why a board view's `fields` was refused.
@@ -367,8 +383,12 @@ fn is_filter_clause(value: &Value) -> bool {
 }
 
 /// Validates filter clause values against the board's `card_properties`, explicitly
-/// allowing the dynamic `'me'` token on person properties and `'today'` on date
-/// properties.
+/// allowing the dynamic `'me'` token on person properties, and on date properties
+/// `'today'` and the relative periods `isWithin` compares with (`thisWeek`, …).
+///
+/// A date clause may hold a day or a period whatever its condition: an editor keeps
+/// the value when the condition changes, so that changing it back finds the value
+/// again, and a client reads a value its condition cannot use as no condition at all.
 ///
 /// # Errors
 ///
@@ -429,17 +449,23 @@ fn check_filter_values_node(
         for item in values {
             if let Some(text) = item.as_str()
                 && !text.is_empty()
-                && text != FILTER_DATE_TODAY
-                && !is_calendar_date(text)
+                && !is_date_filter_value(text)
             {
                 return Err(ViewFieldsError::InvalidField {
                     field: "filter",
-                    expected: "date filter values must be calendar dates (YYYY-MM-DD) or \"today\"",
+                    expected: "date filter values must be calendar dates (YYYY-MM-DD), \"today\" \
+                               or a relative period such as \"thisWeek\"",
                 });
             }
         }
     }
     Ok(())
+}
+
+/// Whether `text` is a value a date filter clause compares with: a calendar day,
+/// [`FILTER_DATE_TODAY`], or one of [`FILTER_DATE_PERIODS`].
+fn is_date_filter_value(text: &str) -> bool {
+    text == FILTER_DATE_TODAY || FILTER_DATE_PERIODS.contains(&text) || is_calendar_date(text)
 }
 
 /// Drops unknown or malformed members from a stored view's `fields` so legacy stored
@@ -640,4 +666,124 @@ pub struct BoardViewWrite {
     /// All sibling views whose `order` was initialized or renumbered in the same
     /// transaction (empty when none needed renumbering).
     pub companion_views: Vec<Block>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        FILTER_DATE_PERIODS, ViewFieldsError, validate_view_fields, validate_view_filter_values,
+    };
+    use crate::JsonMap;
+    use crate::card_property::{CardPropertyDefinition, PropertyType};
+
+    fn fields_with_filter(filter: Value) -> JsonMap {
+        let mut fields = JsonMap::new();
+        fields.insert("filter".to_owned(), filter);
+        fields
+    }
+
+    fn date_clause(condition: &str, value: &str) -> JsonMap {
+        fields_with_filter(json!({
+            "operation": "and",
+            "filters": [{ "propertyId": "due", "condition": condition, "values": [value] }],
+        }))
+    }
+
+    fn definitions() -> Vec<CardPropertyDefinition> {
+        vec![
+            CardPropertyDefinition::new("due", "Due", PropertyType::Date),
+            CardPropertyDefinition::new("made", "Made", PropertyType::CreatedTime),
+        ]
+    }
+
+    #[test]
+    fn is_within_is_a_condition_of_a_clause() {
+        assert_eq!(
+            validate_view_fields(&date_clause("isWithin", "thisWeek")),
+            Ok(())
+        );
+        assert!(validate_view_fields(&date_clause("isInside", "thisWeek")).is_err());
+    }
+
+    #[test]
+    fn every_relative_period_is_a_date_value() {
+        for period in FILTER_DATE_PERIODS {
+            assert_eq!(
+                validate_view_filter_values(&date_clause("isWithin", period), &definitions()),
+                Ok(()),
+                "{period}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_date_clause_keeps_a_day_or_a_period_whatever_its_condition() {
+        for (condition, value) in [
+            ("isWithin", "2026-11-27"),
+            ("isWithin", "today"),
+            ("is", "nextWeek"),
+            ("isBefore", "last30Days"),
+        ] {
+            assert_eq!(
+                validate_view_filter_values(&date_clause(condition, value), &definitions()),
+                Ok(()),
+                "{condition} {value}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_period_outside_the_closed_list_is_refused() {
+        for value in ["thisYear", "ThisWeek", "next14Days", "this week"] {
+            let refused =
+                validate_view_filter_values(&date_clause("isWithin", value), &definitions());
+            assert!(
+                matches!(
+                    refused,
+                    Err(ViewFieldsError::InvalidField {
+                        field: "filter",
+                        ..
+                    })
+                ),
+                "{value}: {refused:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_period_in_a_nested_group_on_a_moment_property_is_checked() {
+        let fields = fields_with_filter(json!({
+            "operation": "or",
+            "filters": [{
+                "operation": "and",
+                "filters": [
+                    { "propertyId": "made", "condition": "isWithin", "values": ["last7Days"] },
+                    { "propertyId": "made", "condition": "isWithin", "values": ["lastYear"] },
+                ],
+            }],
+        }));
+        assert_eq!(validate_view_fields(&fields), Ok(()));
+        assert!(validate_view_filter_values(&fields, &definitions()).is_err());
+    }
+
+    #[test]
+    fn a_period_on_a_text_property_or_a_pseudo_property_passes_unchecked() {
+        let text = vec![CardPropertyDefinition::new(
+            "due",
+            "Due",
+            PropertyType::Text,
+        )];
+        assert_eq!(
+            validate_view_filter_values(&date_clause("is", "lastYear"), &text),
+            Ok(())
+        );
+        let done = fields_with_filter(json!({
+            "operation": "and",
+            "filters": [{ "propertyId": "done", "condition": "isSet", "values": [] }],
+        }));
+        assert_eq!(validate_view_fields(&done), Ok(()));
+        assert_eq!(validate_view_filter_values(&done, &definitions()), Ok(()));
+    }
 }

@@ -130,10 +130,7 @@ async fn attach(ts: &TestServer, board_id: &str, file_id: &str) -> String {
         updated_at: 1,
         ..Block::default()
     };
-    ts.client
-        .insert_blocks(board_id, &[attachment])
-        .await
-        .check_created();
+    crate::blocks::insert(&ts.client, board_id, &[attachment]).await;
     made[0].id.clone()
 }
 
@@ -411,8 +408,9 @@ async fn of_a_version_gone_back_to_and_one_written_at_once_one_is_a_conflict() {
     ts.teardown().await;
 }
 
-/// The attachments that give a file say the size of its newest version, once one is
-/// written and once one is gone back to; the attachment of another file is left.
+/// The attachments that give a file say the size of its newest version: as they are
+/// made, once one is written and once one is gone back to; the attachment of another
+/// file is left.
 #[tokio::test]
 async fn an_attachment_says_the_size_of_the_newest_version() {
     let ts = Setup::native().start().await.init_basic().await;
@@ -420,7 +418,8 @@ async fn an_attachment_says_the_size_of_the_newest_version() {
     let other = uploaded_id(&upload(&ts.client, &board.id, "other.txt", b"another").await);
     attach(&ts, &board.id, &file_id).await;
     attach(&ts, &board.id, &other).await;
-    assert_eq!(attached_size(&ts, &board.id, &file_id).await, None);
+    assert_eq!(attached_size(&ts, &board.id, &file_id).await, Some(5));
+    assert_eq!(attached_size(&ts, &board.id, &other).await, Some(7));
 
     add_version(&ts.client, &board.id, &file_id, 1, b"the second")
         .await
@@ -431,7 +430,7 @@ async fn an_attachment_says_the_size_of_the_newest_version() {
         .await
         .check_ok();
     assert_eq!(attached_size(&ts, &board.id, &file_id).await, Some(5));
-    assert_eq!(attached_size(&ts, &board.id, &other).await, None);
+    assert_eq!(attached_size(&ts, &board.id, &other).await, Some(7));
     ts.teardown().await;
 }
 
@@ -460,13 +459,13 @@ async fn versions_go_for_good_with_the_card_that_attached_their_file() {
     };
 
     ts.app
-        .delete_block(&card_id, &me, ChangeNotification::default())
+        .delete_block_unchecked(&card_id, &me, ChangeNotification::default())
         .await
         .expect("the card goes to the trash");
     assert_eq!(collect().await, 0, "the card in the trash holds its file");
     assert_eq!(remove_doomed(&ts, now_millis()).await.removed, 0);
     ts.app
-        .undelete_block(&card_id, &me)
+        .undelete_block_unchecked(&card_id, &me)
         .await
         .expect("the card comes back");
     assert_eq!(versions(&ts.client, &board.id, &file_id).await.len(), 3);
@@ -476,7 +475,7 @@ async fn versions_go_for_good_with_the_card_that_attached_their_file() {
     );
 
     ts.app
-        .delete_block(&card_id, &me, ChangeNotification::default())
+        .delete_block_unchecked(&card_id, &me, ChangeNotification::default())
         .await
         .expect("the card goes to the trash again");
     ts.app
@@ -915,11 +914,7 @@ async fn a_copy_and_an_archive_carry_the_newest_version_only() {
         .await
         .created_json();
     let copy_id = copy["containers"][0]["id"].as_str().expect("the copy");
-    let blocks: Vec<Block> = ts
-        .client
-        .get(&format!("{TEST_WS}/boards/{copy_id}/blocks?all=true"))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&ts.client, copy_id).await;
     let copied = blocks
         .iter()
         .find(|block| block.block_type == BlockType::Attachment)

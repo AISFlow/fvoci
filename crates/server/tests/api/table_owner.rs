@@ -4,18 +4,19 @@
 //! uses them. It serves; it does not start on a schema that is behind it, or on one
 //! whose record is the one before the baseline, and says what to run; the migration
 //! takes the lock of the server, as a start does, but the replacing of the record does
-//! not: it leaves the schema as it is, while a server serves it.
+//! not: it leaves the schema as it is, while a server serves it, and the migrations
+//! after the baseline wait for the lock.
 
 use std::path::PathBuf;
 
 use fvoci_model::{Card, Container, ContainerVisibility};
 use fvoci_server::Server;
 use fvoci_server::config::Configuration;
-use fvoci_store::DbType;
 use fvoci_store::testing::{
     TableOwner, TestDatabase, db_type_of_the_tests, forget_migration,
     write_the_record_before_the_baseline,
 };
+use fvoci_store::{DbType, SchemaCheck, Store};
 
 use crate::boards::new_board;
 use crate::common::{Setup, TEST_WORKSPACE_ID, TEST_WS};
@@ -60,7 +61,8 @@ async fn a_server_serves_tables_its_role_does_not_own() {
 /// behind it, or before the baseline, and names the migration to run; the owner's
 /// migration takes the lock of the server, and the server then starts. While it serves,
 /// a migration of a schema that is up to date does nothing, the record before the
-/// baseline is replaced, and a schema behind is refused. Whoever owns the tables.
+/// baseline is replaced and what is after the baseline refused, and a schema behind is
+/// refused. Whoever owns the tables.
 #[tokio::test]
 async fn a_server_waits_for_the_owner_to_migrate_a_schema_behind_it() {
     if db_type_of_the_tests() != DbType::Postgres {
@@ -124,18 +126,32 @@ async fn the_owner_migrates_while_no_server_serves(owner: TableOwner) {
     fvoci_server::app::migrate_database(&config(database.owner_database_connection()))
         .await
         .expect("nothing to do while the server serves the database");
-    // Before the baseline, only the record changes: it is replaced without the lock.
+    // Before the baseline, the record is replaced without the lock; the migrations
+    // after the baseline, which change the schema, wait for the lock the server holds,
+    // and give up.
     write_the_record_before_the_baseline(database.db_type(), database.owner_database_connection())
         .await;
-    fvoci_server::app::migrate_database(&config(database.owner_database_connection()))
+    the_migration_waits_for_the_server(&config(database.owner_database_connection()), owner).await;
+    let store = Store::open(database.db_type(), database.owner_database_connection())
         .await
-        .expect("the record is replaced while the server serves the database");
-    fvoci_server::app::check_database(&config(database.owner_database_connection()))
-        .await
-        .expect("up to date again");
+        .expect("the owner connects");
+    assert_eq!(
+        store.check_schema().await.expect("checked"),
+        SchemaCheck::Behind,
+        "{owner:?}: the record is the baseline's, the migrations after it to apply"
+    );
+    store.close().await;
     // Behind, it waits for the lock the server holds, and gives up.
     forget_migration(database.db_type(), database.owner_database_connection(), 1).await;
-    let busy = fvoci_server::app::migrate_database(&config(database.owner_database_connection()))
+    the_migration_waits_for_the_server(&config(database.owner_database_connection()), owner).await;
+    server.shutdown().await;
+    database.remove().await;
+}
+
+/// The owner's migration of a schema behind waits for the lock of the server that
+/// serves the database, and gives up, saying what to do.
+async fn the_migration_waits_for_the_server(config: &Configuration, owner: TableOwner) {
+    let busy = fvoci_server::app::migrate_database(config)
         .await
         .expect_err("no migration while a server serves the database");
     let said = format!("{busy:#}");
@@ -143,6 +159,4 @@ async fn the_owner_migrates_while_no_server_serves(owner: TableOwner) {
         said.contains("another process is the server") && said.contains("stop it"),
         "{owner:?}: {said}"
     );
-    server.shutdown().await;
-    database.remove().await;
 }

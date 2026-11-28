@@ -147,13 +147,9 @@ pub(crate) fn new_block(board_id: &str, parent_id: &str, block_type: BlockType) 
     }
 }
 
-/// Inserts one block through the API and returns it as the server answered.
+/// Makes one block by the route of its type and returns it as the server answered.
 pub(crate) async fn insert_block(client: &Client, block: &Block) -> Block {
-    let mut inserted: Vec<Block> = client
-        .insert_blocks(&block.container_id, std::slice::from_ref(block))
-        .await
-        .created_json();
-    inserted.pop().expect("one block was inserted")
+    crate::blocks::insert_one(client, block).await
 }
 
 /// Inserts a card block with the given raw fields through the application store.
@@ -164,7 +160,7 @@ async fn insert_card_block(th: &TestServer, board_id: &str, fields: Value) -> Bl
     };
     let user_id = th.client.me().await.id;
     th.app
-        .insert_block(&mut block, &user_id, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut block, &user_id, ChangeNotification::Suppress)
         .await
         .expect("card block is stored");
     block
@@ -196,7 +192,7 @@ async fn get_cards_fixture(th: &TestServer) -> Container {
         let path = format!("{}?disableNotify=true", cards_path(&board.id));
         let created: Card = th.client.post(&path, &card).await.created_json();
 
-        let texts: Vec<Block> = (0..3)
+        let mut texts: Vec<Block> = (0..3)
             .map(|text| Block {
                 created_by: user_id.clone(),
                 modified_by: user_id.clone(),
@@ -204,13 +200,10 @@ async fn get_cards_fixture(th: &TestServer) -> Container {
                 ..new_block(&board.id, &created.id, BlockType::Attachment)
             })
             .collect();
-        th.client
-            .post(
-                &format!("{TEST_WS}/boards/{}/blocks?disableNotify=true", board.id),
-                &texts,
-            )
+        th.app
+            .insert_blocks_unchecked(&mut texts, &user_id, ChangeNotification::Suppress)
             .await
-            .check_created();
+            .expect("the blocks below the card are stored");
     }
     board
 }
@@ -461,7 +454,7 @@ async fn app_create_card_success_scenario() {
 
     let new_card = th
         .app
-        .create_card(card.clone(), &board.id, &user_id, ChangeNotification::Send)
+        .create_card_unchecked(card.clone(), &board.id, &user_id, ChangeNotification::Send)
         .await
         .expect("the card is created");
 
@@ -486,7 +479,7 @@ async fn app_create_card_error_scenario() {
     };
     let error = th
         .app
-        .create_card(too_long, &board.id, &user_id, ChangeNotification::Send)
+        .create_card_unchecked(too_long, &board.id, &user_id, ChangeNotification::Send)
         .await
         .expect_err("the title is too long");
     assert_eq!(error.kind(), ErrorKind::BadRequest, "{error:?}");
@@ -500,7 +493,7 @@ async fn app_create_card_error_scenario() {
     for board_id in [UNKNOWN_ID, "no-such-board"] {
         let error = th
             .app
-            .create_card(
+            .create_card_unchecked(
                 Card::default(),
                 board_id,
                 &user_id,
@@ -541,7 +534,7 @@ async fn app_get_cards_success_scenario() {
         })
         .collect();
     th.app
-        .insert_blocks(
+        .insert_blocks_unchecked(
             &mut blocks,
             &th.stranger().await,
             ChangeNotification::Suppress,
@@ -577,16 +570,10 @@ async fn app_get_cards_error_scenario() {
         .await;
     let response = th
         .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({
-                "containers": [{"id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "open"}],
-                "blocks": [{"id": "c1", "containerId": "b1", "type": "card", "fields": {"icon": 5}}],
-            }),
-        )
+        .post(&cards_path(&board.id), &json!({"title": "bad", "icon": 5}))
         .await;
+    // The body is refused as it is read, before it is a card.
     response.check_bad_request();
-    assert_eq!(response.refused_at(), "/blocks/0/fields");
 
     let cards = th
         .app
@@ -620,7 +607,7 @@ async fn app_patch_card_success_scenario() {
     };
     let card = th
         .app
-        .create_card(card, &board.id, &user_id, ChangeNotification::Send)
+        .create_card_unchecked(card, &board.id, &user_id, ChangeNotification::Send)
         .await
         .expect("the card is created");
 
@@ -638,13 +625,7 @@ async fn app_patch_card_success_scenario() {
 
     let patched = th
         .app
-        .patch_card(
-            &card_patch,
-            &card.id,
-            &user_id,
-            ChangeNotification::Send,
-            None,
-        )
+        .patch_card_unchecked(&card_patch, &card.id, &user_id, ChangeNotification::Send)
         .await
         .expect("the card is patched");
 
@@ -663,12 +644,11 @@ async fn app_patch_card_error_scenario() {
     let card = &cards[0];
     let patch_card = async |patch: &CardPatch, card_id: &str| {
         th.app
-            .patch_card(
+            .patch_card_unchecked(
                 patch,
                 card_id,
                 &th.stranger().await,
                 ChangeNotification::Send,
-                None,
             )
             .await
             .expect_err("the patch is refused")
@@ -722,7 +702,7 @@ async fn app_get_card_success_scenario() {
     };
     let user_id = th.client.me().await.id;
     th.app
-        .insert_block(&mut block, &user_id, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut block, &user_id, ChangeNotification::Suppress)
         .await
         .expect("the card block is stored");
 
@@ -1092,7 +1072,7 @@ async fn get_cards_paging() {
         })
         .collect();
     th.app
-        .insert_blocks(
+        .insert_blocks_unchecked(
             &mut blocks,
             &th.stranger().await,
             ChangeNotification::Suppress,
@@ -1144,10 +1124,11 @@ async fn get_cards_paging() {
     th.teardown().await;
 }
 
-/// A card block whose `icon` is not a string or whose `isTemplate` is not a boolean is
-/// refused (400 naming `fields`) even through the block routes, so invalid card metadata
-/// cannot poison the board's card list. `null` stands for an absent field, and stored
-/// `contentOrder` is ignored regardless of shape.
+/// A card whose `icon` is not a string or whose `isTemplate` is not a boolean is refused
+/// (400, as the body is read), so invalid card metadata cannot poison the board's card
+/// list.
+/// `null` stands for an absent field, and stored `contentOrder` is ignored regardless of
+/// shape.
 #[tokio::test]
 async fn a_malformed_card_block_is_refused() {
     let th = Setup::native().start().await.init_basic().await;
@@ -1171,51 +1152,32 @@ async fn a_malformed_card_block_is_refused() {
         json!({"isTemplate": "yes"}),
         json!({"isTemplate": 1}),
     ] {
+        th.client
+            .post(&cards_path(&board.id), &fields)
+            .await
+            .check_bad_request();
+    }
+    // Nor can a card get it by a patch.
+    for icon in [json!(5), json!(["x"])] {
         let response = th
             .client
-            .post(
-                &format!("{TEST_WS}/containers-and-blocks"),
-                &json!({
-                    "containers": [{"id": "b1", "workspaceId": TEST_WORKSPACE_ID, "visibility": "open"}],
-                    "blocks": [{"id": "c1", "containerId": "b1", "type": "card", "fields": fields}],
-                }),
-            )
+            .patch(&card_path(&nulls.id), &json!({ "icon": icon }))
             .await;
         response.check_bad_request();
-        assert_eq!(response.refused_at(), "/blocks/0/fields", "{fields}");
-
-        // Nor can a card get it by a patch.
-        let response = th
-            .client
-            .patch(
-                &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, nulls.id),
-                &json!({"updatedFields": fields}),
-            )
-            .await;
-        response.check_bad_request();
-        assert_eq!(
-            response.refused_at(),
-            "/updatedFields",
-            "the member of the patch: {fields}"
-        );
-        let batch = json!({"blockIds": [nulls.id], "blockPatches": [{"updatedFields": fields}]});
-        let response = th
-            .client
-            .patch(&format!("{TEST_WS}/boards/{}/blocks", board.id), &batch)
-            .await;
-        response.check_bad_request();
-        assert_eq!(
-            response.refused_at(),
-            "/blockPatches/0/updatedFields",
-            "{fields}"
-        );
     }
     // Another block may hold such fields: only a card is read as one.
-    let attachment = Block {
+    let mut attachment = Block {
         fields: serde_json::from_value(json!({"icon": 5})).expect("an object"),
         ..new_block(&board.id, &nulls.id, BlockType::Attachment)
     };
-    insert_block(&th.client, &attachment).await;
+    th.app
+        .insert_block_unchecked(
+            &mut attachment,
+            &th.stranger().await,
+            ChangeNotification::Suppress,
+        )
+        .await
+        .expect("the block below the card is stored");
     assert_eq!(
         cards_of(&th.client, &board.id, "").await.len(),
         4,
@@ -1251,14 +1213,6 @@ async fn a_card_stored_with_a_malformed_field_is_written_and_copied_without_it()
         .await
         .ok_json();
     assert_eq!(patched.title, "new", "the patch writes the title");
-    let response = th
-        .client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id),
-            &json!({"title": "newer"}),
-        )
-        .await;
-    response.check_no_content();
 
     th.app
         .store()
@@ -1270,10 +1224,7 @@ async fn a_card_stored_with_a_malformed_field_is_written_and_copied_without_it()
         .await
         .check_created();
     th.client
-        .post_empty(&format!(
-            "{TEST_WS}/boards/{}/blocks/{}/duplicate",
-            board.id, card.id
-        ))
+        .post_empty(&format!("{}/{}/duplicate", cards_path(&board.id), card.id))
         .await
         .check_created();
     th.teardown().await;
@@ -1294,24 +1245,20 @@ async fn a_title_with_u0000_is_refused() {
     response.check_bad_request();
     assert_eq!(response.refused_at(), "/title");
 
-    let block = Block {
-        title: "a\u{0}b".to_owned(),
-        ..new_block(&board.id, "", BlockType::View)
-    };
     let response = th
         .client
-        .insert_blocks(&board.id, std::slice::from_ref(&block))
+        .post(
+            &format!("{TEST_WS}/boards/{}/views", board.id),
+            &json!({"title": "a\u{0}b", "viewType": "board"}),
+        )
         .await;
     response.check_bad_request();
-    assert_eq!(response.refused_at(), "/0/title");
+    assert_eq!(response.refused_at(), "/title");
 
     let card = create_card(&th.client, &board.id, &json!({"title": "fine"})).await;
     let response = th
         .client
-        .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id),
-            &json!({"title": "a\u{0}b"}),
-        )
+        .patch(&card_path(&card.id), &json!({"title": "a\u{0}b"}))
         .await;
     response.check_bad_request();
     assert_eq!(response.refused_at(), "/title");
@@ -1867,23 +1814,16 @@ async fn card_changes_call_the_webhook() {
 
 /// Posts a comment on the card and returns it as stored (the server says when).
 async fn comment_on(client: &Client, card: &Card) -> Block {
-    let comment = Block {
-        id: new_id(),
-        container_id: card.board_id.clone(),
-        parent_id: card.id.clone(),
-        block_type: BlockType::Comment,
-        title: "said".to_owned(),
-        created_at: 1,
-        updated_at: 1,
-        ..Block::default()
-    };
-    let stored: Vec<Block> = client
-        .insert_blocks(&card.board_id, std::slice::from_ref(&comment))
+    let stored: Block = client
+        .post(
+            &format!("{TEST_WS}/boards/{}/cards/{}/comments", card.board_id, card.id),
+            &json!({"body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "said"}]}]}}),
+        )
         .await
         .created_json();
     // The next comment is posted a millisecond later at least.
     tokio::time::sleep(Duration::from_millis(3)).await;
-    stored.into_iter().next().expect("the comment")
+    stored
 }
 
 /// Both the card list and `getCard` report when a card's last comment was posted (zero if
@@ -1921,27 +1861,13 @@ async fn a_card_says_when_it_was_last_commented_on() {
         posted_at(&cards_of(&th.client, &board.id, "").await),
         expected(later.created_at)
     );
-    // What is not a comment of the card does not count: a block on the card after it,
-    // and a comment on the comment.
+    // What is not a comment of the card does not count: an attachment made after it.
     tokio::time::sleep(Duration::from_millis(3)).await;
     insert_block(
         &th.client,
         &new_block(&board.id, &card.id, BlockType::Attachment),
     )
     .await;
-    let reply = Block {
-        parent_id: later.id.clone(),
-        ..new_block(&board.id, &later.id, BlockType::Comment)
-    };
-    let replied = th
-        .client
-        .insert_blocks(&board.id, std::slice::from_ref(&reply))
-        .await;
-    assert!(
-        replied.status.is_success() || replied.status == StatusCode::BAD_REQUEST,
-        "{}",
-        replied.text()
-    );
     let first_page: Vec<Card> = cards_of(&th.client, &board.id, "?page=0&perPage=1").await;
     assert_eq!(
         posted_at(&first_page),
@@ -1958,8 +1884,16 @@ async fn a_card_says_when_it_was_last_commented_on() {
         "commenting does not touch the card"
     );
 
-    let block = |id: &str| format!("{TEST_WS}/boards/{}/blocks/{id}", board.id);
-    th.client.delete(&block(&later.id)).await.check_no_content();
+    let comment = |id: &str| {
+        format!(
+            "{TEST_WS}/boards/{}/cards/{}/comments/{id}",
+            board.id, card.id
+        )
+    };
+    th.client
+        .delete(&comment(&later.id))
+        .await
+        .check_no_content();
     let read: Card = th.client.get(&card_path(&card.id)).await.ok_json();
     assert_eq!(
         read.last_comment_at, earlier.created_at,
@@ -1975,17 +1909,22 @@ async fn a_card_says_when_it_was_last_commented_on() {
         "patchCard says it too"
     );
     // A comment changed is not a comment posted.
+    let again = json!({"type": "doc", "content": [{"type": "paragraph",
+        "content": [{"type": "text", "text": "said again"}]}]});
     th.client
-        .patch(&block(&earlier.id), &json!({"title": "said again"}))
+        .patch(
+            &comment(&earlier.id),
+            &json!({"body": again, "readAt": earlier.updated_at}),
+        )
         .await
-        .check_no_content();
+        .check_ok();
     let read: Card = th.client.get(&card_path(&card.id)).await.ok_json();
     assert_eq!(
         read.last_comment_at, earlier.created_at,
         "the time it was posted"
     );
     th.client
-        .delete(&block(&earlier.id))
+        .delete(&comment(&earlier.id))
         .await
         .check_no_content();
     assert_eq!(

@@ -5,7 +5,7 @@ use fvoci_model::{
 };
 
 use crate::Store;
-use crate::db::{Id, Param, Row, Scope};
+use crate::db::{FromRow, Id, Param, Row, Scope};
 use crate::error::StoreError;
 use crate::unit_progress::require_live_unit;
 
@@ -41,12 +41,7 @@ impl Store {
                 sql.push_bind(" AND kind = ", kind.as_str());
             }
             sql.push(" ORDER BY created_at DESC, id DESC");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(note_from_row)
-                .collect()
+            scope.all(sql).await
         })
         .await
     }
@@ -93,8 +88,7 @@ impl Store {
                 .push(
                     ") RETURNING id, unit_id, container_id, kind, content, created_at, updated_at",
                 );
-            let row = scope.fetch_optional(sql).await?.ok_or(StoreError::NoRows)?;
-            note_from_row(&row)
+            scope.first(sql).await?.ok_or(StoreError::NoRows)
         })
         .await
     }
@@ -144,11 +138,7 @@ impl Store {
                 .push(
                     " RETURNING id, unit_id, container_id, kind, content, created_at, updated_at",
                 );
-            let row = scope
-                .fetch_optional(sql)
-                .await?
-                .ok_or_else(|| StoreError::not_found("unit note"))?;
-            note_from_row(&row)
+            scope.one(sql, "unit note").await
         })
         .await
     }
@@ -207,7 +197,7 @@ async fn require_live_unit_exists(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("b", "c"), ("c", "w")]));
-    if scope.fetch_optional(sql).await?.is_none() {
+    if !scope.exists(sql).await? {
         return Err(StoreError::not_found("unit"));
     }
     Ok(())
@@ -240,23 +230,21 @@ async fn find_live_note_unit(
         .push(" AND w.deleted_at IS NULL")
         .push(" AND o.deleted_at IS NULL")
         .push(&scope.same_organization(&[("un", "b"), ("b", "c"), ("c", "w")]));
-    let row = scope
-        .fetch_optional(sql)
-        .await?
-        .ok_or_else(|| StoreError::not_found("unit note"))?;
-    row.id(0)
+    scope.one(sql, "unit note").await
 }
 
-fn note_from_row(row: &Row) -> Result<UnitNote, StoreError> {
-    Ok(UnitNote {
-        id: row.id(0)?,
-        unit_id: row.id(1)?,
-        container_id: row.id(2)?,
-        kind: note_kind_from_row(row, 3)?,
-        content: row.text(4)?,
-        created_at: row.int(5)?,
-        updated_at: row.int(6)?,
-    })
+impl FromRow for UnitNote {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        Ok(UnitNote {
+            id: row.id(0)?,
+            unit_id: row.id(1)?,
+            container_id: row.id(2)?,
+            kind: note_kind_from_row(row, 3)?,
+            content: row.text(4)?,
+            created_at: row.int(5)?,
+            updated_at: row.int(6)?,
+        })
+    }
 }
 
 fn note_kind_from_row(row: &Row, index: usize) -> Result<UnitNoteKind, StoreError> {

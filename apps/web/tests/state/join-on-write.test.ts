@@ -190,7 +190,7 @@ const SENT = [
   'joinContainer',
   'upload',
   'createAttachment',
-  'deleteBlock',
+  'deleteAttachment',
   'deleteComment',
 ] as const;
 
@@ -241,7 +241,7 @@ describe('a write off the body of an open board the reader is no member of', () 
       write: 'an attachment deleted',
       run: ({ card, attachmentId }: Awaited<ReturnType<typeof openUnjoined>>) =>
         card.deleteAttachment(attachmentId),
-      sends: ['deleteBlock'],
+      sends: ['deleteAttachment'],
     },
     {
       write: 'their own comment deleted',

@@ -139,6 +139,13 @@
     if (content && !content.contains(document.activeElement)) content.focus();
   }
 
+  /** The notice of a next card is pressed over the card it was made from: the card stays open. */
+  function keepOverNotice(event: Event): void {
+    if (event.target instanceof Element && event.target.closest('[data-next-card-toast]')) {
+      event.preventDefault();
+    }
+  }
+
   /** Back to the card on the board: the one this was opened from, or the one shown last. */
   function focusOnClose(event: Event): void {
     if (shown === undefined) return;
@@ -181,6 +188,7 @@
     class={['@container/card flex flex-col gap-0 overflow-hidden p-0', FRAME_CLASS[frame]]}
     onOpenAutoFocus={focusOnOpen}
     onCloseAutoFocus={focusOnClose}
+    onInteractOutside={keepOverNotice}
   >
     <Dialog.Title class="sr-only">{title}</Dialog.Title>
     <Dialog.Description class="sr-only">

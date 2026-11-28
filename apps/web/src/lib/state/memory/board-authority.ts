@@ -2,8 +2,8 @@
  * Server-authority operations for `MemoryBackend` (`state/memory/backend.ts`):
  * fractional-indexed view writes (`writeMemoryView`, `moveMemoryView`,
  * `duplicateMemoryView`), atomic `duplicateMemoryCard`, `moveMemoryViewCards`,
- * `batchDeleteMemoryCards` / `batchRestoreMemoryCards`, and formal card comment
- * delete/restore.
+ * `batchDeleteMemoryCards` / `batchRestoreMemoryCards`, formal card comment
+ * delete/restore, and the trash of views and attachments.
  */
 import { valuesOfCopy } from '../../logic/dependencies.ts';
 import { isPlace, movedTo, placeAtEnd } from '../../logic/list-places.ts';
@@ -15,6 +15,7 @@ import type {
   CardMovesOutput,
   CardSummary,
   Comment,
+  CommentVersion,
   ViewDraft,
 } from '../backend.ts';
 import { droppedCardOrder } from '../card-order.ts';
@@ -23,7 +24,9 @@ import { applyCardPatch } from '../patches.ts';
 
 import { blockInBoard, createMemoryCard, withLastComment } from './block-ops.ts';
 import { flushCard } from './bodies.ts';
-import { mayRemoveComments, roleOn } from './comments.ts';
+import { noteCardChanged, noteCardsRestored } from './card-activity.ts';
+import { makeNextCard, settleCardChange } from './card-recurrence.ts';
+import { mayRemoveComments, roleOn, versionsOf } from './comments.ts';
 import { memberRole } from './container-access.ts';
 import {
   containerInWorld,
@@ -195,6 +198,7 @@ export function duplicateMemoryCard(
     properties: valuesOfCopy(summaryOf(source), board.cardProperties, onBoard),
     isTemplate: asTemplate ?? source.fields.isTemplate,
     body: copy(source.body),
+    ...(source.fields.recurrence ? { recurrence: copy(source.fields.recurrence) } : {}),
     quiet: true,
   });
   for (const attachment of ctx.world.childrenOf(cardId)) {
@@ -262,20 +266,23 @@ export function moveMemoryViewCards(
   view.updatedAt = ctx.world.now();
   view.modifiedBy = ctx.userId;
 
-  const updatedCards = applyMovedGroupProperty(ctx, board, movedCards, move);
+  const made: StoredCard[] = [];
+  const updatedCards = applyMovedGroupProperty(ctx, board, movedCards, move, made);
   tellBlocks(ctx.world, boardId, [view]);
-  if (updatedCards.length > 0) tellBlocks(ctx.world, boardId, updatedCards);
+  if (updatedCards.length > 0) tellBlocks(ctx.world, boardId, [...updatedCards, ...made]);
   return {
     view: viewOf(view),
     cards: updatedCards.map((c) => withLastComment(ctx.world, summaryOf(c))),
   };
 }
 
+/** Gives the moved cards the group's value; the next cards of those it makes done go to `made`. */
 function applyMovedGroupProperty(
   ctx: MemoryContainerContext,
   board: Container,
   movedCards: readonly StoredCard[],
   move: CardMovesInput,
+  made: StoredCard[],
 ): StoredCard[] {
   if (!move.groupPropertyId) return [];
   const prop = board.cardProperties.find((p) => p.id === move.groupPropertyId);
@@ -288,14 +295,17 @@ function applyMovedGroupProperty(
     (Array.isArray(groupVal) && groupVal.length === 0);
   const updatedCards: StoredCard[] = [];
   for (const card of movedCards) {
-    const next = applyCardPatch(
+    const moved = applyCardPatch(
       card,
       cleared ? { deletedProperties: [prop.id] } : { updatedProperties: { [prop.id]: groupVal } },
     );
-    next.updatedAt = ctx.world.now();
-    next.modifiedBy = ctx.userId;
-    ctx.world.blocks.set(card.id, next);
-    updatedCards.push(next);
+    const following = settleCardChange(ctx, board, card, moved);
+    moved.updatedAt = ctx.world.now();
+    moved.modifiedBy = ctx.userId;
+    ctx.world.blocks.set(card.id, moved);
+    noteCardChanged(ctx.world, card, moved, ctx.userId);
+    updatedCards.push(moved);
+    if (following) made.push(makeNextCard(ctx, board, moved, following));
   }
   return updatedCards;
 }
@@ -339,8 +349,19 @@ export function batchRestoreMemoryCards(
   if (cardIds.length === 0 || cardIds.length > 200 || new Set(cardIds).size !== cardIds.length) {
     fail(400, 'invalid cardIds', { field: 'cardIds' });
   }
-  const restoredBlocks: StoredBlock[] = [];
+  // As the server: every card is in the trash, as deleted or with what it was under, before any
+  // comes back; one that came back with its family is not brought back again.
+  const inFamilies = new Set<string>();
   for (const cardId of cardIds) {
+    const deleted = ctx.world.deletedBlocks.get(cardId);
+    if (deleted?.containerId === boardId)
+      for (const block of deleted.blocks) inFamilies.add(block.id);
+  }
+  if (cardIds.some((cardId) => !inFamilies.has(cardId))) fail(404, 'no such block in the trash');
+  const restoredBlocks: StoredBlock[] = [];
+  const back = new Set<string>();
+  for (const cardId of cardIds) {
+    if (back.has(cardId) || !ctx.world.deletedBlocks.has(cardId)) continue;
     const restored = takeBlockBack(
       ctx.world,
       ctx.userId,
@@ -349,8 +370,10 @@ export function batchRestoreMemoryCards(
       () => memberRole(ctx.world, ctx.userId, boardId),
       () => containerInWorld(ctx.world, boardId),
     );
+    for (const block of restored) back.add(block.id);
     restoredBlocks.push(...restored);
   }
+  noteCardsRestored(ctx.world, restoredBlocks, ctx.userId);
   if (restoredBlocks.length > 0) tellBlocks(ctx.world, boardId, restoredBlocks);
   return restoredBlocks
     .filter((b): b is StoredCard => b.type === 'card')
@@ -367,16 +390,18 @@ export function deleteMemoryComment(
   if (role === '' || role === 'viewer') fail(403, 'access denied');
   const block = blockInBoard(ctx.world, boardId, commentId, 'comment');
   if (block.parentId !== cardId) fail(404, 'no such comment');
-  const entry = { containerId: boardId, blocks: [block], ...deletion(ctx) };
+  // What is below it goes with it, and is the deleter's to delete too.
+  const gone = subtreeOf(ctx.world, block);
+  const entry = { containerId: boardId, blocks: gone, ...deletion(ctx) };
   if (!mayRemoveComments(role, ctx.userId, entry)) {
     fail(403, "access denied to delete other users' comments");
   }
-  ctx.world.blocks.delete(commentId);
+  for (const each of gone) ctx.world.blocks.delete(each.id);
   ctx.world.deletedBlocks.set(commentId, entry);
   ctx.world.tellContainer(boardId, {
     kind: 'blocksDeleted',
     containerId: boardId,
-    blockIds: [commentId],
+    blockIds: gone.map((each) => each.id),
   });
 }
 
@@ -398,4 +423,73 @@ export function restoreMemoryComment(
   if (!comment) fail(404, 'no such comment');
   tellBlocks(ctx.world, boardId, restored);
   return commentOf(comment);
+}
+
+/** The earlier texts of a comment of the board, for a member of it. */
+export function memoryCommentVersions(
+  ctx: MemoryContainerContext,
+  boardId: string,
+  commentId: string,
+): CommentVersion[] {
+  memberRole(ctx.world, ctx.userId, boardId);
+  return versionsOf(ctx.world, boardId, commentId);
+}
+
+/**
+ * Moves a view of the board, or an attachment of the card `cardId`, to the
+ * trash with what is below it, as `deleteBoardView` and `deleteCardAttachment`
+ * do: a block of another type, board or card is not there.
+ */
+export function deleteMemoryBlockOf(
+  ctx: MemoryContainerContext,
+  boardId: string,
+  blockId: string,
+  type: 'view' | 'attachment',
+  cardId?: string,
+): void {
+  requireBoardEditor(ctx, boardId);
+  if (cardId !== undefined) blockInBoard(ctx.world, boardId, cardId, 'card');
+  const block = blockInBoard(ctx.world, boardId, blockId, type);
+  if (cardId !== undefined && block.parentId !== cardId) fail(404, `no such ${type}`);
+  const gone = subtreeOf(ctx.world, block);
+  for (const each of gone) ctx.world.blocks.delete(each.id);
+  ctx.world.deletedBlocks.set(blockId, { containerId: boardId, blocks: gone, ...deletion(ctx) });
+  ctx.world.tellContainer(boardId, {
+    kind: 'blocksDeleted',
+    containerId: boardId,
+    blockIds: gone.map((each) => each.id),
+  });
+}
+
+/**
+ * Takes a view of the board, or an attachment of the card `cardId`, back out
+ * of the trash where it went on its own, as `restoreBoardView` and
+ * `restoreCardAttachment` do: an attachment gone with its card is not there.
+ */
+export function restoreMemoryBlockOf(
+  ctx: MemoryContainerContext,
+  boardId: string,
+  blockId: string,
+  type: 'view' | 'attachment',
+  cardId?: string,
+): void {
+  requireBoardEditor(ctx, boardId);
+  if (cardId !== undefined) blockInBoard(ctx.world, boardId, cardId, 'card');
+  const top = ctx.world.deletedBlocks.get(blockId)?.blocks[0];
+  if (
+    top?.id !== blockId ||
+    top.type !== type ||
+    (cardId !== undefined && top.parentId !== cardId)
+  ) {
+    fail(404, `no such ${type}`);
+  }
+  const restored = takeBlockBack(
+    ctx.world,
+    ctx.userId,
+    boardId,
+    blockId,
+    () => memberRole(ctx.world, ctx.userId, boardId),
+    () => containerInWorld(ctx.world, boardId),
+  );
+  tellBlocks(ctx.world, boardId, restored);
 }

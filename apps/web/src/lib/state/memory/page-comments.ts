@@ -12,6 +12,7 @@
  */
 import type { DocNode } from '../../editor/schema.ts';
 import type { BodyWrite, Comment, CommentVersion } from '../backend.ts';
+import type { WithReactions } from '../reaction-types.ts';
 
 import { memberRole } from './container-access.ts';
 import { checkedComment } from './bodies.ts';
@@ -23,6 +24,7 @@ import {
   noteChange,
 } from './comments.ts';
 import { noteComment } from './notifications.ts';
+import { withMemoryReactions } from './reactions.ts';
 import { fail } from './refuse.ts';
 import { commentOf, scramble } from './shapes.ts';
 import { deletion } from './trash.ts';
@@ -209,9 +211,10 @@ export abstract class MemoryPageComments {
   protected abstract enter(method: CommentMethod): Promise<void>;
   protected abstract on(wikiId: string, pageId: string): OnPage;
 
-  async comments(wikiId: string, pageId: string): Promise<Comment[]> {
+  async comments(wikiId: string, pageId: string): Promise<WithReactions<Comment>[]> {
     await this.enter('comments');
-    return commentsOf(this.on(wikiId, pageId));
+    const on = this.on(wikiId, pageId);
+    return commentsOf(on).map((comment) => withMemoryReactions(on.world, comment));
   }
 
   async createComment(wikiId: string, pageId: string, body: DocNode): Promise<Comment> {

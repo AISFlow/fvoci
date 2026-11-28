@@ -1,12 +1,24 @@
 /** The title a board, wiki, diary or course is shown under: its own, or the words for one without. */
 import { m } from '$lib/i18n/paraglide/messages.js';
 import type { Container, ContainerKind } from '$lib/logic/wire.ts';
+import type { Favorite } from '$lib/state/index.ts';
 
 export function shownTitle(container: Pick<Container, 'title' | 'kind'>): string {
   if (container.title) return container.title;
   if (container.kind === 'diary') return m.diary_untitled();
   if (container.kind === 'course') return m.course_untitled();
   return container.kind === 'wiki' ? m.wiki_untitled() : m['Sidebar.untitled-board']();
+}
+
+/** The title a star is shown under: what it is on's, or the words for one without. */
+export function favoriteTitle(
+  favorite: Pick<Favorite, 'kind' | 'title' | 'containerKind'>,
+): string {
+  if (favorite.title) return favorite.title;
+  if (favorite.kind === 'card') return m['KanbanCard.untitled']();
+  if (favorite.kind === 'page') return m.wiki_page_untitled();
+  if (favorite.kind === 'unit') return m.course_unit_untitled();
+  return shownTitle({ title: '', kind: favorite.containerKind });
 }
 
 /**

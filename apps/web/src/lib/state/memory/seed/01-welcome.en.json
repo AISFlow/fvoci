@@ -1118,6 +1118,51 @@
             ]
           },
           {
+            "type": "callout",
+            "attrs": {
+              "tone": "tip"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A callout sets a note apart. Press its icon to make it a note, a tip, a warning or a danger."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "details",
+            "content": [
+              {
+                "type": "detailsSummary",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "A toggle folds away what is under it"
+                  }
+                ]
+              },
+              {
+                "type": "detailsContent",
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Press the arrow to open or close it. Each person opens and closes it for themselves."
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
             "type": "heading",
             "attrs": {
               "level": 2

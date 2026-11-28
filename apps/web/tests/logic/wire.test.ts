@@ -16,7 +16,6 @@ import {
   createFilterClause,
   createPatchesFromBlocks,
   createPatchesFromContainers,
-  createPatchesFromContainersAndBlocks,
   type PropertyTemplate,
 } from '$lib/logic/wire.ts';
 
@@ -335,110 +334,6 @@ describe('board tests', () => {
             },
           ],
           updatedProperties: {},
-        },
-      ]);
-    });
-  });
-
-  describe('correctly generate patches for boards and blocks', () => {
-    const board = createTestBoard();
-    board.id = 'test-board-id';
-    const card = createTestCard();
-    card.id = 'test-card-id';
-
-    it('should generate two empty patches for the same board and block', () => {
-      const result = createPatchesFromContainersAndBlocks(board, board, [card.id], [card], [card]);
-      expect(result).toEqual([
-        {
-          blockIDs: ['test-card-id'],
-          blockPatches: [
-            {
-              deletedFields: [],
-              updatedFields: {},
-            },
-          ],
-          containerIDs: ['test-board-id'],
-          containerPatches: [
-            {
-              deletedCardProperties: [],
-              deletedProperties: [],
-              updatedCardProperties: [],
-              updatedProperties: {},
-            },
-          ],
-        },
-        {
-          blockIDs: ['test-card-id'],
-          blockPatches: [
-            {
-              deletedFields: [],
-              updatedFields: {},
-            },
-          ],
-          containerIDs: ['test-board-id'],
-          containerPatches: [
-            {
-              deletedCardProperties: [],
-              deletedProperties: [],
-              updatedCardProperties: [],
-              updatedProperties: {},
-            },
-          ],
-        },
-      ]);
-    });
-
-    it('should add fields on update and remove it in the undo', () => {
-      const oldBlock = createTestText(card);
-      oldBlock.id = 'test-old-block-id';
-      const newBlock = createBlock(oldBlock);
-      newBlock.fields.newField = 'new field';
-
-      const result = createPatchesFromContainersAndBlocks(
-        board,
-        board,
-        [newBlock.id],
-        [newBlock],
-        [oldBlock],
-      );
-      expect(result).toEqual([
-        {
-          blockIDs: ['test-old-block-id'],
-          blockPatches: [
-            {
-              deletedFields: [],
-              updatedFields: {
-                newField: 'new field',
-              },
-            },
-          ],
-          containerIDs: ['test-board-id'],
-          containerPatches: [
-            {
-              deletedCardProperties: [],
-              deletedProperties: [],
-              updatedCardProperties: [],
-              updatedProperties: {},
-            },
-          ],
-        },
-        {
-          blockIDs: ['test-old-block-id'],
-          blockPatches: [
-            {
-              deletedFields: ['newField'],
-              updatedFields: {},
-            },
-          ],
-          containerIDs: ['test-board-id'],
-          containerPatches: [
-            {
-              deletedCardProperties: [],
-              deletedProperties: [],
-              updatedCardProperties: [],
-              updatedProperties: {},
-            },
-          ],
         },
       ]);
     });

@@ -445,7 +445,7 @@ async fn a_card_template_of_a_board_has_no_document() {
         )
         .await
         .expect("the page is made")
-        .page
+        .first
         .id;
 
     let mut found: Vec<String> = store
@@ -711,15 +711,15 @@ async fn every_way_a_card_is_written_notes_it() {
     assert_eq!(listed(store).await, both, "patched together");
     settle_all(store).await;
 
-    store
-        .duplicate_block(
-            &board.id,
-            &first.id,
-            &user_id,
-            fvoci_model::DuplicateAs::Copy,
-        )
-        .await
-        .expect("copied");
+    common::duplicate_card(
+        store,
+        &board.id,
+        &first.id,
+        &user_id,
+        fvoci_model::DuplicateAs::Copy,
+    )
+    .await
+    .expect("copied");
     let copies = listed(store).await;
     assert_eq!(
         copies.len(),

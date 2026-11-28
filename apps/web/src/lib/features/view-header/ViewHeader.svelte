@@ -33,6 +33,7 @@
 <script lang="ts">
   import ArrowUpDownIcon from '@lucide/svelte/icons/arrow-up-down';
   import CalendarDaysIcon from '@lucide/svelte/icons/calendar-days';
+  import CalendarPlusIcon from '@lucide/svelte/icons/calendar-plus';
   import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
   import EyeIcon from '@lucide/svelte/icons/eye';
   import FileSpreadsheetIcon from '@lucide/svelte/icons/file-spreadsheet';
@@ -57,9 +58,11 @@
   import { conditionCount } from './filter-edit.ts';
   import FilterEditor from './FilterEditor.svelte';
   import PropertiesPanel from './PropertiesPanel.svelte';
+  import QuickFilters from './QuickFilters.svelte';
   import SortEditor from './SortEditor.svelte';
   import { asideTools, viewTitle, type Icon } from './texts.ts';
   import { saveViewCsv } from './view-csv.ts';
+  import { canSaveViewIcs, saveViewIcs } from './view-ics.ts';
   import {
     dependenciesChoices,
     dependenciesName,
@@ -87,8 +90,10 @@
     onOpenView: (viewId: string) => void;
     /** Makes a card the view will show, and opens it. */
     onAddCard: () => void;
-    /** The cards the view shows now, for a CSV of it; not given on a public link. */
+    /** The cards the view shows now, for a CSV or a calendar of it; not given on a public link. */
     exportCards?: (() => readonly Card[]) | undefined;
+    /** The address of a card, which an event of the calendar of the view links to. */
+    cardHref?: ((cardId: string) => string) | undefined;
   }
 
   let {
@@ -99,6 +104,7 @@
     onOpenView,
     onAddCard,
     exportCards,
+    cardHref,
   }: Props = $props();
 
   const pickers = new PickerPresentation();
@@ -256,7 +262,17 @@
         saveViewCsv(board, view, cards());
       },
     };
-    return [...tools, save];
+    if (!cardHref || !canSaveViewIcs(board, view)) return [...tools, save];
+    const href = cardHref;
+    const calendar: MenuAction = {
+      id: 'export-ics',
+      label: m.view_export_ics(),
+      icon: CalendarPlusIcon,
+      run: () => {
+        saveViewIcs(board, view, cards(), href);
+      },
+    };
+    return [...tools, save, calendar];
   });
 
   /** A tool that is not drawn: an unseen element where "…" is in the row, for its popover to open at. */
@@ -435,6 +451,8 @@
     {/if}
   </div>
 </div>
+
+<QuickFilters {board} />
 
 {#if canEdit && !row}
   <!--

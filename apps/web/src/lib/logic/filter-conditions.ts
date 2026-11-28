@@ -10,7 +10,7 @@ const CONDITIONS: Record<
   options: ['includes', 'notIncludes', 'isEmpty', 'isNotEmpty'],
   boolean: ['isSet', 'isNotSet'],
   text: ['is', 'contains', 'notContains', 'startsWith', 'notStartsWith', 'endsWith', 'notEndsWith'],
-  date: ['is', 'isBefore', 'isAfter', 'isSet', 'isNotSet'],
+  date: ['is', 'isBefore', 'isAfter', 'isWithin', 'isSet', 'isNotSet'],
   presence: ['isNotEmpty', 'isEmpty'],
 };
 

@@ -326,7 +326,7 @@
   },
   {
     "name": "insert with the read token",
-    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/blocks?readToken=<secret:1> as anonymous",
+    "request": "POST /api/v1/w/<id:1>/boards/<id:3>/cards?readToken=<secret:1> as anonymous",
     "status": 401,
     "content_type": "application/problem+json",
     "body": {
@@ -340,7 +340,7 @@
   },
   {
     "name": "patch with the read token",
-    "request": "PATCH /api/v1/w/<id:1>/boards/<id:3>/blocks/<id:5>?readToken=<secret:1> as anonymous",
+    "request": "PATCH /api/v1/w/<id:1>/cards/<id:5>?readToken=<secret:1> as anonymous",
     "status": 401,
     "content_type": "application/problem+json",
     "body": {

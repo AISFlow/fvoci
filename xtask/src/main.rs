@@ -19,6 +19,7 @@ mod docker;
 mod files;
 mod layers;
 mod lengths;
+mod locks;
 mod names;
 mod openapi;
 mod steps;

@@ -14,14 +14,13 @@
 //! every temporary staging file and staged object in `FileBackend` is cleaned up.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::Arc;
 
 use fvoci_model::{Container, ContainerKind, ContainerMember, FileRecord, ValidatedCourseSchedule};
-use fvoci_store::{StreamBatch, StreamCreateError};
-use tokio::fs;
+use fvoci_store::{NewContainers, StreamBatch, StreamCreateError};
 
 use super::archive::{Archive, entry_name, unpack_entry};
+use super::files::StagedFiles;
 use super::native_stream::{BoardWritePlan, StreamPlan, too_many_archive_items};
 use super::native_stream_write::{
     ArchiveStreamShared, BlockIdCollection, IMPORT_STREAM_TIMEOUT, StreamedBoardHandle,
@@ -31,15 +30,9 @@ use super::{
     ANNOUNCE_CHUNK_BLOCKS, ArchiveFiles, ImportCounts, ImportOptions, Imported, name_in,
     no_more_than_holdable, tally_container_counts,
 };
-use crate::app::App;
-use crate::app::container_copies::counted_as;
-use crate::app::doomed::Doomed;
 use crate::app::files::{FilePlace, file_record};
-use crate::app::loose_objects::WrittenPlace;
-use crate::auth::secret::new_secret;
-use crate::collab::AccessScope;
+use crate::app::{App, Changes};
 use crate::error::AppError;
-use crate::metrics::{ContainerWork, CourseSource};
 
 /// Total expanded `container_members` ceiling across an entire `.fvoci` import.
 pub(super) const MAX_IMPORTED_MEMBERSHIPS: usize = 50_000;
@@ -59,7 +52,7 @@ struct PreparedStreamedArchive {
 /// Files staged and written to `FileBackend` prior to the single database transaction.
 struct StagedNativeFiles {
     records: Vec<FileRecord>,
-    written_places: Vec<WrittenPlace>,
+    written: StagedFiles,
     /// Container ID -> original archive filename -> stored filename.
     file_map: Arc<HashMap<String, HashMap<String, String>>>,
 }
@@ -168,23 +161,20 @@ impl App {
     ) -> Result<(Vec<ContainerMember>, StreamedBoardStats), AppError> {
         let StagedNativeFiles {
             records,
-            written_places,
+            written,
             file_map: _,
         } = staged;
-        let write_future = self
-            .store()
-            .create_imported_containers_blocks_files_members_and_schedules_streamed(
-                &mut prepared.containers,
-                &records,
-                &prepared.extra_members,
-                &prepared.schedules,
-                modified_by,
-                rx,
-            );
+        let write_future = self.store().create_containers(
+            NewContainers::streamed(&mut prepared.containers, rx)
+                .recording(&records)
+                .with_members(&prepared.extra_members)
+                .with_schedules(&prepared.schedules),
+            modified_by,
+        );
         let Ok(write_result) = tokio::time::timeout(IMPORT_STREAM_TIMEOUT, write_future).await
         else {
             streamer_handle.abort();
-            clean_written_places(written_places).await;
+            written.give_up().await;
             return Err(AppError::bad_request(
                 "archive import exceeded maximum transaction time limit",
             ));
@@ -192,13 +182,11 @@ impl App {
         let streamer_outcome = streamer_handle.await;
         let members = match write_result {
             Ok(members) => {
-                for place in written_places {
-                    place.settled_in_transaction();
-                }
+                written.settle().await;
                 members
             }
             Err(error) => {
-                clean_written_places(written_places).await;
+                written.give_up().await;
                 return Err(map_stream_write_error(error));
             }
         };
@@ -344,53 +332,23 @@ impl App {
             }
             entries.push((index, dir, filename, container_id.clone()));
         }
-        if entries.is_empty() {
-            return Ok(StagedNativeFiles {
-                records: Vec::new(),
-                written_places: Vec::new(),
-                file_map: Arc::new(HashMap::new()),
-            });
-        }
-
-        let work_dir = self
-            .config()
-            .tmp_dir()
-            .join(format!("import-stage-{}", new_secret()));
-        fs::create_dir_all(&work_dir).await.map_err(|error| {
-            AppError::internal(format_args!("cannot create staging directory: {error}"))
-        })?;
-        let doomed_dir = Doomed::directory(work_dir);
-        let unpacked = doomed_dir.path().join("entry");
-
+        let mut written = StagedFiles::begin(self);
         let mut records = Vec::with_capacity(entries.len());
-        let mut written_places = Vec::with_capacity(entries.len());
         let mut file_map: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut total_staged_bytes: u64 = 0;
-
         for (index, dir, filename, container_id) in entries {
             let upload_name = name_in(files, &dir, &filename);
             let place = FilePlace::new(org_id, &container_id, upload_name);
-            let written = self
-                .write_one_native_file(zip, index, largest_file, &unpacked, &place.path)
-                .await;
-            let written = match written {
-                Ok(written) => written,
+            let size = match stage_native_file(&mut written, zip, index, largest_file, &place.path)
+                .await
+            {
+                Ok(size) => size,
                 Err(error) => {
-                    clean_written_places(written_places).await;
-                    doomed_dir.remove().await;
+                    written.give_up().await;
                     return Err(error.context(format_args!(
                         "cannot import file {filename} for board {dir}"
                     )));
                 }
             };
-            let size = written.size();
-            written_places.push(written);
-            total_staged_bytes = total_staged_bytes.saturating_add(size);
-            if let Err(error) = self.check_org_storage_room(total_staged_bytes).await {
-                clean_written_places(written_places).await;
-                doomed_dir.remove().await;
-                return Err(error);
-            }
             let record = file_record(&container_id, place, size, "");
             file_map
                 .entry(container_id)
@@ -398,44 +356,11 @@ impl App {
                 .insert(filename, record.stored_name.clone());
             records.push(record);
         }
-
-        doomed_dir.remove().await;
         Ok(StagedNativeFiles {
             records,
-            written_places,
+            written,
             file_map: Arc::new(file_map),
         })
-    }
-
-    async fn write_one_native_file(
-        &self,
-        zip: &Archive,
-        index: usize,
-        largest_file: u64,
-        unpacked: &Path,
-        storage_path: &str,
-    ) -> Result<WrittenPlace, AppError> {
-        unpack_entry(zip, index, largest_file, unpacked).await?;
-        let marked = match self.mark_place(storage_path).await {
-            Ok(marked) => marked,
-            Err(error) => {
-                remove_unpacked(unpacked).await;
-                return Err(error);
-            }
-        };
-        let mut file = match fs::File::open(unpacked).await {
-            Ok(file) => file,
-            Err(error) => {
-                remove_unpacked(unpacked).await;
-                marked.give_up_unused().await;
-                return Err(AppError::internal(format_args!(
-                    "cannot open an unpacked archive entry: {error}"
-                )));
-            }
-        };
-        let outcome = marked.write(&mut file).await;
-        remove_unpacked(unpacked).await;
-        outcome
     }
 
     async fn finish_streamed_native_commit(
@@ -444,27 +369,18 @@ impl App {
         members: &[ContainerMember],
         inserted_block_ids: &[String],
     ) {
-        if !containers.is_empty() {
-            let made = containers.iter().map(|container| &container.id);
-            self.collab()
-                .recheck_access(self, AccessScope::containers(made))
-                .await;
-        }
+        self.recheck_made(containers).await;
+        // The memberships are not told of: an archive may bring tens of thousands.
         let workspace_id = containers
             .first()
             .map_or("", |container| container.workspace_id.as_str());
-        for container in containers {
-            self.ws()
-                .broadcast_container_change(workspace_id, container)
-                .await;
-        }
+        self.tell_now(Changes::in_workspace(workspace_id).made(containers.iter().cloned(), []))
+            .await;
         for chunk in inserted_block_ids.chunks(ANNOUNCE_CHUNK_BLOCKS) {
             match self.store().get_blocks_by_ids(chunk).await {
                 Ok(blocks) => {
-                    for block in &blocks {
-                        self.ws().broadcast_block_change(workspace_id, block).await;
-                        self.tell_webhooks(block);
-                    }
+                    self.tell_now(Changes::in_workspace(workspace_id).changed(blocks))
+                        .await;
                 }
                 Err(error) => {
                     tracing::error!(
@@ -475,36 +391,21 @@ impl App {
                 }
             }
         }
-        let by_id: HashMap<&str, (&str, bool)> = containers
-            .iter()
-            .map(|c| (c.id.as_str(), (c.workspace_id.as_str(), c.is_template)))
-            .collect();
-        for member in members {
-            if let Some(&(ws_id, false)) = by_id.get(member.container_id.as_str())
-                && let Err(error) = self
-                    .add_containers_to_default_category(
-                        &member.user_id,
-                        ws_id,
-                        std::slice::from_ref(&member.container_id),
-                    )
-                    .await
-            {
-                tracing::warn!(
-                    container_id = %member.container_id,
-                    user_id = %member.user_id,
-                    %error,
-                    "failed to add imported container to default sidebar category after commit"
-                );
-            }
-        }
-        for container in containers {
-            self.metrics()
-                .container_copied(ContainerWork::Import, counted_as(container.kind));
-            if container.kind == ContainerKind::Course && !container.is_template {
-                self.metrics().course_created(CourseSource::Import);
-            }
-        }
+        self.file_and_count_imported(containers, members).await;
     }
+}
+
+/// Unpacks the entry `index` of `zip` and stores it at `path` with what `written` holds.
+async fn stage_native_file(
+    written: &mut StagedFiles,
+    zip: &Archive,
+    index: usize,
+    largest_file: u64,
+    path: &str,
+) -> Result<u64, AppError> {
+    let unpacked = written.unpacked().await?;
+    unpack_entry(zip, index, largest_file, &unpacked).await?;
+    written.store(path).await
 }
 
 fn map_stream_write_error(error: StreamCreateError<AppError>) -> AppError {
@@ -516,19 +417,5 @@ fn map_stream_write_error(error: StreamCreateError<AppError>) -> AppError {
         StreamCreateError::Store(error) => {
             AppError::from(error).context("error inserting archive blocks")
         }
-    }
-}
-
-async fn clean_written_places(places: Vec<WrittenPlace>) {
-    for place in places {
-        place.give_up().await;
-    }
-}
-
-async fn remove_unpacked(unpacked: &Path) {
-    if let Err(error) = fs::remove_file(unpacked).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(%error, path = %unpacked.display(), "could not remove staged archive entry");
     }
 }

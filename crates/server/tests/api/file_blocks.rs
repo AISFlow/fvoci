@@ -32,9 +32,7 @@ fn file_of(body: &Value) -> String {
         .to_owned()
 }
 
-/// A comment's body has no file block, on every route of a board that writes a comment
-/// or makes a block one; an image it may have. A comment refused for it has nothing
-/// copied for it.
+/// A card comment's body has no file block, written or changed; an image it may have.
 #[tokio::test]
 async fn a_comment_has_no_file_block() {
     let ts = Setup::native().start().await.init_basic().await;
@@ -43,104 +41,29 @@ async fn a_comment_has_no_file_block() {
         .await;
     let file_id = uploaded_id(&upload(&ts.client, &board.id, "minutes.pdf", b"%PDF").await);
     let cards = format!("{TEST_WS}/boards/{}/cards", board.id);
-    let card = |title: &str| json!({"title": title, "body": with_file(&file_id)});
-    let card: Value = ts.client.post(&cards, &card("Card")).await.created_json();
-    let blocks = format!("{TEST_WS}/boards/{}/blocks", board.id);
-    let comment = |body: &Value| {
-        json!({"containerId": board.id, "parentId": card["id"], "type": "comment",
-               "createdAt": 1, "updatedAt": 1, "body": body})
-    };
+    let card = json!({"title": "Card", "body": with_file(&file_id)});
+    let card: Value = ts.client.post(&cards, &card).await.created_json();
+    let comments = format!("{cards}/{}/comments", card["id"].as_str().expect("an id"));
     let refused = ts
         .client
-        .post(&blocks, &json!([comment(&with_file(&file_id))]))
+        .post(&comments, &json!({"body": with_file(&file_id)}))
         .await;
-    check_refused_body(&refused, "/0/body");
-
-    // Refused before the file of another board is copied for it.
-    let other = ts
-        .create_board(TEST_WORKSPACE_ID, ContainerVisibility::Private)
-        .await;
-    let other_file = uploaded_id(&upload(&ts.client, &other.id, "other.pdf", b"%PDF").await);
-    let refused = ts
-        .client
-        .post(
-            &format!("{blocks}?sourceBoardId={}", other.id),
-            &json!([comment(&with_file(&other_file))]),
-        )
-        .await;
-    check_refused_body(&refused, "/0/body");
-    assert_eq!(
-        collected_names(&ts).await,
-        [other_file],
-        "no copy was made of the file"
-    );
+    check_refused_body(&refused, "/body");
 
     // An image it may have; a change does not give it a file block.
     let image_of = |file: &str| json!({"type": "doc", "content": [{"type": "image", "attrs": {"fileId": file}}]});
-    let made: Vec<Value> = ts
+    let made: Value = ts
         .client
-        .post(&blocks, &json!([comment(&image_of(&file_id))]))
+        .post(&comments, &json!({"body": image_of(&file_id)}))
         .await
         .created_json();
-    let comment_id = made[0]["id"].as_str().expect("an id");
-    let patch = json!({"body": with_file(&file_id), "readAt": made[0]["updatedAt"]});
+    let comment_id = made["id"].as_str().expect("an id");
+    let patch = json!({"body": with_file(&file_id), "readAt": made["updatedAt"]});
     let refused = ts
         .client
-        .patch(&format!("{blocks}/{comment_id}"), &patch)
+        .patch(&format!("{comments}/{comment_id}"), &patch)
         .await;
     check_refused_body(&refused, "/body");
-    let batch = json!({"blockIds": [comment_id], "blockPatches": [patch]});
-    check_refused_body(
-        &ts.client.patch(&blocks, &batch).await,
-        "/blockPatches/0/body",
-    );
-    let both = json!({
-        "containerIds": [board.id], "containerPatches": [{"title": "n"}],
-        "blockIds": [comment_id], "blockPatches": [patch],
-    });
-    check_refused_body(
-        &ts.client
-            .patch(&format!("{TEST_WS}/containers-and-blocks"), &both)
-            .await,
-        "/blockPatches/0/body",
-    );
-
-    // A card with a file block is not made a comment (block type is immutable).
-    let second: Value = ts
-        .client
-        .post(
-            &cards,
-            &json!({"title": "Second", "body": with_file(&file_id)}),
-        )
-        .await
-        .created_json();
-    let made_comment = json!({"type": "comment", "parentId": card["id"]});
-    let refused = ts
-        .client
-        .patch(
-            &format!("{blocks}/{}", second["id"].as_str().expect("an id")),
-            &made_comment,
-        )
-        .await;
-    refused.check_bad_request();
-    assert_eq!(refused.refused_at(), "/type", "{}", refused.text());
-
-    // A board made with one: a new board has no file for any block to name, so the comment
-    // is refused at its body for that first.
-    let new_board = json!({"id": "bd", "workspaceId": TEST_WORKSPACE_ID, "visibility": "private"});
-    let new_card =
-        json!({"id": "c1", "containerId": "bd", "type": "card", "createdAt": 1, "updatedAt": 1});
-    let new_comment = json!({"id": "m1", "containerId": "bd", "parentId": "c1",
-        "type": "comment", "createdAt": 1, "updatedAt": 1, "body": with_file("7x.pdf")});
-    let refused = ts
-        .client
-        .post(
-            &format!("{TEST_WS}/containers-and-blocks"),
-            &json!({"containers": [new_board], "blocks": [new_card, new_comment]}),
-        )
-        .await;
-    refused.check_status(StatusCode::BAD_REQUEST);
-    assert_eq!(refused.refused_at(), "/blocks/1/body", "{}", refused.text());
 
     ts.teardown().await;
 }
@@ -284,12 +207,12 @@ async fn a_template_and_a_board_made_of_it_have_files_of_their_own() {
             .await
             .created_json();
         let copy = made.containers[0].id.clone();
-        let cards: Vec<Value> = ts
-            .client
-            .get(&format!("{TEST_WS}/boards/{copy}/blocks?type=card"))
+        let cards: Vec<fvoci_model::Block> = crate::blocks::blocks_of(&ts.client, &copy)
             .await
-            .ok_json();
-        let file = file_of(&cards[0]["body"]);
+            .into_iter()
+            .filter(|block| block.block_type == fvoci_model::BlockType::Card)
+            .collect();
+        let file = file_of(&serde_json::to_value(&cards[0].body).expect("a body"));
         assert_ne!(file, from.1, "{query}: a file of its own");
         let read = ts
             .client
@@ -439,8 +362,7 @@ async fn a_file_block_in_the_trash_keeps_its_file_until_it_is_gone_for_good() {
     let wiki_file = uploaded_id(&upload(&ts.client, &wiki_id, "minutes.pdf", b"%PDF").await);
     write(&ts.client, &wiki_id, &page_id, &with_file(&wiki_file)).await;
     let card_id = card["id"].as_str().expect("an id");
-    ts.client
-        .delete(&format!("{TEST_WS}/boards/{}/blocks/{card_id}", board.id))
+    crate::blocks::trash_card(&ts.client, &board.id, card_id)
         .await
         .check_no_content();
     ts.client

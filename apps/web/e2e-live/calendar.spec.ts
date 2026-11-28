@@ -50,9 +50,7 @@ test('a calendar view of the server shows dated cards, and keeps its "display by
   /** The board's calendar view as the server keeps it. */
   const stored = async (): Promise<Schemas['Block'] | undefined> => {
     const views = (await (
-      await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-        params: { type: 'view' },
-      })
+      await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/views`)
     ).json()) as Schemas['Block'][];
     return views.find((each) => each.fields.viewType === 'calendar');
   };

@@ -1,18 +1,17 @@
 //! Blocks: reading and changing them, and telling websocket listeners and webhooks.
 
-use fvoci_model::{Block, BlockPatch, BlockPatchBatch, BlockType, CommentVersion, DuplicateAs};
+use fvoci_model::{Block, BlockPatch, BlockPatchBatch, BlockType, CommentVersion};
 use fvoci_store::{BlockFilter, ByAgent, DeletedBlock};
 
 use super::App;
+use super::changes::Changes;
 use crate::collab::{Deletion, OverEditors};
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 
 /// Whether the people a change to a block newly names (those its body mentions, those
 /// a card is given to) are told of it. A client that writes again what was said before
 /// (a copy, a change taken back or made again, via `disableNotify`) suppresses it while
-/// its writer watches what it writes new all the same ([`Self::Suppress`]); a bulk copy
-/// from another board (`sourceBoardId`) tells nobody and makes nobody watch
-/// ([`Self::Copied`]).
+/// its writer watches what it writes new all the same ([`Self::Suppress`]).
 ///
 /// Websocket broadcasts and webhooks are not notifications: they happen either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,8 +22,6 @@ pub enum ChangeNotification {
     /// Do not report the change (`disableNotify`): tell nobody, while the writer still
     /// watches newly written cards, pages or comments.
     Suppress,
-    /// Bulk copy from another board (`sourceBoardId`): tell nobody and make nobody watch.
-    Copied,
 }
 
 /// What happened to a block, as the notification service names it.
@@ -50,14 +47,13 @@ impl App {
     /// says: one that is suppressed tells nobody whom it newly names. A handle an
     /// agent writes through ([`App::writing_for`]) tells of the write as the agent's.
     pub(super) fn store_telling(&self, notification: ChangeNotification) -> fvoci_store::Store {
-        let store = match &self.agent {
+        let store = match &self.reach.agent {
             Some(delegation) => self.store().by_agent(delegation.by_agent()),
             None => self.store().clone(),
         };
         match notification {
             ChangeNotification::Send => store,
             ChangeNotification::Suppress => store.quietly(),
-            ChangeNotification::Copied => store.telling_nobody(),
         }
     }
 
@@ -85,26 +81,7 @@ impl App {
         if let Some(&block_type) = block_type {
             filter = filter.with_type(block_type);
         }
-        let mut blocks = self.store().get_blocks(&filter).await?;
-        hide_inactive_numbers(&mut blocks);
-        Ok(blocks)
-    }
-
-    /// Loads every block in `ids` in a single store query, returning `Ok(None)` when any
-    /// requested identifier is missing in this handle's reach.
-    ///
-    /// # Errors
-    ///
-    /// Returns the store's error if the query fails.
-    pub async fn blocks_by_ids(&self, ids: &[String]) -> Result<Option<Vec<Block>>, AppError> {
-        match self.store().get_blocks_by_ids(ids).await {
-            Ok(mut blocks) => {
-                hide_inactive_numbers(&mut blocks);
-                Ok(Some(blocks))
-            }
-            Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        Ok(self.store().get_blocks(&filter).await?)
     }
 
     /// Returns all blocks of a board, in no particular order.
@@ -113,12 +90,10 @@ impl App {
     ///
     /// Returns the store's error if the query fails.
     pub async fn blocks_for_container(&self, container_id: &str) -> Result<Vec<Block>, AppError> {
-        let mut blocks = self
+        Ok(self
             .store()
             .get_blocks(&BlockFilter::container(container_id))
-            .await?;
-        hide_inactive_numbers(&mut blocks);
-        Ok(blocks)
+            .await?)
     }
 
     /// Returns the block with the given identifier: only a block of a board of the kinds
@@ -132,16 +107,60 @@ impl App {
         // The handle finds the blocks of the boards it reaches only, in the one read.
         let found = self
             .store()
-            .get_block_within(block_id, self.workspace.as_deref(), self.kinds)
+            .get_block_within(block_id, self.reach.workspace.as_deref(), self.reach.kinds)
             .await;
-        match found {
-            Ok(mut block) => {
-                block.hide_inactive_number();
-                Ok(block)
-            }
-            Err(error) if error.is_not_found() => Err(AppError::not_found("block")),
-            Err(error) => Err(error.into()),
+        found.or_missing("block")
+    }
+
+    /// Returns the block of the board of this type, as [`App::block`] reaches it: a
+    /// block of another board, or of another type, is as missing as one that does not
+    /// exist, since the path names the board and what it holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a not-found error naming the type if the board has no such block.
+    pub async fn block_of_board(
+        &self,
+        board_id: &str,
+        block_id: &str,
+        block_type: BlockType,
+    ) -> Result<Block, AppError> {
+        let block = self.block(block_id).await.or_missing(block_type.as_str())?;
+        if block.container_id == board_id && block.block_type == block_type {
+            Ok(block)
+        } else {
+            Err(AppError::not_found(block_type.as_str()))
         }
+    }
+
+    /// Brings a block of the board of this type back from the trash, as
+    /// [`App::undelete_block`] does, where it went on its own: a block that went there
+    /// with another (an attachment with its card) comes back with that one. With
+    /// `parent_id`, only a block that was below that block.
+    ///
+    /// # Errors
+    ///
+    /// Returns a not-found error naming the type unless the trash has such a deletion of
+    /// the block, and the errors of [`App::undelete_block`].
+    pub(super) async fn undelete_block_of_board(
+        &self,
+        board_id: &str,
+        block_id: &str,
+        block_type: BlockType,
+        parent_id: Option<&str>,
+        user_id: &str,
+    ) -> Result<Block, AppError> {
+        let deletion = self.deletion(block_id).await?;
+        let deleted_alone = deletion.first().is_some_and(|top| {
+            top.id == block_id
+                && top.container_id == board_id
+                && top.block_type == block_type
+                && parent_id.is_none_or(|parent_id| top.parent_id == parent_id)
+        });
+        if !deleted_alone {
+            return Err(AppError::not_found(block_type.as_str()));
+        }
+        self.undelete_block(block_id, user_id).await
     }
 
     /// Coordinates a block write with active collaborative rooms: when
@@ -171,36 +190,6 @@ impl App {
         }
     }
 
-    /// Announces modified blocks one at a time in the background (`blockChanged`
-    /// websocket broadcast and configured webhooks), skipping any block deleted
-    /// concurrently before the announcement runs.
-    pub(crate) fn announce_blocks(&self, workspace_id: &str, block_ids: Vec<String>) {
-        if block_ids.is_empty() {
-            return;
-        }
-        let app = self.clone();
-        let workspace_id = workspace_id.to_owned();
-        self.spawn_background(async move {
-            for block_id in &block_ids {
-                let mut block = match app.store().get_block(block_id).await {
-                    Ok(block) => block,
-                    Err(error) if error.is_not_found() => continue,
-                    Err(error) => {
-                        tracing::error!(
-                            %error,
-                            block_id,
-                            "cannot read a changed block to announce it"
-                        );
-                        return;
-                    }
-                };
-                block.hide_inactive_number();
-                app.ws().broadcast_block_change(&workspace_id, &block).await;
-                app.tell_webhooks(&block);
-            }
-        });
-    }
-
     /// Inserts a block, or updates the block that already has its identifier, and tells
     /// websocket listeners and webhooks in the background.
     ///
@@ -210,7 +199,7 @@ impl App {
     ///
     /// Returns a not-found error if the block's board does not exist and
     /// a bad request if the title or the fields are too large.
-    pub async fn insert_block(
+    pub(super) async fn insert_block(
         &self,
         block: &mut Block,
         modified_by: &str,
@@ -236,17 +225,8 @@ impl App {
                 },
             )
             .await?;
-        block.hide_inactive_number();
         log_notification(notification, ChangeAction::Add, &block.id);
-
-        let app = self.clone();
-        let block = block.clone();
-        self.spawn_background(async move {
-            app.ws()
-                .broadcast_block_change(&container.workspace_id, &block)
-                .await;
-            app.tell_webhooks(&block);
-        });
+        self.tell(Changes::in_workspace(&container.workspace_id).changed([block.clone()]));
         Ok(())
     }
 
@@ -261,7 +241,7 @@ impl App {
     /// Returns a bad request if the blocks belong to more than one board or a title or
     /// the fields of a block are too large, and a not-found error if the board does not
     /// exist.
-    pub async fn insert_blocks(
+    pub(super) async fn insert_blocks(
         &self,
         blocks: &mut [Block],
         modified_by: &str,
@@ -298,16 +278,12 @@ impl App {
             })
             .await?;
         blocks.clone_from_slice(&stored);
-        hide_inactive_numbers(blocks);
-        for block in blocks.iter() {
-            self.ws()
-                .broadcast_block_change(&container.workspace_id, block)
-                .await;
-        }
+        // Told before the answer: the client of the write has heard of every block then.
+        self.tell_now(Changes::in_workspace(&container.workspace_id).changed(stored))
+            .await;
         for block in blocks.iter() {
             log_notification(notification, ChangeAction::Add, &block.id);
         }
-        self.notify_webhooks(blocks);
         Ok(())
     }
 
@@ -318,7 +294,7 @@ impl App {
     ///
     /// Returns a not-found error if the block or its board does not exist and
     /// a bad request if the patched title or fields are too large.
-    pub async fn patch_block(
+    pub(super) async fn patch_block(
         &self,
         block_id: &str,
         patch: &BlockPatch,
@@ -337,7 +313,7 @@ impl App {
     /// # Errors
     ///
     /// As [`App::patch_block`], and 409 `room_has_active_editors` for an agent.
-    pub async fn patch_block_as(
+    pub(super) async fn patch_block_as(
         &self,
         block_id: &str,
         patch: &BlockPatch,
@@ -382,35 +358,30 @@ impl App {
                 None => store.patch_block(&block_id, &patch, &modified_by).await?,
             })
         };
-        let mut block = if whole_body_cards.is_empty() {
-            self.write_blocks(vec![old_block.container_id], whole_body_cards, write)
-                .await?
+        let block = if whole_body_cards.is_empty() {
+            self.write_blocks(
+                vec![old_block.container_id.clone()],
+                whole_body_cards,
+                write,
+            )
+            .await?
         } else {
             self.collab()
                 .write_whole_over(self, whole_body_cards, over, write)
                 .await?
         };
-        block.hide_inactive_number();
-        self.tell_of_update(&container.workspace_id, &block, notification);
-        Ok(block)
-    }
-
-    /// Tells the websocket listeners of a workspace and the webhooks, in the
-    /// background, of a block that was changed.
-    pub(super) fn tell_of_update(
-        &self,
-        workspace_id: &str,
-        block: &Block,
-        notification: ChangeNotification,
-    ) {
         log_notification(notification, ChangeAction::Update, &block.id);
-        let (app, workspace_id, changed) = (self.clone(), workspace_id.to_owned(), block.clone());
-        self.spawn_background(async move {
-            app.ws()
-                .broadcast_block_change(&workspace_id, &changed)
-                .await;
-            app.tell_webhooks(&changed);
-        });
+        // The next card completing it made, told after it.
+        let made = cards_made_after(
+            std::slice::from_ref(&old_block),
+            std::slice::from_ref(&block),
+        );
+        self.tell(
+            Changes::in_workspace(&container.workspace_id)
+                .changed([block.clone()])
+                .reread(made),
+        );
+        Ok(block)
     }
 
     /// Applies each patch of a batch to the block at the same position, all or none;
@@ -426,7 +397,7 @@ impl App {
     /// (an identifier listed twice counts as missing), a bad request if a
     /// patched title or the patched fields are too large, and an internal error if
     /// there are fewer patches than identifiers.
-    pub async fn patch_blocks(
+    pub(super) async fn patch_blocks(
         &self,
         workspace_id: &str,
         batch: &BlockPatchBatch,
@@ -453,8 +424,44 @@ impl App {
         for block_id in &batch.block_ids {
             log_notification(notification, ChangeAction::Update, block_id);
         }
-        self.announce_blocks(workspace_id, batch.block_ids.clone());
+        // Read again as they are told: one deleted meanwhile is not told of.
+        let told = Changes::in_workspace(workspace_id).reread(batch.block_ids.clone());
+        self.tell_with_next_cards(workspace_id, told, blocks);
         Ok(())
+    }
+
+    /// Tells of `told` in the background and then, where cards of `before` repeat, of
+    /// the next cards that completing them made: after the cards they follow, read as
+    /// they are told.
+    fn tell_with_next_cards(&self, workspace_id: &str, told: Changes, before: Vec<Block>) {
+        let repeating: Vec<String> = before
+            .iter()
+            .filter(|block| block.fields.contains_key(fvoci_model::RECURRENCE_FIELD))
+            .map(|block| block.id.clone())
+            .collect();
+        if repeating.is_empty() {
+            self.tell(told);
+            return;
+        }
+        let (app, workspace_id) = (self.clone(), workspace_id.to_owned());
+        self.spawn_background(async move {
+            app.tell_now(told).await;
+            let mut after = Vec::with_capacity(repeating.len());
+            for block_id in &repeating {
+                match app.store().get_block(block_id).await {
+                    Ok(block) => after.push(block),
+                    // Deleted meanwhile: its next card, if it made one, is not told of.
+                    Err(error) if error.is_not_found() => {}
+                    Err(error) => {
+                        tracing::error!(%error, block_id, "cannot read a completed card to tell of its next");
+                        return;
+                    }
+                }
+            }
+            let made = cards_made_after(&before, &after);
+            app.tell_now(Changes::in_workspace(&workspace_id).reread(made))
+                .await;
+        });
     }
 
     /// Deletes a block and everything below it; websocket listeners are told in the
@@ -463,7 +470,7 @@ impl App {
     /// # Errors
     ///
     /// Returns a not-found error if the block or its board does not exist.
-    pub async fn delete_block(
+    pub(super) async fn delete_block(
         &self,
         block_id: &str,
         modified_by: &str,
@@ -479,35 +486,14 @@ impl App {
             })
             .await?;
         log_notification(notification, ChangeAction::Delete, block_id);
-
-        let app = self.clone();
-        // Always broadcast the deleted block; for cards, also broadcast descendant cards
-        // that went to the trash along with it so board clients drop sub-cards too.
-        let child_card_ids: Vec<String> = deleted
+        // The deleted block, and the cards below a card that went to the trash with it,
+        // so that a board's clients drop the cards below it too.
+        let child_cards: Vec<Block> = deleted
             .into_iter()
             .filter(|each| each.id != block.id && each.block_type == BlockType::Card)
-            .map(|each| each.id)
             .collect();
-        self.spawn_background(async move {
-            app.ws()
-                .broadcast_block_delete(
-                    &container.workspace_id,
-                    &block.id,
-                    &block.container_id,
-                    block.block_type,
-                )
-                .await;
-            for child_id in &child_card_ids {
-                app.ws()
-                    .broadcast_block_delete(
-                        &container.workspace_id,
-                        child_id,
-                        &block.container_id,
-                        BlockType::Card,
-                    )
-                    .await;
-            }
-        });
+        let told = std::iter::once(block).chain(child_cards);
+        self.tell(Changes::in_workspace(&container.workspace_id).deleted(told));
         Ok(())
     }
 
@@ -518,14 +504,7 @@ impl App {
     ///
     /// Returns the store's error if the trash cannot be read.
     pub async fn deleted_block(&self, block_id: &str) -> Result<Option<DeletedBlock>, AppError> {
-        match self.store().get_deleted_block(block_id).await {
-            Ok(mut deleted) => {
-                deleted.block.hide_inactive_number();
-                Ok(Some(deleted))
-            }
-            Err(error) if error.is_not_found() => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        self.store().get_deleted_block(block_id).await.found()
     }
 
     /// Returns the blocks of the deletion a block of the trash went with, which restoring
@@ -536,14 +515,12 @@ impl App {
     ///
     /// Returns the store's error if the trash cannot be read.
     pub async fn deletion(&self, block_id: &str) -> Result<Vec<Block>, AppError> {
-        match self.store().get_deletion(block_id).await {
-            Ok(mut blocks) => {
-                hide_inactive_numbers(&mut blocks);
-                Ok(blocks)
-            }
-            Err(error) if error.is_not_found() => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
-        }
+        Ok(self
+            .store()
+            .get_deletion(block_id)
+            .await
+            .found()?
+            .unwrap_or_default())
     }
 
     /// Returns who deleted a block of the trash: the user whose deletion put it there,
@@ -553,11 +530,8 @@ impl App {
     ///
     /// Returns the store's error if the trash cannot be read.
     pub async fn deleted_by(&self, block_id: &str) -> Result<String, AppError> {
-        match self.store().get_deleted_block(block_id).await {
-            Ok(deleted) => Ok(deleted.deleted_by),
-            Err(error) if error.is_not_found() => Ok(String::new()),
-            Err(error) => Err(error.into()),
-        }
+        let deleted = self.store().get_deleted_block(block_id).await.found()?;
+        Ok(deleted.map_or_default(|deleted| deleted.deleted_by))
     }
 
     /// Returns the blocks below a block, at any depth: what deleting it takes along.
@@ -566,9 +540,7 @@ impl App {
     ///
     /// Returns the store's error if the blocks cannot be read.
     pub async fn blocks_below(&self, block_id: &str) -> Result<Vec<Block>, AppError> {
-        let mut blocks = self.store().get_blocks_below(block_id).await?;
-        hide_inactive_numbers(&mut blocks);
-        Ok(blocks)
+        Ok(self.store().get_blocks_below(block_id).await?)
     }
 
     /// Returns the earlier versions of a comment's body, the first first.
@@ -592,7 +564,7 @@ impl App {
     /// exist. Returns a conflict error if a card cannot be restored under its live parent
     /// (for example, because the parent became a template or the subtree would exceed
     /// [`fvoci_model::MAX_CARD_DEPTH`]).
-    pub async fn undelete_block(
+    pub(super) async fn undelete_block(
         &self,
         block_id: &str,
         modified_by: &str,
@@ -606,12 +578,7 @@ impl App {
                 .undelete_block_family(block_id, modified_by)
                 .await
         };
-        let mut restored = match restored {
-            Ok(blocks) => blocks,
-            Err(error) if error.is_not_found() => return Err(AppError::not_found("block")),
-            Err(error) => return Err(error.into()),
-        };
-        hide_inactive_numbers(&mut restored);
+        let restored = restored.or_missing("block")?;
         let block = restored
             .iter()
             .find(|each| each.id == block_id)
@@ -620,111 +587,111 @@ impl App {
         let container = self.store().get_container(&block.container_id).await?;
         // An undeletion is always reported; there is no flag for it.
         log_notification(ChangeNotification::Send, ChangeAction::Add, block_id);
-
-        let app = self.clone();
-        let root_id = block_id.to_owned();
-        self.spawn_background(async move {
-            for each in &restored {
-                if each.id == root_id || each.block_type == BlockType::Card {
-                    app.ws()
-                        .broadcast_block_change(&container.workspace_id, each)
-                        .await;
-                    app.tell_webhooks(each);
-                }
-            }
-        });
+        // The block, and the cards that came back with it.
+        let told = restored
+            .into_iter()
+            .filter(|each| each.id == block_id || each.block_type == BlockType::Card);
+        self.tell(Changes::in_workspace(&container.workspace_id).changed(told));
         Ok(block)
-    }
-
-    /// Copies a block of a board and its descendants, except comments, under new
-    /// identifiers, gives copied images, file blocks and attachments files of their own,
-    /// and returns the copies, the copy of the block itself first. Websocket listeners are told in
-    /// the background; webhooks are not told about duplicates.
-    ///
-    /// # Errors
-    ///
-    /// Returns a not-found error if the board does not exist or has no such block,
-    /// or if the block is a comment, which is never copied.
-    pub async fn duplicate_block(
-        &self,
-        container_id: &str,
-        block_id: &str,
-        user_id: &str,
-        duplicate_as: DuplicateAs,
-    ) -> Result<Vec<Block>, AppError> {
-        let container = self.store().get_container(container_id).await?;
-        // The card and all descendant cards below it, which are copied with it.
-        let mut sources = vec![block_id.to_owned()];
-        sources.extend(
-            self.blocks_below(block_id)
-                .await?
-                .into_iter()
-                .filter(|child| {
-                    child.container_id == container_id && child.block_type == BlockType::Card
-                })
-                .map(|child| child.id),
-        );
-        self.collab().write_bodies(self, &sources).await?;
-        let mut blocks = self
-            .store()
-            .duplicate_block(container_id, block_id, user_id, duplicate_as)
-            .await?;
-        let files = self
-            .copy_and_update_card_files(container_id, user_id, &mut blocks)
-            .await;
-        hide_inactive_numbers(&mut blocks);
-        if files.is_ok() {
-            self.keep_bodies_as_copied(&blocks).await;
-        }
-
-        // The copies are stored whatever became of their files, so they are announced
-        // whatever became of their files.
-        let app = self.clone();
-        let copies = blocks.clone();
-        self.spawn_background(async move {
-            for block in &copies {
-                app.ws()
-                    .broadcast_block_change(&container.workspace_id, block)
-                    .await;
-            }
-        });
-        files?;
-        Ok(blocks)
-    }
-
-    /// Keeps the body of each copied card, as it was copied and pointed at its own files,
-    /// as the copy's initial version: a copy begins with the body it was made with to go
-    /// back to, without carrying over the source card's history. A version that cannot be
-    /// kept is logged: the copy is stored and told of already, as a card that has none yet.
-    async fn keep_bodies_as_copied(&self, copies: &[Block]) {
-        let with_bodies = copies
-            .iter()
-            .filter(|copy| copy.block_type.has_room() && copy.body.is_some());
-        for copy in with_bodies {
-            if let Err(error) = self.store().keep_body_version(&copy.id).await {
-                tracing::error!(
-                    block_id = %copy.id, %error,
-                    "the body of a copy was not kept as its version"
-                );
-            }
-        }
-    }
-
-    /// Queues the blocks for the bounded webhook worker without spawning per-call tasks.
-    fn notify_webhooks(&self, blocks: &[Block]) {
-        if self.config().block_change_webhooks.is_empty() {
-            return;
-        }
-        for block in blocks {
-            self.enqueue_webhook(block);
-        }
     }
 }
 
-/// Hides stored card numbers on blocks that do not currently take one (card templates).
-pub(super) fn hide_inactive_numbers(blocks: &mut [Block]) {
-    for block in blocks {
-        block.hide_inactive_number();
+/// The raw writes of blocks, which ask nobody whether they may: for the fixtures of the
+/// integration tests, which set the scene a request then meets. A route writes a block
+/// through what it reached ([`super::Reached`]), never through these.
+#[cfg(feature = "test-util")]
+impl App {
+    /// `App::insert_block`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::insert_block` returns.
+    #[doc(hidden)]
+    pub async fn insert_block_unchecked(
+        &self,
+        block: &mut Block,
+        modified_by: &str,
+        notification: ChangeNotification,
+    ) -> Result<(), AppError> {
+        self.insert_block(block, modified_by, notification).await
+    }
+
+    /// `App::insert_blocks`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::insert_blocks` returns.
+    #[doc(hidden)]
+    pub async fn insert_blocks_unchecked(
+        &self,
+        blocks: &mut [Block],
+        modified_by: &str,
+        notification: ChangeNotification,
+    ) -> Result<(), AppError> {
+        self.insert_blocks(blocks, modified_by, notification).await
+    }
+
+    /// `App::patch_block`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::patch_block` returns.
+    #[doc(hidden)]
+    pub async fn patch_block_unchecked(
+        &self,
+        block_id: &str,
+        patch: &BlockPatch,
+        modified_by: &str,
+        notification: ChangeNotification,
+    ) -> Result<Block, AppError> {
+        self.patch_block(block_id, patch, modified_by, notification)
+            .await
+    }
+
+    /// `App::patch_blocks`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::patch_blocks` returns.
+    #[doc(hidden)]
+    pub async fn patch_blocks_unchecked(
+        &self,
+        workspace_id: &str,
+        batch: &BlockPatchBatch,
+        modified_by: &str,
+        notification: ChangeNotification,
+    ) -> Result<(), AppError> {
+        self.patch_blocks(workspace_id, batch, modified_by, notification)
+            .await
+    }
+
+    /// `App::delete_block`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::delete_block` returns.
+    #[doc(hidden)]
+    pub async fn delete_block_unchecked(
+        &self,
+        block_id: &str,
+        modified_by: &str,
+        notification: ChangeNotification,
+    ) -> Result<(), AppError> {
+        self.delete_block(block_id, modified_by, notification).await
+    }
+
+    /// `App::undelete_block`, which only the logic layer calls otherwise.
+    ///
+    /// # Errors
+    ///
+    /// What `App::undelete_block` returns.
+    #[doc(hidden)]
+    pub async fn undelete_block_unchecked(
+        &self,
+        block_id: &str,
+        modified_by: &str,
+    ) -> Result<Block, AppError> {
+        self.undelete_block(block_id, modified_by).await
     }
 }
 
@@ -737,4 +704,25 @@ pub(super) fn log_notification(
     if notification == ChangeNotification::Send {
         tracing::debug!(action = action.as_str(), block_id, "Block change event");
     }
+}
+
+/// The cards that changes made after the cards they completed: of each card of `after`
+/// that is of `before` too, the next card it names (`recurredTo`) where it named
+/// another, or none, before.
+pub(super) fn cards_made_after(before: &[Block], after: &[Block]) -> Vec<String> {
+    let next_of = |block: &Block| {
+        block
+            .fields
+            .get(fvoci_model::RECURRED_TO_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    after
+        .iter()
+        .filter_map(|card| {
+            let next = next_of(card)?;
+            let was = before.iter().find(|old| old.id == card.id)?;
+            (next_of(was).as_deref() != Some(next.as_str())).then_some(next)
+        })
+        .collect()
 }

@@ -55,7 +55,7 @@ async fn create_item(
         )
         .await
         .expect("item created")
-        .unit
+        .first
 }
 
 async fn save_role(store: &Store, course_id: &str, user_id: &str, role: Option<ContainerRole>) {
@@ -488,7 +488,8 @@ async fn trash_preserves_and_permanent_purge_cleans_reviews_and_notes() {
     );
 
     // Restore unit: reviews & notes come back intact.
-    test.undelete_unit(&course.id, &unit.id, CourseLimits::DEFAULT, &alice)
+    let _ = test
+        .undelete_unit(&course.id, &unit.id, CourseLimits::DEFAULT, &alice)
         .await
         .expect("restored");
     assert_eq!(

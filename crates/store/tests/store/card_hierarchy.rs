@@ -627,10 +627,10 @@ async fn duplicate_block_preserves_subcards_and_strips_for_template() {
     .await;
 
     // Duplicating a depth-1 card as Copy preserves all 3 levels and sub-card attachments.
-    let dup_root = store
-        .duplicate_block(&board_id, &parent.id, &user_id, DuplicateAs::Copy)
-        .await
-        .expect("root card duplicated as copy");
+    let dup_root =
+        common::duplicate_card(store, &board_id, &parent.id, &user_id, DuplicateAs::Copy)
+            .await
+            .expect("root card duplicated as copy");
     let dup_by_title: HashMap<&str, &Block> = dup_root
         .iter()
         .map(|block| (block.title.as_str(), block))
@@ -651,8 +651,7 @@ async fn duplicate_block_preserves_subcards_and_strips_for_template() {
     );
 
     // Duplicating a depth-2 card as Copy stays a sibling under parent and keeps grand + attachments.
-    let dup_copy = store
-        .duplicate_block(&board_id, &child.id, &user_id, DuplicateAs::Copy)
+    let dup_copy = common::duplicate_card(store, &board_id, &child.id, &user_id, DuplicateAs::Copy)
         .await
         .expect("card duplicated as copy");
     assert_eq!(
@@ -666,10 +665,10 @@ async fn duplicate_block_preserves_subcards_and_strips_for_template() {
     );
 
     // Duplicating as Template clears parent_id and omits descendant cards and their attachments.
-    let dup_tmpl = store
-        .duplicate_block(&board_id, &child.id, &user_id, DuplicateAs::Template)
-        .await
-        .expect("card duplicated as template");
+    let dup_tmpl =
+        common::duplicate_card(store, &board_id, &child.id, &user_id, DuplicateAs::Template)
+            .await
+            .expect("card duplicated as template");
     assert_eq!(dup_tmpl[0].parent_id, "", "template has no parent");
     assert!(dup_tmpl[0].is_template(), "duplicated as template");
     assert_eq!(dup_tmpl.len(), 2, "template + own attachment only");
@@ -746,8 +745,7 @@ async fn duplicate_block_remaps_subcard_gantt_relations_and_keeps_external_cards
         .await
         .expect("c2 relates to parent");
 
-    let copies = store
-        .duplicate_block(&board_id, &parent.id, &user_id, DuplicateAs::Copy)
+    let copies = common::duplicate_card(store, &board_id, &parent.id, &user_id, DuplicateAs::Copy)
         .await
         .expect("duplicated subtree");
     let by_title: HashMap<&str, &Block> = copies

@@ -91,15 +91,15 @@
   {/if}
   <span class="grid min-w-0 flex-1 gap-0.5">
     <span class="flex min-w-0 items-baseline gap-2">
-      <span class="sr-only"
-        >{hit.kind === 'page'
+      <span class="sr-only">
+        {hit.kind === 'page'
           ? m.search_hit_page()
           : hit.kind === 'unit'
             ? m.search_hit_unit()
             : hit.kind === 'entry'
               ? m.search_hit_entry()
-              : m.search_hit_card()}</span
-      >
+              : m.search_hit_card()}
+      </span>
       <CardNumber number={hit.number} class="self-center text-xs" />
       <span class="min-w-0 truncate font-medium" data-hit-title>{title}</span>
       {#if container}
@@ -109,11 +109,13 @@
       {/if}
     </span>
     {#if hit.snippet.length > 0}
-      <span class="line-clamp-2 text-xs break-words text-muted-foreground" data-hit-snippet
-        >{#each hit.snippet as part, index (index)}{#if part.matched}<mark
-              class="rounded-sm bg-primary/15 font-semibold text-foreground">{part.text}</mark
-            >{:else}{part.text}{/if}{/each}</span
-      >
+      <span class="line-clamp-2 text-xs break-words text-muted-foreground" data-hit-snippet>
+        {#each hit.snippet as part, index (index)}{#if part.matched}<mark
+              class="rounded-sm bg-primary/15 font-semibold text-foreground"
+            >
+              {part.text}
+            </mark>{:else}{part.text}{/if}{/each}
+      </span>
     {/if}
   </span>
 </a>

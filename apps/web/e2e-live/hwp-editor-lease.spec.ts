@@ -70,9 +70,9 @@ test('while one person edits a file the other sees who and cannot start, until t
 
     // The server refuses the lease to the second as well, whatever their page shows.
     const attached = (await (
-      await otherApi.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-        params: { parentId: cardId, type: 'attachment' },
-      })
+      await otherApi.get(
+        `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/attachments`,
+      )
     ).json()) as { fields: { fileId?: string } }[];
     const fileId = attached[0]?.fields.fileId ?? '';
     expect(fileId).not.toBe('');

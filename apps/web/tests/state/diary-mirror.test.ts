@@ -188,7 +188,7 @@ describe('a diary reached by another way than its own routes, in memory', () => 
       backend.setPublicLink(diary.id, { enabled: true }),
       backend.reorderCardProperties(diary.id, []),
       backend.reorderCardProperties(wiki.id, []),
-      backend.deleteBlock(diary.id, entry.id),
+      backend.batchDeleteCards(diary.id, [entry.id]),
     ]) {
       expect(await statusOf(asked)).toBe(404);
     }

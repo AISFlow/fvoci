@@ -5,7 +5,7 @@ use fvoci_store::StoreError;
 
 use super::App;
 use crate::auth::secret::new_secret;
-use crate::error::{AppError, Reason};
+use crate::error::{AppError, OrMissing, Reason};
 
 impl App {
     /// Returns the public link state of a container. A container that never had a public
@@ -48,21 +48,16 @@ impl App {
                     .with_reason(Reason::PublicLinksOff),
             );
         }
-        match self
+        let link = self
             .store()
             .set_public_link(container_id, change, &new_secret(), user_id)
             .await
-        {
-            Ok(link) => {
-                // A token that no longer opens the board no longer feeds a connection:
-                // whoever followed the board's blocks with the old link is cut off.
-                if change != PublicLinkChange::On {
-                    self.ws().end_readers_of_container(container_id);
-                }
-                Ok(link)
-            }
-            Err(error) if error.is_not_found() => Err(AppError::not_found("board")),
-            Err(error) => Err(error.into()),
+            .or_missing("board")?;
+        // A token that no longer opens the board no longer feeds a connection: whoever
+        // followed the board's blocks with the old link is cut off.
+        if change != PublicLinkChange::On {
+            self.ws().end_readers_of_container(container_id);
         }
+        Ok(link)
     }
 }

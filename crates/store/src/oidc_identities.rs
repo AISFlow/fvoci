@@ -3,7 +3,7 @@
 //! Signing in through a provider, and the provider itself, are in `oidc.rs`.
 
 use crate::Store;
-use crate::db::{Dialect, Id, Scope};
+use crate::db::{Id, LockRank, RowLock, Scope};
 use crate::email_revert;
 use crate::error::StoreError;
 use crate::oidc::Identity;
@@ -68,11 +68,9 @@ impl Store {
             let mut sql = scope.sql("SELECT 1 FROM oidc_providers WHERE org_id = ");
             sql.bind(scope.org()?)
                 .push_bind(" AND id = ", Id(provider_id))
-                .push_bind(" AND enabled = ", true);
-            if scope.dialect() == Dialect::Postgres {
-                sql.push(" FOR SHARE");
-            }
-            if scope.fetch_optional(sql).await?.is_none() {
+                .push_bind(" AND enabled = ", true)
+                .push_lock(scope.row_lock(LockRank::Provider, provider_id, RowLock::Share));
+            if !scope.exists(sql).await? {
                 return Ok(Err(LinkRefusal::ProviderGone));
             }
             let mut sql = scope.sql(
@@ -84,16 +82,15 @@ impl Store {
                 .push_bind(" AND s.expires_at > ", link.now)
                 .push_bind(" AND s.last_used_at > ", link.idle_since)
                 .push(" AND u.deleted_at IS NULL");
-            if scope.dialect() == Dialect::Postgres {
-                // The account stays while its identity is stored.
-                sql.push(" FOR SHARE OF u");
-            }
-            let Some(row) = scope.fetch_optional(sql).await? else {
+            // The account stays while its identity is stored.
+            let Some((user_id, email)) = scope
+                .first_held::<(String, String)>(LockRank::Users, sql, RowLock::Share.of("u"))
+                .await?
+            else {
                 return Ok(Err(LinkRefusal::SessionEnded));
             };
-            let user_id = row.id(0)?;
             let is_the_accounts_address = !provider_email.is_empty()
-                && provider_email.to_lowercase() == row.text(1)?.to_lowercase();
+                && provider_email.to_lowercase() == email.to_lowercase();
             if !is_the_accounts_address {
                 // Nothing is tied; one that is the account's already is that still.
                 let mut sql = scope.sql("SELECT 1 FROM user_identities WHERE issuer = ");
@@ -159,10 +156,8 @@ impl Store {
             let mut sql = scope.sql(
                 "SELECT password_hash, password_locked_at FROM users WHERE deleted_at IS NULL AND id = ",
             );
-            sql.bind(Id(user_id));
-            if scope.dialect() == Dialect::Postgres {
-                sql.push(" FOR UPDATE");
-            }
+            sql.bind(Id(user_id))
+                .push_lock(scope.row_lock(LockRank::Users, user_id, RowLock::Update));
             let (password_hash, locked) = match scope.fetch_optional(sql).await? {
                 Some(row) => (row.text(0)?, row.int(1)? != 0),
                 None => return Ok(Unlinked::AccountChanged),
@@ -213,12 +208,7 @@ impl Store {
             let mut sql = scope.sql("SELECT email FROM user_identities WHERE user_id = ");
             sql.bind(Id(user_id))
                 .push(" ORDER BY created_at, issuer, subject");
-            scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(|row| row.text(0))
-                .collect()
+            scope.all(sql).await
         })
         .await
     }

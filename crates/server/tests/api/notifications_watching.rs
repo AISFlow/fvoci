@@ -100,11 +100,11 @@ async fn whoever_writes_comments_on_or_is_given_a_card_is_told_of_its_comments_u
     comment_on(&th.client, &card, &plain("second")).await;
     th.client
         .patch(
-            &crate::blocks::block_path(&board.id, &card.id),
-            &json!({"updatedFields": {"properties": {OWNER: c.id}}}),
+            &format!("{TEST_WS}/cards/{}", card.id),
+            &json!({"updatedProperties": {OWNER: c.id}}),
         )
         .await
-        .check_no_content();
+        .check_ok();
     assert_eq!(kinds(&told(&th, &th.client2).await), (vec!["comment"], 0));
     assert_eq!(kinds(&told(&th, &c_client).await), (vec!["assignment"], 0));
 

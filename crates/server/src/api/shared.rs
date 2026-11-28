@@ -22,15 +22,14 @@ use axum::extract::{FromRequestParts, Path, RawPathParams};
 use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use fvoci_model::{
-    Block, Card, Container, ContainerKind, FileRecord, Page, PageNode, PersonProperties, Unit,
-    UnitNode,
+    Block, BlockType, Card, Container, ContainerKind, FileRecord, Page, PageNode, PersonProperties,
+    Unit, UnitNode,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use super::blocks::{BlocksFilterQuery, asked_blocks};
 use super::cards::{CardsListQuery, cards_page};
 use super::contract::bodies::Binary;
 use super::contract::params::{
@@ -39,7 +38,7 @@ use super::contract::params::{
 };
 use super::contract::tag;
 use super::files::{container_file_record, serve_container_file};
-use super::query::{QueryParams, parse_query_map};
+use super::query::{QueryParams, non_empty_opt, parse_query_map};
 use super::{ApiResult, json_response};
 use crate::app::App;
 use crate::client_address::ClientAddress;
@@ -191,8 +190,9 @@ async fn handle_get_shared_container(
 
 /// The blocks of a shared board
 ///
-/// What `getBlocks` gives of the board, with the same parameters, read with its read
-/// token as `getSharedContainer` is; a wiki's or a course's token reads no blocks (404). No block names a
+/// The live blocks of the board: all of them (`all`), one (`blockId`), or those below a
+/// block and of a type (`parentId`, `type`), read with its read token as
+/// `getSharedContainer` is; a wiki's or a course's token reads no blocks (404). No block names a
 /// user: `createdBy` and `modifiedBy` are empty, so is the `userId` of every mention in
 /// a body, and so is each user that
 /// the board's person properties (`person`, `multiPerson`, `createdBy`, `updatedBy`)
@@ -220,13 +220,8 @@ async fn handle_get_shared_blocks(
 ) -> ApiResult {
     shared.require_kind(ContainerKind::Board)?;
     let container = shared.container().await?;
-    let filter = BlocksFilterQuery {
-        all: query.all,
-        block_id: query.block_id,
-        parent_id: query.parent_id,
-        block_type: query.block_type,
-    };
-    let mut blocks = asked_blocks(&shared.app, &shared.container_id, &filter).await?;
+    let asked = asked_blocks(&shared.app, &shared.container_id, &query).await?;
+    let mut blocks: Vec<Block> = asked.into_iter().map(Block::outward).collect();
     let people = container.person_properties();
     let bodies = blocks.iter().filter_map(|block| block.body.as_ref());
     let shown = shared
@@ -238,6 +233,36 @@ async fn handle_get_shared_blocks(
         block.clear_references_but(&shown);
     }
     Ok(json_response(&blocks))
+}
+
+/// The blocks of a board that the query asks for, as `getSharedBlocks` describes them.
+async fn asked_blocks(
+    app: &App,
+    container_id: &str,
+    query: &SharedBlocksQuery,
+) -> Result<Vec<Block>, AppError> {
+    if !query.all.is_empty() {
+        app.blocks_for_container(container_id).await
+    } else if let Some(block_id) = non_empty_opt(&query.block_id) {
+        // A block of another board is as missing as one that does not exist.
+        let block = app.block(&block_id).await?;
+        if block.container_id == container_id {
+            Ok(vec![block])
+        } else {
+            Err(AppError::not_found("block"))
+        }
+    } else {
+        let parent_id = non_empty_opt(&query.parent_id);
+        let block_type = match non_empty_opt(&query.block_type) {
+            None => None,
+            Some(raw) => match raw.parse::<BlockType>() {
+                Ok(parsed) => Some(parsed),
+                Err(_) => return Ok(Vec::new()),
+            },
+        };
+        app.blocks(container_id, parent_id.as_deref(), block_type.as_ref())
+            .await
+    }
 }
 
 /// The cards of a shared board

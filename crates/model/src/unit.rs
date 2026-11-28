@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::body::{Body, BodyChange};
+use crate::body_markdown::ComplexBlock;
 use crate::course_schedule::{
     AmountUnit, FieldChange, UNIT_AMOUNT_FIELD, UNIT_AMOUNT_UNIT_FIELD, UNIT_SCHEDULED_DATE_FIELD,
     refuse_unit_amount, refuse_unit_scheduled_date, unit_amount, unit_amount_unit,
@@ -212,7 +213,8 @@ pub struct Unit {
     /// Optional shared scheduled date (`YYYY-MM-DD`) for a unit; always `null` for a
     /// chapter.
     pub scheduled_date: Option<String>,
-    /// The unit's body; `null` for a unit without one, and always `null` for a chapter.
+    /// The unit's body; `null` for a unit without one, always `null` for a chapter, and
+    /// `null` where it is read in Markdown (`bodyMarkdown`).
     pub body: Option<Body>,
     /// The identifier of the user who made it.
     pub created_by: String,
@@ -223,6 +225,21 @@ pub struct Unit {
     /// Last modification time in milliseconds since the Unix epoch: what `readAt` of a
     /// change of the unit names.
     pub updated_at: i64,
+    /// The body in Markdown, as `getUnit` with `format=markdown` gives it in place of
+    /// `body`, left out otherwise; written as a card's `bodyMarkdown` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub body_markdown: Option<String>,
+    /// With `bodyMarkdown`: whether the body has blocks its Markdown does not hold as
+    /// they are (`complexBlocks`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub has_complex_blocks: Option<bool>,
+    /// With `bodyMarkdown`: the blocks it does not hold as they are, in the order of
+    /// the body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub complex_blocks: Option<Vec<ComplexBlock>>,
 }
 
 impl From<Block> for Unit {
@@ -252,6 +269,9 @@ impl From<Block> for Unit {
             modified_by: block.modified_by,
             created_at: block.created_at,
             updated_at: block.updated_at,
+            body_markdown: None,
+            has_complex_blocks: None,
+            complex_blocks: None,
         }
     }
 }

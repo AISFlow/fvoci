@@ -26,7 +26,7 @@ use serde_json::Value;
 use crate::Store;
 use crate::block_derived::{self, Before};
 use crate::body_digest::body_digest;
-use crate::db::{Id, OptId, Param, Row, Scope, SqlFragment, VersionsKept, to_json_text};
+use crate::db::{FromRow, Id, OptId, Param, Row, Scope, SqlFragment, VersionsKept, to_json_text};
 use crate::error::StoreError;
 use crate::file_refs::NewBodyFiles;
 use crate::notification_noting::Telling;
@@ -333,12 +333,7 @@ impl Store {
                  WHERE block_id = ",
             );
             sql.bind(Id(block_id)).push(" ORDER BY version DESC");
-            let mut versions = scope
-                .fetch_all(sql)
-                .await?
-                .iter()
-                .map(kept_version)
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut versions: Vec<KeptVersion> = scope.all(sql).await?;
             let mut sql =
                 scope.sql("SELECT version, user_id FROM body_version_editors WHERE block_id = ");
             sql.bind(Id(block_id))
@@ -376,7 +371,7 @@ impl Store {
             let Some(row) = scope.fetch_optional(sql).await? else {
                 return Ok(None);
             };
-            let mut kept = kept_version(&row)?;
+            let mut kept = KeptVersion::from_row(&row)?;
             let body = match row.json(5, "body")? {
                 Value::Null => None,
                 document => Some(Body::from_stored(document)),
@@ -396,23 +391,25 @@ impl Store {
 
 /// A version as a row of `version, kept_at, body_digest, cause, actor_token_name` has
 /// it, without who wrote it.
-fn kept_version(row: &Row) -> Result<KeptVersion, StoreError> {
-    let cause = row.text(3)?;
-    Ok(KeptVersion {
-        version: row.int(0)?,
-        kept_at: row.int(1)?,
-        body_digest: row.bytes(2)?,
-        editors: Vec::new(),
-        agent_token_name: row.opt_text(4)?,
-        cause: cause
-            .parse()
-            .map_err(
-                |error: fvoci_model::ParseBodyVersionCauseError| StoreError::Corrupt {
-                    column: "cause",
-                    reason: error.to_string(),
-                },
-            )?,
-    })
+impl FromRow for KeptVersion {
+    fn from_row(row: &Row) -> Result<Self, StoreError> {
+        let cause = row.text(3)?;
+        Ok(KeptVersion {
+            version: row.int(0)?,
+            kept_at: row.int(1)?,
+            body_digest: row.bytes(2)?,
+            editors: Vec::new(),
+            agent_token_name: row.opt_text(4)?,
+            cause: cause
+                .parse()
+                .map_err(
+                    |error: fvoci_model::ParseBodyVersionCauseError| StoreError::Corrupt {
+                        column: "cause",
+                        reason: error.to_string(),
+                    },
+                )?,
+        })
+    }
 }
 
 /// What becomes of the body a card holds before updates of its document are logged
@@ -594,12 +591,7 @@ async fn keep(scope: &mut Scope<'_>, body: &BodyToKeep<'_>) -> Result<Kept, Stor
     sql.bind(Id(&block.id))
         .push_bind(" AND version = ", PENDING)
         .push(" RETURNING user_id");
-    let mut editors: BTreeSet<String> = scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect::<Result<_, _>>()?;
+    let mut editors: BTreeSet<String> = scope.all(sql).await?;
     let pending_agent = take_pending_agent(scope, &block.id).await?;
     if kept_already {
         return Ok(Kept {
@@ -642,7 +634,7 @@ async fn keep(scope: &mut Scope<'_>, body: &BodyToKeep<'_>) -> Result<Kept, Stor
     let body_bytes = body_json
         .as_deref()
         .map_or(0_i64, |json| i64::try_from(json.len()).unwrap_or(i64::MAX));
-    let files: Vec<&str> = block.body.as_ref().map(Body::file_ids).unwrap_or_default();
+    let files: Vec<&str> = block.body.as_ref().map_or_default(Body::file_ids);
     let mut sql = scope.sql(
         "INSERT INTO body_versions (block_id, version, body, body_bytes, body_digest, \
          files, kept_at, cause, actor_token_id, actor_token_name) VALUES (",
@@ -841,12 +833,7 @@ pub(crate) async fn unkept_editors(
     sql.bind(Id(block_id))
         .push_bind(" AND version = ", PENDING)
         .push(" ORDER BY user_id");
-    scope
-        .fetch_all(sql)
-        .await?
-        .iter()
-        .map(|row| row.id(0))
-        .collect()
+    scope.all(sql).await
 }
 
 /// The stored names of the files that the kept versions of a card's body show.

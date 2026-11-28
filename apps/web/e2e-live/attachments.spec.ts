@@ -41,9 +41,9 @@ test('a file of two parts is attached on the server and downloads as the same by
   const cardId = board.cards['Keep the scans'] ?? '';
   const attachmentsOnServer = async (): Promise<Schemas['Block'][]> =>
     (await (
-      await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-        params: { parentId: cardId, type: 'attachment' },
-      })
+      await api.get(
+        `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/attachments`,
+      )
     ).json()) as Schemas['Block'][];
 
   // 6 MiB of bytes that differ from part to part.

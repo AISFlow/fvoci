@@ -2,7 +2,9 @@
 //! page, under new identifiers, with their titles, icons, places and bodies, held to the
 //! wiki's limits.
 
-use fvoci_model::{BlockError, BlockPatch, Body, BodyChange, ContainerKind, PageLimits, new_id};
+use fvoci_model::{
+    Block, BlockError, BlockPatch, Body, BodyChange, ContainerKind, PageLimits, new_id,
+};
 use serde_json::json;
 
 use crate::common;
@@ -46,13 +48,14 @@ async fn a_page_is_copied_with_the_pages_below_it_right_after_it() {
         .duplicate_page(&wiki.id, &a, Some("A (copy)"), ROOMY, &other_id)
         .await
         .expect("copied");
+    let copies: Vec<Block> = std::iter::once(copies.first).chain(copies.below).collect();
     // A parent before what is below it: a, b and b2, c.
-    let ids: Vec<&str> = copies.pages.iter().map(|copy| copy.id.as_str()).collect();
+    let ids: Vec<&str> = copies.iter().map(|copy| copy.id.as_str()).collect();
     assert_eq!(ids.len(), 4);
     for original in [&a, &b, &c, &b2, &d] {
         assert!(!ids.contains(&original.as_str()), "new identifiers");
     }
-    let top = &copies.pages[0];
+    let top = &copies[0];
     assert_eq!(top.title, "A (copy)");
     assert_eq!(top.created_by, other_id, "made by whoever copies");
     assert_eq!(
@@ -62,7 +65,6 @@ async fn a_page_is_copied_with_the_pages_below_it_right_after_it() {
     );
     // Below the copy as below the page, in the same order, with titles and bodies.
     let copied_b = copies
-        .pages
         .iter()
         .find(|copy| copy.title == "Bee")
         .expect("a copy of b");
@@ -88,8 +90,8 @@ async fn a_page_is_copied_with_the_pages_below_it_right_after_it() {
         .duplicate_page(&wiki.id, &c, None, ROOMY, &user_id)
         .await
         .expect("copied");
-    assert_eq!(again.pages.len(), 1);
-    assert_eq!(again.pages[0].parent_id, b);
+    assert_eq!(again.below.len(), 0);
+    assert_eq!(again.first.parent_id, b);
     test.teardown().await;
 }
 

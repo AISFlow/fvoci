@@ -148,11 +148,11 @@ async fn late_writes_lose(th: TestServer, reach: &Reach) -> (TestServer, Seen) {
 
     th.client
         .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id),
+            &format!("{TEST_WS}/cards/{}", card.id),
             &json!({"title": "고친 제목"}),
         )
         .await
-        .check_no_content();
+        .check_ok();
     sent(&th, reach).await;
     let late = reach.write_late("index", &card.id, first, &written).await;
     let title = reach
@@ -166,8 +166,7 @@ async fn late_writes_lose(th: TestServer, reach: &Reach) -> (TestServer, Seen) {
             .unwrap_or_default(),
     );
 
-    th.client
-        .delete(&format!("{TEST_WS}/boards/{}/blocks/{}", board.id, card.id))
+    crate::blocks::trash_card(&th.client, &board.id, &card.id)
         .await
         .check_no_content();
     sent(&th, reach).await;
@@ -198,11 +197,11 @@ async fn late_writes_lose(th: TestServer, reach: &Reach) -> (TestServer, Seen) {
     sent(&th, reach).await;
     th.client
         .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, other.id),
+            &format!("{TEST_WS}/cards/{}", other.id),
             &json!({"title": "다시 고친 제목"}),
         )
         .await
-        .check_no_content();
+        .check_ok();
     sent(&th, reach).await;
     let past_a_clock_ahead = reach
         .held(&other.id)
@@ -217,11 +216,11 @@ async fn late_writes_lose(th: TestServer, reach: &Reach) -> (TestServer, Seen) {
         .await;
     th.client
         .patch(
-            &format!("{TEST_WS}/boards/{}/blocks/{}", board.id, other.id),
+            &format!("{TEST_WS}/cards/{}", other.id),
             &json!({"title": "세 번 고친 제목"}),
         )
         .await
-        .check_no_content();
+        .check_ok();
     sent(&th, reach).await;
     let past_a_removal_ahead = reach
         .held(&other.id)

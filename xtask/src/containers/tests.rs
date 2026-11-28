@@ -250,8 +250,7 @@ fn the_default_containers_use_digest_pinned_images_matching_ci() {
     for image in [postgres.image, object_store.image] {
         let digest = image
             .split_once("@sha256:")
-            .map(|(_, digest)| digest)
-            .unwrap_or_default();
+            .map_or_default(|(_, digest)| digest);
         assert!(
             digest.len() == 64
                 && digest

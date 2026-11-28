@@ -95,6 +95,17 @@
         "summary"
       ]
     },
+    "reactionsChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string",
+        "containerId": "string",
+        "blockId": "string",
+        "reactions": [
+          "#Reaction"
+        ]
+      }
+    },
     "containerMemberChanged": {
       "members": {
         "type": "string",
@@ -146,6 +157,12 @@
         "categoryOrder": [
           "string"
         ]
+      }
+    },
+    "favoritesChanged": {
+      "members": {
+        "type": "string",
+        "workspaceId": "string"
       }
     },
     "categoryContainersReordered": {

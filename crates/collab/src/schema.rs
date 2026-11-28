@@ -15,6 +15,8 @@ pub(crate) enum Fallback {
     Integer(i64),
     /// A truth value.
     Boolean(bool),
+    /// A string.
+    Text(&'static str),
 }
 
 /// Whether the stored form writes an attribute whose value is its [`Fallback`].
@@ -58,12 +60,24 @@ const fn span(name: &'static str) -> Attribute {
 /// The spans of a cell, across columns and down rows.
 const CELL: &[Attribute] = &[span("colspan"), span("rowspan")];
 
+/// The tone of a callout: a note where it is left out, which a body has to write.
+const TONE: Attribute = Attribute {
+    name: "tone",
+    fallback: Fallback::Text("info"),
+    at_fallback: AtFallback::Written,
+};
+
 /// Every kind of node the editor's schema has, with its attributes in the schema's order.
-pub(crate) const NODES: [(&str, &[Attribute]); 23] = [
+pub(crate) const NODES: [(&str, &[Attribute]); 28] = [
     ("blockMath", &[plain("latex")]),
     ("blockquote", &[]),
+    ("boardView", &[plain("viewId")]),
     ("bulletList", &[]),
+    ("callout", &[TONE]),
     ("codeBlock", &[plain("language")]),
+    ("details", &[]),
+    ("detailsContent", &[]),
+    ("detailsSummary", &[]),
     ("doc", &[]),
     ("file", &[plain("fileId")]),
     ("hardBreak", &[]),
@@ -141,8 +155,11 @@ pub(crate) fn mark_attributes(mark: &str) -> &'static [&'static str] {
 pub(crate) enum Place {
     /// Nowhere: the document itself.
     Document,
-    /// Among the blocks of the document, a quote or a list entry.
+    /// Among the blocks of the document, a quote, a list entry, a cell, a callout or
+    /// what a toggle hides (a board view only in the document and a toggle).
     Block,
+    /// In a toggle: its summary, or what it hides.
+    DetailsPart,
     /// In a line: text, and what stands in a line and is no text.
     Line,
     /// In a bullet list or an ordered list.
@@ -164,6 +181,7 @@ pub(crate) fn place(kind: &str) -> Place {
         "taskItem" => Place::TaskEntry,
         "tableRow" => Place::TableRow,
         "tableCell" | "tableHeader" => Place::TableCell,
+        "detailsSummary" | "detailsContent" => Place::DetailsPart,
         _ => Place::Block,
     }
 }
@@ -188,6 +206,7 @@ mod tests {
             Fallback::None => Value::Null,
             Fallback::Integer(number) => json!(number),
             Fallback::Boolean(truth) => json!(truth),
+            Fallback::Text(text) => json!(text),
         }
     }
 

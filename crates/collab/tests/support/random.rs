@@ -257,16 +257,57 @@ fn block(random: &mut Random, depth: usize) -> Value {
     }
 }
 
+/// A callout of one of the tones, of blocks.
+fn callout(random: &mut Random, depth: usize) -> Value {
+    let tone = *random.pick(&["info", "tip", "warn", "danger"]);
+    with_content(
+        "callout",
+        Some(json!({"tone": tone})),
+        blocks(random, depth),
+    )
+}
+
+/// A callout, or a toggle whose summary may be empty and whose content may hold a
+/// table, a callout and, `nested` times more at most, a toggle besides its blocks.
+fn toggle_or_callout(random: &mut Random, nested: usize) -> Value {
+    if random.chance(2) {
+        return callout(random, 2);
+    }
+    let mut hidden = blocks(random, 2);
+    if random.chance(3) {
+        hidden.push(table(random, 1));
+    }
+    if random.chance(3) {
+        hidden.push(callout(random, 1));
+    }
+    if nested > 0 && random.chance(4) {
+        hidden.push(toggle_or_callout(random, nested - 1));
+    }
+    with_content(
+        "details",
+        None,
+        vec![
+            with_content("detailsSummary", None, line(random)),
+            with_content("detailsContent", None, hidden),
+        ],
+    )
+}
+
 /// A body in the form an editor stores, so that it comes back as it went: marks in
 /// the editor's order, no neighbouring texts with the same marks, no empty `attrs` or
 /// `content`, the start of an ordered list written out. Never one empty paragraph alone.
 pub(crate) fn document(random: &mut Random) -> Value {
     loop {
         let mut content = blocks(random, 4);
-        // A table stands only in the document itself.
+        // A table stands only in the document itself, and in what a toggle hides.
         if random.chance(3) {
             let at = random.below(content.len() + 1);
             content.insert(at, table(random, 2));
+        }
+        // So do a toggle and a callout.
+        if random.chance(3) {
+            let at = random.below(content.len() + 1);
+            content.insert(at, toggle_or_callout(random, 2));
         }
         if content != [json!({"type": "paragraph"})] {
             return json!({"type": "doc", "content": content});

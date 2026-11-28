@@ -5,6 +5,7 @@
  * whether it can be done there now. The bars draw these and know nothing of
  * the document.
  */
+import BadgeInfoIcon from '@lucide/svelte/icons/badge-info';
 import BoldIcon from '@lucide/svelte/icons/bold';
 import CodeIcon from '@lucide/svelte/icons/code';
 import Heading1Icon from '@lucide/svelte/icons/heading-1';
@@ -12,6 +13,7 @@ import Heading2Icon from '@lucide/svelte/icons/heading-2';
 import Heading3Icon from '@lucide/svelte/icons/heading-3';
 import ItalicIcon from '@lucide/svelte/icons/italic';
 import ListIcon from '@lucide/svelte/icons/list';
+import ListCollapseIcon from '@lucide/svelte/icons/list-collapse';
 import ListOrderedIcon from '@lucide/svelte/icons/list-ordered';
 import ListTodoIcon from '@lucide/svelte/icons/list-todo';
 import PaperclipIcon from '@lucide/svelte/icons/paperclip';
@@ -149,6 +151,22 @@ export function lineActions(uploads: boolean): FormatAction[] {
       QuoteIcon,
       (editor) => editor.chain().focus().toggleBlockquote().run(),
       (editor) => editor.can().toggleBlockquote(),
+    ),
+    block(
+      'toggle',
+      'details',
+      m.editor_slash_toggle,
+      ListCollapseIcon,
+      (editor) => editor.chain().focus().toggleDetails().run(),
+      (editor) => editor.can().toggleDetails(),
+    ),
+    block(
+      'callout',
+      'callout',
+      m.editor_slash_callout,
+      BadgeInfoIcon,
+      (editor) => editor.chain().focus().toggleCallout().run(),
+      (editor) => editor.can().toggleCallout(),
     ),
     {
       id: 'table',

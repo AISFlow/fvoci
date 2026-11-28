@@ -6,22 +6,18 @@
 //! `App::keep_body_version_now`, `App::restore_body_version`); only the routes are a wiki's, under the handle that
 //! reaches wikis (`InWiki`), so that no operation of a card's versions reaches a page.
 
-use axum::extract::Path;
 use fvoci_model::{BodyVersion, BodyVersionContent, KeptBodyVersion, Page};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use super::body_versions::{
-    get_body_version, keep_body_version, list_body_versions, restore_body_version,
+    body_version_of, body_versions_of, keep_body_version_of, restore_body_version_of,
 };
 use super::contract::params::{MemberWorkspaceId, PageId, PageVersionNumber, WikiId};
 use super::contract::tag;
-use super::wikis::{READ_DENIED, page_with_permission};
-use super::workspace::InWiki;
-use super::{ApiResult, json_response};
-use super::{Delegated, Read};
+use super::items::{ItemOf, PageItem};
+use super::{ApiResult, Delegated, Read};
 use crate::app::App;
-use crate::permissions::ContainerPermission;
 
 pub(super) fn routes() -> OpenApiRouter<App> {
     OpenApiRouter::new()
@@ -48,18 +44,9 @@ pub(super) fn routes() -> OpenApiRouter<App> {
     responses((status = 200, description = "The versions, the newest first.", body = Vec<BodyVersion>)),
 )]
 async fn handle_get_page_body_versions(
-    Delegated(InWiki(ws), ..): Delegated<Read, InWiki>,
-    Path((_, wiki_id, page_id)): Path<(String, String, String)>,
+    Delegated(page, ..): Delegated<Read, ItemOf<PageItem>>,
 ) -> ApiResult {
-    let page = page_with_permission(
-        &ws,
-        &wiki_id,
-        &page_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    list_body_versions(&ws.app, &page.id).await
+    body_versions_of(page).await
 }
 
 /// Keep a page's body as a version now
@@ -77,22 +64,8 @@ async fn handle_get_page_body_versions(
     params(MemberWorkspaceId, WikiId, PageId),
     responses((status = 200, description = "What became of the body.", body = KeptBodyVersion)),
 )]
-async fn handle_keep_page_body_version(
-    InWiki(ws): InWiki,
-    Path((_, wiki_id, page_id)): Path<(String, String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let page = page_with_permission(
-        &ws,
-        &wiki_id,
-        &page_id,
-        ContainerPermission::ManageCards,
-        "access denied to keep a version of the page's body",
-    )
-    .await?;
-    let kept = keep_body_version(&ws.app, &page.id).await?;
-    tracing::debug!(wiki_id, page_id, user_id, outcome = ?kept.outcome, "KeepPageBodyVersion");
-    Ok(json_response(&kept))
+async fn handle_keep_page_body_version(page: ItemOf<PageItem>) -> ApiResult {
+    keep_body_version_of(page).await
 }
 
 /// A version kept of a page's body
@@ -109,18 +82,9 @@ async fn handle_keep_page_body_version(
     responses((status = 200, description = "The version.", body = BodyVersionContent)),
 )]
 async fn handle_get_page_body_version(
-    Delegated(InWiki(ws), ..): Delegated<Read, InWiki>,
-    Path((_, wiki_id, page_id, version)): Path<(String, String, String, String)>,
+    Delegated(page, ..): Delegated<Read, ItemOf<PageItem>>,
 ) -> ApiResult {
-    let page = page_with_permission(
-        &ws,
-        &wiki_id,
-        &page_id,
-        ContainerPermission::View,
-        READ_DENIED,
-    )
-    .await?;
-    get_body_version(&ws.app, &page.id, &version).await
+    body_version_of(page).await
 }
 
 /// Go back to a version of a page's body
@@ -140,20 +104,6 @@ async fn handle_get_page_body_version(
     params(MemberWorkspaceId, WikiId, PageId, PageVersionNumber),
     responses((status = 200, description = "The page as it is now.", body = Page)),
 )]
-async fn handle_restore_page_body_version(
-    InWiki(ws): InWiki,
-    Path((_, wiki_id, page_id, version)): Path<(String, String, String, String)>,
-) -> ApiResult {
-    let user_id = ws.caller.user_id.as_str();
-    let page = page_with_permission(
-        &ws,
-        &wiki_id,
-        &page_id,
-        ContainerPermission::ManageCards,
-        "access denied to restore a version of the page's body",
-    )
-    .await?;
-    let block = restore_body_version(&ws.app, &page, &version, user_id).await?;
-    tracing::debug!(wiki_id, page_id, user_id, "RestorePageBodyVersion");
-    Ok(json_response(&Page::from(block)))
+async fn handle_restore_page_body_version(page: ItemOf<PageItem>) -> ApiResult {
+    restore_body_version_of(page).await
 }

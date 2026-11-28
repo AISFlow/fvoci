@@ -40,9 +40,7 @@ async function commentsOn(
   cardId: string,
 ): Promise<Schemas['Block'][]> {
   return (await (
-    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-      params: { parentId: cardId, type: 'comment' },
-    })
+    await api.get(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`)
   ).json()) as Schemas['Block'][];
 }
 
@@ -223,7 +221,7 @@ test('a commenter changes their own comment, an admin anybody’s, an editor nob
   const anonymous = await request.newContext({ baseURL: base });
   const [comment] = await commentsOn(api, board, cardId);
   const asReader = await anonymous.get(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${comment?.id ?? ''}/versions`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments/${comment?.id ?? ''}/versions`,
     { params: { readToken: shared.token ?? '' } },
   );
   expect(asReader.status()).toBe(401);
@@ -265,12 +263,12 @@ test('a comment changed elsewhere while its field is open is not written over un
   // Meanwhile the same person changes it in another tab; the page hears of it.
   const [comment] = await stored();
   const changed = await api.patch(
-    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${comment?.id ?? ''}`,
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments/${comment?.id ?? ''}`,
     {
       data: { body: paragraph('Words from the other tab'), readAt: comment?.updatedAt },
     },
   );
-  expect(changed.status()).toBe(204);
+  expect(changed.status()).toBe(200);
 
   // Saving on the version the field was opened on is refused: theirs is shown, nothing written over.
   await comments.getByRole('button', { name: 'Save' }).click();
@@ -316,23 +314,17 @@ test('a commenter deletes their own comment and brings it back with undo; somebo
   const errors = watchErrors(page);
   await openCard(page, path, guest);
   // The owner's comment first, then the guest's own.
-  await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks`, {
-    data: [
-      {
-        containerId: board.boardId,
-        parentId: cardId,
-        type: 'comment',
-        title: '',
-        fields: {},
-        createdAt: 1,
-        updatedAt: 1,
+  await api.post(
+    `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/${cardId}/comments`,
+    {
+      data: {
         body: {
           type: 'doc',
           content: [{ type: 'paragraph', content: [{ type: 'text', text: 'The owner says' }] }],
         },
       },
-    ],
-  });
+    },
+  );
   const comments = page.getByTestId('card-comments').locator('[data-comment]');
   await expect(comments).toHaveCount(1);
   await send(page, 'I take it back');

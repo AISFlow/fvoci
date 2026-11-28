@@ -9,7 +9,10 @@ use fvoci_model::DuplicateAs;
 use fvoci_model::{
     Block, BlockPatch, BlockType, Container, ContainerVisibility, ContainersAndBlocks, new_id,
 };
-use fvoci_store::{BlockFilter, CopyChanges, CopyTitles, DbType, NewBodyFiles, Previews, Store};
+use fvoci_store::{
+    BlockFilter, CopyChanges, CopyTitles, Creator, DbType, NewBodyFiles, NewContainers, Previews,
+    Store, StoreError,
+};
 use serde_json::Value;
 use tokio::sync::Barrier;
 use tokio::task::JoinSet;
@@ -228,15 +231,14 @@ async fn a_card_made_a_template_keeps_its_stored_number_and_restores_it_when_mad
 
     // Duplicating a template that holds a preserved number does not collide:
     // a copy takes a new number, and a template duplicate takes none.
-    let copied = test
-        .duplicate_block(&board_id, &first.id, &user_id, DuplicateAs::Copy)
+    let copied = common::duplicate_card(&test, &board_id, &first.id, &user_id, DuplicateAs::Copy)
         .await
         .expect("copy from template");
     assert_eq!(copied[0].number, Some(3));
-    let dup_template = test
-        .duplicate_block(&board_id, &first.id, &user_id, DuplicateAs::Template)
-        .await
-        .expect("template copy from template");
+    let dup_template =
+        common::duplicate_card(&test, &board_id, &first.id, &user_id, DuplicateAs::Template)
+            .await
+            .expect("template copy from template");
     assert_eq!(dup_template[0].number, None);
 
     // Deleting the template to trash and restoring it preserves its hidden number.
@@ -465,15 +467,14 @@ async fn a_copy_and_an_import_are_new_cards_with_new_numbers() {
     let first = new_card(&test, &board_id, "1", &user_id).await;
     new_card(&test, &board_id, "2", &user_id).await;
 
-    let copies = test
-        .duplicate_block(&board_id, &first.id, &user_id, DuplicateAs::Copy)
+    let copies = common::duplicate_card(&test, &board_id, &first.id, &user_id, DuplicateAs::Copy)
         .await
         .expect("the card is copied");
     assert_eq!(copies[0].number, Some(3), "the copy is a new card");
-    let templates = test
-        .duplicate_block(&board_id, &first.id, &user_id, DuplicateAs::Template)
-        .await
-        .expect("a template is made of the card");
+    let templates =
+        common::duplicate_card(&test, &board_id, &first.id, &user_id, DuplicateAs::Template)
+            .await
+            .expect("a template is made of the card");
     assert_eq!(templates[0].number, None, "a template has none");
     assert_eq!(
         new_card(&test, &board_id, "4", &user_id).await.number,
@@ -518,9 +519,15 @@ async fn a_copy_and_an_import_are_new_cards_with_new_numbers() {
         ],
         containers: vec![imported_board.clone()],
     };
-    test.create_containers_and_blocks(&mut archive, &user_id, NewBodyFiles::Unchecked)
-        .await
-        .expect("the archive is stored");
+    test.create_containers(
+        NewContainers::whole(&mut archive)
+            .body_files(NewBodyFiles::Unchecked)
+            .creator(Creator::Nobody),
+        &user_id,
+    )
+    .await
+    .map_err(StoreError::from)
+    .expect("the archive is stored");
     assert_eq!(
         numbers_by_title(&test, &imported_board.id).await,
         [
@@ -656,10 +663,11 @@ async fn write_once(store: &Store, board_id: &str, user_id: &str, write: Write) 
                 .expect("the batch is stored");
             batch
         }
-        Write::Copy(card_id) => store
-            .duplicate_block(board_id, &card_id, user_id, DuplicateAs::Copy)
-            .await
-            .expect("the card is copied"),
+        Write::Copy(card_id) => {
+            common::duplicate_card(store, board_id, &card_id, user_id, DuplicateAs::Copy)
+                .await
+                .expect("the card is copied")
+        }
         Write::Restore(card_id) => vec![
             store
                 .undelete_block(&card_id, user_id)
@@ -674,8 +682,14 @@ async fn write_once(store: &Store, board_id: &str, user_id: &str, write: Write) 
                 containers: vec![*container],
             };
             store
-                .create_containers_and_blocks(&mut archive, user_id, NewBodyFiles::Unchecked)
+                .create_containers(
+                    NewContainers::whole(&mut archive)
+                        .body_files(NewBodyFiles::Unchecked)
+                        .creator(Creator::Nobody),
+                    user_id,
+                )
                 .await
+                .map_err(StoreError::from)
                 .expect("the archive is stored");
             archive.blocks
         }

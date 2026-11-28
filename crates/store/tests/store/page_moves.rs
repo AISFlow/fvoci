@@ -5,7 +5,7 @@ use fvoci_model::{
     BlockError, ContainerKind, JsonMap, NewPage, PAGE_ORDER_FIELD, PageLimits, PageMove, PageNode,
     new_id,
 };
-use fvoci_store::{PageWrite, Store, StoreError};
+use fvoci_store::{Store, StoreError, Written};
 use serde_json::Value;
 
 use crate::common;
@@ -29,7 +29,7 @@ async fn moved(
     page_id: &str,
     to: &PageMove,
     limits: PageLimits,
-) -> Result<PageWrite, StoreError> {
+) -> Result<Written, StoreError> {
     store.move_page(wiki_id, page_id, to, limits, user_id).await
 }
 
@@ -89,10 +89,10 @@ async fn a_page_moves_with_what_is_below_it_where_it_is_asked() {
     .await
     .expect("moved");
     assert_eq!(
-        (write.page.parent_id.as_str(), write.renumbered.len()),
+        (write.first.parent_id.as_str(), write.renumbered.len()),
         ("", 0)
     );
-    assert_eq!(write.page.modified_by, user_id);
+    assert_eq!(write.first.modified_by, user_id);
     assert_eq!(
         below(&test, &wiki, "").await,
         [b.as_str(), a.as_str(), d.as_str()]
@@ -102,7 +102,7 @@ async fn a_page_moves_with_what_is_below_it_where_it_is_asked() {
         [c.as_str()],
         "what is below goes along"
     );
-    moved(&test, &user_id, &wiki.id, &b, &to(&d, None), limits(10, 10))
+    let _ = moved(&test, &user_id, &wiki.id, &b, &to(&d, None), limits(10, 10))
         .await
         .expect("moved");
     assert_eq!(below(&test, &wiki, "").await, [a.as_str(), d.as_str()]);
@@ -127,7 +127,7 @@ async fn a_page_moves_with_what_is_below_it_where_it_is_asked() {
         ),
         "{refused:?}"
     );
-    moved(
+    let _ = moved(
         &test,
         &user_id,
         &wiki.id,
@@ -141,7 +141,7 @@ async fn a_page_moves_with_what_is_below_it_where_it_is_asked() {
         below(&test, &wiki, "").await,
         [a.as_str(), b.as_str(), d.as_str()]
     );
-    moved(&test, &user_id, &wiki.id, &a, &to("", None), limits(10, 10))
+    let _ = moved(&test, &user_id, &wiki.id, &a, &to("", None), limits(10, 10))
         .await
         .expect("moved");
     assert_eq!(
@@ -162,7 +162,7 @@ async fn a_page_moves_with_what_is_below_it_where_it_is_asked() {
     .await
     .expect("moved where it is");
     let stored = test.get_block(&d).await.expect("the page");
-    assert_eq!(stayed.page.updated_at, stored.updated_at, "not written");
+    assert_eq!(stayed.first.updated_at, stored.updated_at, "not written");
     assert_eq!(tree_of(&test, &wiki.id).await, before);
     test.teardown().await;
 }
@@ -206,10 +206,10 @@ async fn a_page_moves_neither_below_itself_nor_off_its_wiki_nor_too_deep() {
     let too_deep = BlockError::PageTooDeep { limit: 3 };
     assert_eq!(refused(&d, to(&c, None), limits(3, 10)).await, too_deep);
     assert_eq!(refused(&a, to(&d, None), limits(3, 10)).await, too_deep);
-    moved(&test, &user_id, &wiki.id, &d, &to(&b, None), limits(3, 10))
+    let _ = moved(&test, &user_id, &wiki.id, &d, &to(&b, None), limits(3, 10))
         .await
         .expect("d at depth 3");
-    moved(&test, &user_id, &wiki.id, &d, &to("", None), limits(3, 10))
+    let _ = moved(&test, &user_id, &wiki.id, &d, &to("", None), limits(3, 10))
         .await
         .expect("d at the top again");
     // A page is moved in its own wiki only, and one in the trash not at all.
@@ -270,7 +270,7 @@ async fn siblings_of_one_order_or_none_are_numbered_anew_when_a_page_goes_among_
         "the siblings are numbered anew"
     );
     let mut expected = listed.clone();
-    expected.insert(1, write.page.id.clone());
+    expected.insert(1, write.first.id.clone());
     assert_eq!(below(&test, &wiki, "").await, expected);
     assert!(in_order(&test, &wiki.id, "").await);
     let stored_orders: Vec<String> = tree_of(&test, &wiki.id)
@@ -360,8 +360,8 @@ async fn a_wiki_is_held_to_its_depth_and_its_count_of_pages_not_in_the_trash() {
         };
         test.create_page(&wiki.id, &new, small, &user_id).await
     };
-    let top = make("").await.expect("depth 1").page.id;
-    let second = make(&top).await.expect("depth 2").page.id;
+    let top = make("").await.expect("depth 1").first.id;
+    let second = make(&top).await.expect("depth 2").first.id;
     assert_eq!(
         refusal(make(&second).await),
         BlockError::PageTooDeep { limit: 2 }
@@ -370,14 +370,14 @@ async fn a_wiki_is_held_to_its_depth_and_its_count_of_pages_not_in_the_trash() {
     for _ in 0..3 {
         page(&test, &other, "", None).await;
     }
-    let third = make("").await.expect("the third page").page.id;
+    let third = make("").await.expect("the third page").first.id;
     assert_eq!(
         refusal(make("").await),
         BlockError::TooManyPages { limit: 3 }
     );
     // Those in the trash are not counted.
     test.delete_block(&third, &user_id).await.expect("deleted");
-    make("").await.expect("one in the trash leaves room");
+    let _ = make("").await.expect("one in the trash leaves room");
     assert_eq!(
         test.get_page_tree(&wiki.id).await.expect("the tree").len(),
         3

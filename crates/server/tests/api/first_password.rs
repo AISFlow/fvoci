@@ -285,7 +285,7 @@ pub(crate) async fn card_in_the_space(
     let tenant = Tenant::org(&own.org_id).expect("an identifier");
     ts.app
         .scoped(tenant)
-        .insert_block(&mut card, by, ChangeNotification::Suppress)
+        .insert_block_unchecked(&mut card, by, ChangeNotification::Suppress)
         .await
         .expect("a card of the space");
     card.id

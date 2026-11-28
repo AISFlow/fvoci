@@ -5,6 +5,13 @@ packages: []
 savePrefix: ''
 minimumReleaseAge: 1440
 
+# wrangler 4.168.0 pins the Cloudflare SDK (cloudflare 5.2.0), whose node-fetch 2 and
+# formdata-node 4 bring node-domexception 1.0.0, marked deprecated. Nothing of it is in
+# what the site serves. Accepted for that one version; remove this once a Wrangler
+# release no longer brings it.
+allowedDeprecatedVersions:
+  node-domexception: '1.0.0'
+
 # Deploying runs no install script: workerd, esbuild and sharp take their
 # platform binaries from optional dependencies.
 allowBuilds:

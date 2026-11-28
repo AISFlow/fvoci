@@ -33,6 +33,7 @@ import type {
   UnitScheduleUpdate,
   WorkspaceLearningToday,
 } from '../state/course-types.ts';
+import type { WithReactions } from '../state/reaction-types.ts';
 import type { DeletedItem, Paging } from '../state/trash-reads.ts';
 import { BlockTurns } from '../state/write.ts';
 
@@ -46,6 +47,7 @@ import {
   type Schemas,
 } from './convert.ts';
 import { serverCourseExams, serverCourseMeetings } from './course-meetings.ts';
+import { withReactions } from './reactions.ts';
 import {
   deleteCourseSchedule,
   getCourseSchedule,
@@ -197,13 +199,12 @@ export class ServerCourses implements Courses {
     return nodes.map((node) => unitOf(node, courseId));
   }
 
-  async unit(courseId: string, unitId: string): Promise<CourseUnitDetail> {
-    return unitDetailOf(
-      await this.#request<Schemas['Unit']>('/courses/{courseId}/units/{unitId}', {
-        courseId,
-        unitId,
-      }),
+  async unit(courseId: string, unitId: string): Promise<WithReactions<CourseUnitDetail>> {
+    const unit = await this.#request<Schemas['UnitWithReactions']>(
+      '/courses/{courseId}/units/{unitId}',
+      { courseId, unitId },
     );
+    return withReactions(unitDetailOf(unit), unit);
   }
 
   async createUnit(courseId: string, draft: UnitDraft): Promise<CourseUnitDetail> {
@@ -278,12 +279,12 @@ export class ServerCourses implements Courses {
     );
   }
 
-  async comments(courseId: string, unitId: string): Promise<Comment[]> {
-    const blocks = await this.#request<Schemas['Block'][]>(
+  async comments(courseId: string, unitId: string): Promise<WithReactions<Comment>[]> {
+    const blocks = await this.#request<Schemas['CommentWithReactions'][]>(
       '/courses/{courseId}/units/{unitId}/comments',
       { courseId, unitId },
     );
-    return blocks.map(commentOf);
+    return blocks.map((block) => withReactions(commentOf(block), block));
   }
 
   async createComment(courseId: string, unitId: string, body: DocNode): Promise<Comment> {

@@ -5,8 +5,8 @@ use fvoci_model::{
     CategoryContainerMetadata, CategoryContainers, CategoryType, ClientConfig, ClientStatePatch,
     Container, ContainerKind, ContainerMember, ContainerMemberPatch, ContainerPatch, ContainerRole,
     ContainerVisibility, Credential, InvalidInput, LoginRequest, MinimumRole, NameShown,
-    OrgWorkspace, PatchContainersAndBlocks, PersonName, Problem, PropertyColor, PropertyOption,
-    PropertyType, PublicLink, Subscriber, Subscription, Title, User, Workspace,
+    OrgWorkspace, PersonName, Problem, PropertyColor, PropertyOption, PropertyType, PublicLink,
+    Subscriber, Subscription, Title, User, Workspace,
 };
 use serde_json::{Value, json};
 
@@ -447,18 +447,6 @@ fn container_member_json_members() {
             "{invalid} must not decode as ContainerMemberPatch"
         );
     }
-}
-
-#[test]
-fn patch_containers_and_blocks_json_members() {
-    let patch: PatchContainersAndBlocks = serde_json::from_value(json!({
-        "containerIds": ["b"], "containerPatches": [{ "title": "t" }],
-        "blockIds": ["a"], "blockPatches": [{ "title": "u" }]
-    }))
-    .expect("decodes");
-    assert_eq!((patch.container_ids.len(), patch.block_ids.len()), (1, 1));
-    assert_eq!(patch.container_patches[0].title.as_deref(), Some("t"));
-    assert_eq!(patch.block_patches[0].title.as_deref(), Some("u"));
 }
 
 #[test]

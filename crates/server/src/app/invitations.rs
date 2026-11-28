@@ -30,7 +30,7 @@ use super::{App, Asker, ContainerAccess};
 use crate::auth::now_millis;
 use crate::auth::secret::{new_secret, token_digest};
 use crate::collab::AccessScope;
-use crate::error::AppError;
+use crate::error::{AppError, OrMissing};
 use crate::permissions::{self, Actor, ContainerScope, WorkspacePermission};
 
 /// How often an acceptance is tried against a maker of the link who is changed
@@ -234,23 +234,18 @@ impl App {
         change: GuestInvitationsChange,
         user_id: &str,
     ) -> Result<Workspace, AppError> {
-        match self
+        let workspace = self
             .store()
             .set_guest_invitations(workspace_id, change, user_id)
             .await
-        {
-            Ok(workspace) => {
-                tracing::info!(
-                    workspace_id,
-                    user_id,
-                    enabled = change.enabled,
-                    "the invitations of guests were switched"
-                );
-                Ok(workspace)
-            }
-            Err(error) if error.is_not_found() => Err(AppError::not_found("workspace")),
-            Err(error) => Err(error.into()),
-        }
+            .or_missing("workspace")?;
+        tracing::info!(
+            workspace_id,
+            user_id,
+            enabled = change.enabled,
+            "the invitations of guests were switched"
+        );
+        Ok(workspace)
     }
 
     /// What the user is to a board of the workspace, and whether they invite guests to
@@ -273,10 +268,8 @@ impl App {
         if access.container.workspace_id != workspace_id {
             return Ok(None);
         }
-        let workspace = match self.store().get_workspace(workspace_id).await {
-            Ok(workspace) => workspace,
-            Err(error) if error.is_not_found() => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(workspace) = self.store().get_workspace(workspace_id).await.found()? else {
+            return Ok(None);
         };
         let invites = permissions::invites_guests(
             access.grant,

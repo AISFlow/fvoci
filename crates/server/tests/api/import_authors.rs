@@ -4,7 +4,7 @@
 
 use std::io::{Cursor, Write as _};
 
-use fvoci_model::{Block, BlockType, Container, User, new_id};
+use fvoci_model::{BlockType, Container, User, new_id};
 use serde_json::{Value, json};
 
 use crate::common::{Setup, TEST_WORKSPACE_ID, TEST_WS, TestServer};
@@ -123,11 +123,7 @@ async fn everything_imported_is_the_importers_whoever_the_archive_names() {
         board.modified_by, importer,
         "the board's colleague modifier"
     );
-    let blocks: Vec<Block> = th
-        .client
-        .get(&format!("{TEST_WS}/boards/{}/blocks", board.id))
-        .await
-        .ok_json();
+    let blocks = crate::blocks::blocks_of(&th.client, &board.id).await;
     let by_title = |title: &str| {
         blocks
             .iter()

@@ -1,7 +1,7 @@
 <!--
   The face of a card: its number, icon and title, the properties the view turned on,
-  and what its body holds (that there is one, how its tasks stand). A kanban
-  column and a gallery draw the same face, the gallery a larger one with a
+  whether it repeats, and what its body holds (that there is one, how its tasks
+  stand). A kanban column and a gallery draw the same face, the gallery a larger one with a
   preview of the body: its first picture and the beginning of its text.
   The picture is fetched once it comes near the screen (`loading="lazy"`).
 
@@ -13,14 +13,16 @@
   import type { Snippet } from 'svelte';
   import CornerDownRightIcon from '@lucide/svelte/icons/corner-down-right';
   import ListTreeIcon from '@lucide/svelte/icons/list-tree';
+  import RepeatIcon from '@lucide/svelte/icons/repeat';
   import SquareCheckIcon from '@lucide/svelte/icons/square-check';
   import TextAlignStartIcon from '@lucide/svelte/icons/text-align-start';
 
   import CardNumber from '$lib/components/card-number/CardNumber.svelte';
   import { PropertyValue, type PropertyUser } from '$lib/components/properties/index.ts';
+  import { recurrenceText } from '$lib/components/recurrence/recurrence-text.ts';
   import { m } from '$lib/i18n/paraglide/messages.js';
   import type { Regional } from '$lib/logic/regional.ts';
-  import type { Card, PropertyTemplate } from '$lib/logic/wire.ts';
+  import { cardRecurrence, type Card, type PropertyTemplate } from '$lib/logic/wire.ts';
 
   import { faceProperties } from './face.ts';
 
@@ -93,6 +95,7 @@
   }: Props = $props();
 
   const shown = $derived(faceProperties(card, templates, shownProperties));
+  const repeats = $derived(cardRecurrence(card));
   const title = $derived(card.title || m['KanbanCard.untitled']());
   const large = $derived(size === 'large');
 </script>
@@ -194,11 +197,18 @@
     </div>
   {/if}
 
-  {#if hasBody || tasksTotal > 0 || subcardsTotal > 0}
+  {#if hasBody || tasksTotal > 0 || subcardsTotal > 0 || repeats}
     <div
       data-slot="card-badges"
       class={['flex items-center gap-3 text-xs text-muted-foreground', large ? 'mt-3' : 'mt-2']}
     >
+      {#if repeats}
+        {@const how = m.card_repeats({ how: recurrenceText(repeats) })}
+        <span data-slot="card-repeats" title={how}>
+          <RepeatIcon class="size-3.5" aria-hidden="true" />
+          <span class="sr-only">{how}</span>
+        </span>
+      {/if}
       {#if hasBody}
         <span data-slot="card-has-body" title={m['CardBadges.title-description']()}>
           <TextAlignStartIcon class="size-3.5" aria-hidden="true" />

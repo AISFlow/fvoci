@@ -6,11 +6,11 @@ use fvoci_model::{
 };
 use fvoci_store::CopyTitles;
 
-use super::App;
 use super::accept_language::Reader;
 use super::language::Language;
 use super::pages::refused_without_member;
 use super::templates::changes_of_copy;
+use super::{App, Changes};
 use crate::error::AppError;
 use crate::metrics::{ContainerWork, CourseSource, Module};
 
@@ -244,26 +244,15 @@ impl App {
             });
         }
 
-        let app = self.clone();
-        let broadcast = copies.clone();
-        let new_members = members.clone();
-        self.spawn_background(async move {
-            let mut workspace_id = "";
-            for container in &broadcast.containers {
-                workspace_id = &container.workspace_id;
-                app.ws()
-                    .broadcast_container_change(workspace_id, container)
-                    .await;
-            }
-            for block in &broadcast.blocks {
-                app.ws().broadcast_block_change(workspace_id, block).await;
-            }
-            for member in &new_members {
-                app.ws()
-                    .broadcast_member_change(workspace_id, &member.container_id, member)
-                    .await;
-            }
-        });
+        // The copies are of one workspace, the one they are made in.
+        let workspace_id = copies
+            .containers
+            .first()
+            .map_or("", |container| container.workspace_id.as_str());
+        let changes = Changes::in_workspace(workspace_id)
+            .made(copies.containers.iter().cloned(), members.iter().cloned())
+            .copied(copies.blocks.iter().cloned());
+        self.tell(changes);
 
         Ok((copies, members))
     }

@@ -163,7 +163,9 @@ test('a deleted card is listed for the editors of its board, and comes back to t
   const gone = board.cards['Throw me out'] ?? '';
   expect(
     (
-      await api.delete(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${gone}`)
+      await api.post(`/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards/batch-delete`, {
+        data: { cardIds: [gone] },
+      })
     ).ok(),
   ).toBe(true);
   const path = boardPath(board, board.viewId);

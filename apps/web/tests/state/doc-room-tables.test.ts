@@ -163,6 +163,53 @@ describe('the tables of a room in memory', () => {
     expect(bodyOf(doc)).toEqual(filled);
   });
 
+  it('takes away a table in a toggle that holds no cell, and the toggles that then hide nothing', () => {
+    const toggle = (summary: string, hidden: DocNode[]): DocNode => ({
+      type: 'details',
+      content: [
+        { type: 'detailsSummary', content: [{ type: 'text', text: summary }] },
+        { type: 'detailsContent', content: hidden },
+      ],
+    });
+    const table: DocNode = {
+      type: 'table',
+      content: [{ type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph('a')] }] }],
+    };
+    const emptied = (body: DocNode): Y.Doc => {
+      const doc = documentOf(body);
+      const found: Y.XmlElement[] = [];
+      const walk = (node: Y.XmlFragment | Y.XmlElement): void => {
+        for (const child of node.toArray())
+          if (child instanceof Y.XmlElement) {
+            if (child.nodeName === 'tableRow') found.push(child);
+            else walk(child);
+          }
+      };
+      walk(doc.getXmlFragment(FIELD));
+      doc.transact(() => {
+        for (const row of found) row.delete(0, row.length);
+      });
+      return doc;
+    };
+    // Its toggle hides only it, and that toggle is all its outer toggle hides: both go.
+    const alone = emptied({
+      type: 'doc',
+      content: [paragraph('before'), toggle('outer', [toggle('inner', [table])])],
+    });
+    expect(mendTables(alone)).toBeDefined();
+    expect(bodyOf(alone)).toEqual({ type: 'doc', content: [paragraph('before')] });
+    // The outer toggle hides a line too: only the inner one goes.
+    const beside = emptied({
+      type: 'doc',
+      content: [toggle('outer', [paragraph('kept'), toggle('inner', [table])])],
+    });
+    expect(mendTables(beside)).toBeDefined();
+    expect(bodyOf(beside)).toEqual({
+      type: 'doc',
+      content: [toggle('outer', [paragraph('kept')])],
+    });
+  });
+
   it('puts a failing cell back after the cell before it, so that two tabs that saw different ones still agree', () => {
     // The cell after `a` failed; one tab has also had `n` put before it, the other not yet.
     const one = documentOf(tableOf([['a', 'f']]));

@@ -21,6 +21,7 @@ import { diffBodies } from '$lib/logic/body-diff.ts';
 
 import {
   bullets,
+  callout,
   cell,
   code,
   doc,
@@ -37,6 +38,7 @@ import {
   row,
   table,
   text,
+  toggle,
 } from '../support/body-docs.ts';
 import { clipboardOf, codeRuns } from '../support/code-blocks.ts';
 
@@ -317,6 +319,32 @@ describe('things that are not text, marked', () => {
     expect(root.querySelector('[data-diff="added"]')?.getAttribute('data-diff-label')).toBe(
       'Added block',
     );
+  });
+
+  it("says a callout's tone changed, in the names of the tones", () => {
+    const root = drawn(
+      doc(callout('tip', paragraph(text('mind')))),
+      doc(callout('danger', paragraph(text('mind')))),
+    );
+    expect(root.querySelector('.doc-diff-note')?.textContent).toBe('Tip → Danger');
+    expect(root.querySelector('[data-callout]')?.getAttribute('data-tone')).toBe('danger');
+  });
+
+  it('opens a toggle that hides a change, and leaves one that hides none closed', () => {
+    const root = drawn(
+      doc(
+        toggle([text('same')], paragraph(text('kept'))),
+        toggle([text('changed')], paragraph(text('before'))),
+      ),
+      doc(
+        toggle([text('same')], paragraph(text('kept'))),
+        toggle([text('changed')], paragraph(text('after'))),
+      ),
+    );
+    const [same, changed] = root.querySelectorAll('details');
+    expect(same?.open).toBe(false);
+    expect(changed?.open).toBe(true);
+    expect(changed?.querySelector('ins')?.textContent).toBe('after');
   });
 
   it("says a code block's language changed, in the names of the languages", () => {

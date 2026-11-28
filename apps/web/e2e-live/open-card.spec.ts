@@ -183,14 +183,15 @@ test('deleted while open: the card says it is gone, and restored it holds what w
   await expect(editor(first)).toContainText('the last words');
 
   // At once, before the room has written the body to the card.
-  const card = `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/blocks/${cardId}`;
-  expect((await api.delete(card)).ok()).toBe(true);
+  const cards = `/api/v1/w/${board.workspaceId}/boards/${board.boardId}/cards`;
+  const batch = { data: { cardIds: [cardId] } };
+  expect((await api.post(`${cards}/batch-delete`, batch)).ok()).toBe(true);
   await expect(second.getByTestId('card-missing')).toBeVisible(PROMPTLY);
   await shot(second, 'deleted');
   await second.getByTestId('card-missing').getByRole('button', { name: 'Close' }).click();
   await expect(second.getByTestId('card-dialog')).toHaveCount(0);
 
-  expect((await api.post(`${card}/restore`)).ok()).toBe(true);
+  expect((await api.post(`${cards}/batch-restore`, batch)).ok()).toBe(true);
   const restored = (await (
     await api.get(`/api/v1/w/${board.workspaceId}/cards/${cardId}`)
   ).json()) as Schemas['Card'];

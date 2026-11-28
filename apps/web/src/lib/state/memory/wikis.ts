@@ -19,6 +19,7 @@ import type { DocNode } from '../../editor/schema.ts';
 import { PAGE_TITLE_MAX } from '../../logic/page-tree.ts';
 import { createBoard, type Container, type ContainerKind } from '../../logic/wire.ts';
 import { BackendError, type DeletedItem, type Paging } from '../backend.ts';
+import type { WithReactions } from '../reaction-types.ts';
 import type {
   PageDraft,
   PageMove,
@@ -35,6 +36,7 @@ import { checkedWhole } from './bodies.ts';
 import { MemoryBodyVersions, writtenWhole } from './body-versions.ts';
 import { MemoryPageComments, type OnPage } from './page-comments.ts';
 import { DEFAULT_LIMITS, PageTree, type PageLimits, type Place } from './page-tree.ts';
+import { withMemoryReactions } from './reactions.ts';
 import { fail } from './refuse.ts';
 import { commentOf, copy, memberOf, orderOf, pageOf, scramble } from './shapes.ts';
 import { checkWorkspace } from './spaces.ts';
@@ -210,10 +212,10 @@ export class MemoryWikis extends MemoryPageComments implements Wikis {
     return scramble(this.#pagesOf(wikiId)).map(pageOf);
   }
 
-  async page(wikiId: string, pageId: string): Promise<WikiPageDetail> {
+  async page(wikiId: string, pageId: string): Promise<WithReactions<WikiPageDetail>> {
     await this.#enter('page');
     this.#role(wikiId);
-    return detailOf(this.#page(wikiId, pageId));
+    return withMemoryReactions(this.#world, detailOf(this.#page(wikiId, pageId)));
   }
 
   /** The pages of the wiki as a tree, for its decisions (`page-tree.ts`). */

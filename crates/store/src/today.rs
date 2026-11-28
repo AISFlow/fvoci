@@ -447,7 +447,7 @@ impl Store {
                 .push_bind(" AND b.is_done = ", false)
                 .push(" AND b.due_at IS NOT NULL")
                 .push(&scope.same_organization(&[("ca", "b")]));
-            if scope.fetch_optional(still_due).await?.is_none() {
+            if !scope.exists(still_due).await? {
                 return Ok(false);
             }
 

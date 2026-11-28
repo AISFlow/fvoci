@@ -1,34 +1,34 @@
-//! The tools that write: each makes the request body of the route it stands for and
-//! hands it to what the route does with it, so that what is checked of a change, who is
-//! told of it and how it is kept (the version before an agent's, the agent's own, a body
-//! added to while people type) are the route's.
+//! The tools that write: each makes the request of the route it stands for, typed as
+//! the route reads it, and hands it to what the route does with it, so that what is
+//! checked of a change, who is told of it and how it is kept (the version before an
+//! agent's, the agent's own, a body added to while people type) are the route's.
 
-use axum::body::Bytes;
 use fvoci_model::{
-    ApiTokenScope, BlockError, Body, BodyChange, CardPatch, ContainerKinds, PagePatch, Unit,
-    UnitKind, UnitPatch,
+    ApiTokenScope, BlockError, Body, BodyChange, Card, CardBatchPatch, CardPatch, CompactCard,
+    ContainerKinds, LastPositionChange, NewPage, NewUnit, PagePatch, Unit, UnitKind, UnitPatch,
+    UnitProgressUpdate,
 };
-use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use super::arguments::{
     ItemKind, OutlineEntry, PageOrUnit, PostCommentArguments, ProgressArguments, SaveCardArguments,
-    SavePageOrUnitArguments,
+    SaveCardsArguments, SavePageOrUnitArguments,
 };
 use super::reads::{card_in_markdown, listed_comment, page_in_markdown, to_json, unit_in_markdown};
 use super::tools::{Partly, ToolError, enter};
 use crate::api::access::require_container_permission;
-use crate::api::card_comments::{CardCommentParent, NewCardComment};
+use crate::api::board_ops::batch_patch_cards_with;
 use crate::api::card_markdown::append_to_card;
-use crate::api::cards::{card_with_permission, create_card_from, patch_card_from};
-use crate::api::comments::{CommentParentKind, CommenterOf, create_comment_on};
-use crate::api::courses::{create_unit_from, patch_unit_from, unit_with_permission};
-use crate::api::page_comments::{NewPageComment, PageCommentParent};
-use crate::api::unit_comments::{NewUnitComment, UnitCommentParent};
-use crate::api::unit_progress::{ProgressToRecord, progress_to_record, record_progress};
-use crate::api::wikis::{create_page_from, page_with_permission, patch_page_from};
+use crate::api::cards::{card_with_permission, create_card_with, patch_card_with};
+use crate::api::comments::{CommentParentKind, CommenterOf};
+use crate::api::courses::{create_unit_with, patch_unit_with, unit_with_permission};
+use crate::api::items::{CardItem, ItemPath, PageItem, UnitItem};
+use crate::api::unit_progress::{ProgressToRecord, progress_update_to_record, record_progress};
+use crate::api::wikis::{create_page_with, page_with_permission, patch_page_with};
 use crate::api::workspace::InWorkspace;
-use crate::app::{App, Caller, ChangeNotification, body_of_markdown, comment_text_of_markdown};
+use crate::app::{
+    App, Caller, ChangeNotification, NewCardRequest, body_of_markdown, comment_text_of_markdown,
+};
 use crate::error::AppError;
 use crate::permissions::ContainerPermission;
 
@@ -39,23 +39,6 @@ const CHANGE_DENIED: &str = "access denied to change it";
 /// change of nothing.
 const READ_AT_ALONE: &str = "readAt is checked of what is written whole (the title, the \
      body and the like); appendMarkdown keeps what changed since and takes none";
-
-/// `value` as a request body.
-fn request_body(value: &impl Serialize) -> Result<Bytes, AppError> {
-    serde_json::to_vec(value)
-        .map(Bytes::from)
-        .map_err(|error| AppError::internal(format_args!("a request body as JSON: {error}")))
-}
-
-/// The members of a request body, those of `members` that are there.
-fn members<const N: usize>(members: [(&str, Option<Value>); N]) -> Value {
-    Value::Object(
-        members
-            .into_iter()
-            .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value)))
-            .collect::<Map<_, _>>(),
-    )
-}
 
 /// Refuses the arguments that write a body two ways at once.
 fn one_body(
@@ -149,6 +132,7 @@ pub(super) async fn save_card(
         || arguments.parent_id.is_some()
         || arguments.properties.is_some()
         || arguments.deleted_properties.is_some()
+        || arguments.recurrence.is_some()
         || arguments.body_markdown.is_some();
     if arguments.read_at.is_some() && !writes_whole {
         return Err(ToolError::arguments(READ_AT_ALONE));
@@ -168,6 +152,33 @@ pub(super) async fn save_card(
             "boardId makes a card and cardId changes one: send one of them",
         )),
     }
+}
+
+pub(super) async fn save_cards(
+    app: &App,
+    caller: &Caller,
+    arguments: SaveCardsArguments,
+) -> Result<Value, ToolError> {
+    let ws = enter(
+        app,
+        caller,
+        &arguments.workspace_id,
+        ApiTokenScope::Write,
+        ContainerKinds::BOARDS,
+    )
+    .await?;
+    let batch = CardBatchPatch {
+        card_ids: arguments.card_ids,
+        updated_properties: arguments.properties.unwrap_or_default(),
+        deleted_properties: arguments.deleted_properties.unwrap_or_default(),
+    };
+    let cards: Vec<CompactCard> =
+        batch_patch_cards_with(&ws, &arguments.board_id, &batch, ChangeNotification::Send)
+            .await?
+            .into_iter()
+            .map(CompactCard::from)
+            .collect();
+    Ok(json!({ "cards": cards }))
 }
 
 /// Makes a card on the board `board_id`. Its body, if it has one, is checked before the
@@ -197,14 +208,19 @@ async fn new_card(
         .await?;
         body_checked(ws, board_id, None, markdown).await?;
     }
-    let new = members([
-        ("title", arguments.title.map(Value::String)),
-        ("icon", arguments.icon.map(Value::String)),
-        ("parentId", arguments.parent_id.map(Value::String)),
-        ("properties", arguments.properties.map(Value::Object)),
-    ]);
-    let card =
-        create_card_from(ws, board_id, &request_body(&new)?, ChangeNotification::Send).await?;
+    let card = Card {
+        title: arguments.title.unwrap_or_default(),
+        icon: arguments.icon.unwrap_or_default(),
+        parent_id: arguments.parent_id.unwrap_or_default(),
+        properties: arguments.properties.unwrap_or_default(),
+        recurrence: arguments.recurrence.flatten(),
+        ..Card::default()
+    };
+    let request = NewCardRequest {
+        card,
+        document: BodyChange::Keep,
+    };
+    let card = create_card_with(ws, board_id, request, ChangeNotification::Send).await?;
     let done = Done::made(&card.id);
     if let Some(markdown) = body_markdown {
         let patch = CardPatch {
@@ -212,8 +228,7 @@ async fn new_card(
             read_at: Some(card.updated_at),
             ..CardPatch::default()
         };
-        let body = request_body(&patch).map_err(|error| done.told(error))?;
-        patch_card_from(ws, &card.id, &body, ChangeNotification::Send)
+        patch_card_with(ws, &card.id, patch, ChangeNotification::Send)
             .await
             .map_err(|error| done.told(error))?;
     }
@@ -252,11 +267,11 @@ async fn change_card(
         body: BodyChange::Keep,
         read_at: arguments.read_at,
         body_markdown: arguments.body_markdown,
+        recurrence: arguments.recurrence,
     };
     let mut done = Done::changing(card_id);
     if patch != CardPatch::default() {
-        let body = request_body(&patch)?;
-        patch_card_from(ws, card_id, &body, ChangeNotification::Send).await?;
+        patch_card_with(ws, card_id, patch, ChangeNotification::Send).await?;
         done.wrote();
     } else if arguments.append_markdown.is_none() {
         return Err(ToolError::arguments("there is nothing to change"));
@@ -357,15 +372,15 @@ async fn progress_checked(
     let Some(progress) = progress else {
         return Ok(None);
     };
-    let update = members([
-        ("completed", progress.completed.map(Value::Bool)),
-        (
-            "lastPosition",
-            progress.last_position.clone().map(Value::String),
-        ),
-    ]);
+    let update = UnitProgressUpdate {
+        completed: progress.completed,
+        last_position: progress
+            .last_position
+            .clone()
+            .map_or(LastPositionChange::Keep, LastPositionChange::Set),
+    };
     Ok(Some(
-        progress_to_record(ws, course_id, &request_body(&update)?).await?,
+        progress_update_to_record(ws, course_id, &update).await?,
     ))
 }
 
@@ -436,13 +451,13 @@ async fn save_page(
     .await?;
     let (mut done, patch) = match current {
         None => {
-            let new = members([
-                ("title", arguments.title.map(Value::String)),
-                ("icon", arguments.icon.map(Value::String)),
-                ("parentId", arguments.parent_id.map(Value::String)),
-                ("after", arguments.after.map(Value::String)),
-            ]);
-            let page = create_page_from(&ws, wiki_id, &request_body(&new)?).await?;
+            let new = NewPage {
+                title: arguments.title.unwrap_or_default(),
+                icon: arguments.icon.unwrap_or_default(),
+                parent_id: arguments.parent_id.unwrap_or_default(),
+                after: arguments.after,
+            };
+            let page = create_page_with(&ws, wiki_id, &new).await?;
             let patch = PagePatch {
                 read_at: Some(page.updated_at),
                 body: writes.whole,
@@ -461,8 +476,7 @@ async fn save_page(
         }
     };
     if !patch.body.is_keep() || (!is_new && fields) {
-        let body = request_body(&patch).map_err(|error| done.told(error))?;
-        patch_page_from(&ws, wiki_id, &done.id, &body)
+        patch_page_with(&ws, wiki_id, &done.id, patch)
             .await
             .map_err(|error| done.told(error))?;
         done.wrote();
@@ -553,7 +567,7 @@ async fn save_unit(
         .await
         .map_err(|error| done.told(error))?;
     if let Some(progress) = &progress {
-        let recorded = record_progress(&ws, course_id, &done.id, progress)
+        let recorded = record_progress(&ws, &done.id, progress)
             .await
             .map_err(|error| done.told(error))?;
         if let Value::Object(members) = &mut saved {
@@ -588,13 +602,14 @@ async fn unit_written(
     let is_new = current.is_none();
     let (mut done, patch) = match current {
         None => {
-            let new = members([
-                ("kind", Some(Value::String(kind_name(kind).to_owned()))),
-                ("title", entry.title.map(Value::String)),
-                ("parentId", entry.parent_id.map(Value::String)),
-                ("after", entry.after.map(Value::String)),
-            ]);
-            let unit = create_unit_from(ws, course_id, &request_body(&new)?).await?;
+            let new = NewUnit {
+                kind,
+                title: entry.title.unwrap_or_default(),
+                parent_id: entry.parent_id.unwrap_or_default(),
+                after: entry.after,
+                ..NewUnit::default()
+            };
+            let unit = create_unit_with(ws, course_id, &new).await?;
             let patch = UnitPatch {
                 read_at: Some(unit.updated_at),
                 body: writes.whole,
@@ -613,8 +628,7 @@ async fn unit_written(
         }
     };
     if !patch.body.is_keep() || (!is_new && patch.title.is_some()) {
-        let body = request_body(&patch).map_err(|error| done.told(error))?;
-        patch_unit_from(ws, course_id, &done.id, &body)
+        patch_unit_with(ws, course_id, &done.id, patch)
             .await
             .map_err(|error| done.told(error))?;
         done.wrote();
@@ -649,21 +663,12 @@ fn kind_asked(asked: Option<OutlineEntry>) -> UnitKind {
     }
 }
 
-/// The word `createUnit` takes for a unit of `kind`.
-fn kind_name(kind: UnitKind) -> &'static str {
-    match kind {
-        UnitKind::Chapter => OutlineEntry::Chapter.as_str(),
-        UnitKind::Unit => OutlineEntry::Unit.as_str(),
-    }
-}
-
 pub(super) async fn post_comment(
     app: &App,
     caller: &Caller,
     arguments: PostCommentArguments,
 ) -> Result<Value, ToolError> {
     let text = comment_text_of_markdown(&arguments.markdown, "markdown")?;
-    let body = request_body(&json!({ "body": text }))?;
     let PostCommentArguments {
         workspace_id,
         kind,
@@ -679,65 +684,36 @@ pub(super) async fn post_comment(
         ContainerKinds::EVERY,
     )
     .await?;
+    let item = ItemPath::named(&container_id, &item_id);
     match kind {
-        ItemKind::Card => {
-            comment_on::<CardCommentParent, NewCardComment>(
-                ws,
-                container_id,
-                &item_id,
-                "card",
-                &body,
-            )
-            .await
-        }
-        ItemKind::Page => {
-            comment_on::<PageCommentParent, NewPageComment>(
-                ws,
-                container_id,
-                &item_id,
-                "page",
-                &body,
-            )
-            .await
-        }
-        ItemKind::Unit => {
-            comment_on::<UnitCommentParent, NewUnitComment>(
-                ws,
-                container_id,
-                &item_id,
-                "unit",
-                &body,
-            )
-            .await
-        }
+        ItemKind::Card => comment_on::<CardItem>(ws, item, text).await,
+        ItemKind::Page => comment_on::<PageItem>(ws, item, text).await,
+        ItemKind::Unit => comment_on::<UnitItem>(ws, item, text).await,
     }
 }
 
-/// Writes the comment `body` on the item `parent_id` of `container_id`, as the route
-/// that comments on a `K` does, and answers with it as `list_comments` lists it.
-async fn comment_on<K, T>(
+/// Writes the comment saying `text` on the item `item` names, as the route that comments
+/// on a `K` does, and answers with it as `list_comments` lists it.
+async fn comment_on<K: CommentParentKind>(
     ws: InWorkspace,
-    container_id: String,
-    parent_id: &str,
-    parent_what: &'static str,
-    body: &Bytes,
-) -> Result<Value, ToolError>
-where
-    K: CommentParentKind,
-    T: serde::de::DeserializeOwned,
-{
-    let commenter = CommenterOf::<K>::admit(ws, container_id, parent_id, None).await?;
-    let comment = create_comment_on::<T>(
-        &commenter.ws,
-        &commenter.container_id,
-        commenter.parent,
-        parent_what,
-        body,
-        ChangeNotification::Send,
-    )
-    .await?;
+    item: ItemPath,
+    text: Body,
+) -> Result<Value, ToolError> {
+    let commenter = CommenterOf::<K>::admit(ws, item).await?;
+    let asked = (K::WHAT, K::CREATE_DENIED);
+    let comment = commenter
+        .ws
+        .app
+        .create_comment(
+            &commenter.on,
+            &commenter.parent,
+            text,
+            asked,
+            ChangeNotification::Send,
+        )
+        .await?;
     let done = Done::made(&comment.id);
-    let listed = listed_comment(&commenter.ws, &commenter.container_id, comment)
+    let listed = listed_comment(&commenter.ws, commenter.on.container_id(), comment)
         .await
         .map_err(|error| done.told(error))?;
     to_json(&listed).map_err(|error| done.told(error))
@@ -746,15 +722,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_request_body_has_the_members_that_are_there() {
-        let body = members([
-            ("title", Some(Value::String("A".to_owned()))),
-            ("icon", None),
-        ]);
-        assert_eq!(body, json!({ "title": "A" }));
-    }
 
     #[test]
     fn a_refusal_after_a_write_names_what_was_written() {
